@@ -64,7 +64,7 @@ namespace CodexUserData
             var chooseDatabase=new MenuItem{Header="选择 CC Switch 数据库…"};chooseDatabase.Click+=delegate{var picker=new Microsoft.Win32.OpenFileDialog{Filter="SQLite 数据库|*.db|所有文件|*.*",FileName=prefs.Database};if(picker.ShowDialog(this)==true){prefs.Database=picker.FileName;prefs.Source="ccswitch";source.Select(prefs.Source);UpdateSource();SelectionChanged();}};context.Items.Add(chooseDatabase);
             var help=new MenuItem{Header="统计口径与使用说明"};help.Click+=delegate{MessageBox.Show(this,"CC Switch：按数据库记录归一化并去重。\n本地 Codex：读取本机日志，Tokens = 输入（含缓存）+ 输出；推理已含在输出。\n两个来源不相加。API 等效价值按模型、未缓存输入、缓存、输出分别计价，是标准短上下文基准估算，不是订阅实际扣费。\n\n设置中可调透明度、刷新时间、指标和路径。四边与四角都可拖动缩放。\n完整说明位于程序目录的 README.md。", "统计口径",MessageBoxButton.OK,MessageBoxImage.Information);};context.Items.Add(help);
             minimizeItem=new MenuItem{Header="最小化到任务栏"};minimizeItem.Click+=delegate{MinimizeWindow();};context.Items.Add(minimizeItem);
-            var quit=new MenuItem{Header="退出软件"};quit.Click+=delegate{Close();};context.Items.Add(quit);shell.ContextMenu=context;
+            var quit=new MenuItem{Header="退出软件"};quit.Click+=delegate{WindowInteraction.Close(this);};context.Items.Add(quit);shell.ContextMenu=context;
             var grid=new Grid();shell.Child=grid;
             foreach(var height in new[]{GridLength.Auto,GridLength.Auto,new GridLength(1,GridUnitType.Star),GridLength.Auto})grid.RowDefinitions.Add(new RowDefinition{Height=height});
             var header=new DockPanel{Margin=new Thickness(0,0,0,5),Background=Brushes.Transparent};grid.Children.Add(header);
@@ -75,12 +75,17 @@ namespace CodexUserData
             fold=Theme.ToolbarButton("collapse","折叠 / 展开");fold.Click+=delegate{ToggleCollapsed();};buttons.Children.Add(fold);
             var floating=Theme.ToolbarButton("bubble","切换为悬浮球");floating.Click+=delegate{OpenBall();};buttons.Children.Add(floating);
             minimize=Theme.ToolbarButton("minimize","最小化到任务栏");minimize.Click+=delegate{MinimizeWindow();};buttons.Children.Add(minimize);
-            var close=Theme.ToolbarButton("close","退出软件");close.Click+=delegate{Close();};buttons.Children.Add(close);
+            var close=Theme.ToolbarButton("close","退出软件");close.Click+=delegate{WindowInteraction.Close(this);};buttons.Children.Add(close);
             brand=Theme.Text("●  CodexUserData",11,Theme.Ink);brand.FontWeight=FontWeights.SemiBold;brand.ToolTip="拖动这里移动窗口";header.Children.Add(brand);
             WindowInteraction.Header(this,header,ToggleCollapsed,()=>{ClampToMonitor();Persist();});
             WindowInteraction.Attach(this,()=>{if(!prefs.Collapsed)expandedRestoreHeight=Math.Max(480,Height);ClampToMonitor();Persist();},()=>{if(!prefs.Collapsed)expandedRestoreHeight=Math.Max(480,Height);});
+            SourceInitialized+=delegate
+            {
+                var hwndSource=HwndSource.FromHwnd(new WindowInteropHelper(this).Handle);hwndSource.AddHook(delegate(IntPtr hwnd,int message,IntPtr wParam,IntPtr lParam,ref bool handled)
+                {if(message!=Program.ShowMainMessage)return IntPtr.Zero;handled=true;Dispatcher.BeginInvoke(new Action(RestoreWindow));return IntPtr.Zero;});
+            };
             var filters=new Grid{Margin=new Thickness(0,0,0,9)};filters.ColumnDefinitions.Add(new ColumnDefinition{Width=new GridLength(1,GridUnitType.Star)});filters.ColumnDefinitions.Add(new ColumnDefinition{Width=new GridLength(1,GridUnitType.Star)});var filtersAndQuota=new StackPanel();Grid.SetRow(filtersAndQuota,1);grid.Children.Add(filtersAndQuota);filtersAndQuota.Children.Add(filters);
-            quota=new QuotaStatus(()=>prefs,()=>{if(!IsVisible||WindowState==WindowState.Minimized)RestoreWindow();else Hide();},()=>Close(),preview,()=>{RestoreWindow();RefreshData();},()=>{RestoreWindow();OpenHistory();});filtersAndQuota.Children.Add(quota);quota.Changed+=UpdateBall;
+            quota=new QuotaStatus(()=>prefs,()=>{if(!IsVisible||WindowState==WindowState.Minimized)RestoreWindow();else WindowInteraction.Hide(this);},()=>WindowInteraction.Close(this),preview,()=>{RestoreWindow();RefreshData();},()=>{RestoreWindow();OpenHistory();});filtersAndQuota.Children.Add(quota);quota.Changed+=UpdateBall;
             source=new ChoiceButton(new Dictionary<string,string>{{"ccswitch","CC Switch"},{"local","本地 Codex"}},"数据来源");source.Select(prefs.Source);filters.Children.Add(source);
             app=new ChoiceButton(new Dictionary<string,string>{{"","全部应用"},{"claude","Claude"},{"codex","Codex"},{"gemini","Gemini"},{"opencode","OpenCode"},{"grokbuild","Grok"},{"hermes","Hermes"},{"pi","Pi"}},"应用筛选");app.Select(prefs.App);app.Margin=new Thickness(7,0,0,0);Grid.SetColumn(app,1);filters.Children.Add(app);
             source.Changed+=delegate(string v){prefs.Source=v;UpdateSource();SelectionChanged();};app.Changed+=delegate(string v){prefs.App=v;SelectionChanged();};
@@ -109,7 +114,6 @@ namespace CodexUserData
             Closing+=delegate{closed=true;timer.Stop();if(activity!=null)activity.Dispose();if(ball!=null)ball.Dispose();quota.Dispose();Persist();if(historyWindow!=null)historyWindow.Close();};
             BuildCards();UpdateButtons();UpdateSource();Reflow();
         }
-        private static bool IsInsideButton(DependencyObject obj){while(obj!=null){if(obj is ButtonBase)return true;obj=VisualTreeHelper.GetParent(obj);}return false;}
         private void BuildCards()
         {
             cards.Children.Clear();values.Clear();labels.Clear();heroKey=prefs.Metrics.Contains("tokens")?"tokens":prefs.Metrics[0];
@@ -168,7 +172,7 @@ namespace CodexUserData
                 bool newAccount=prefs.CodexHome!=settings.Result.CodexHome||prefs.QuotaCli!=settings.Result.QuotaCli;prefs=settings.Result;Program.Save(prefs);if(prefs.StartWithCodex)CodexLaunchWatcher.Ensure();quota.Configure(newAccount);EnsureActivity();Opacity=prefs.Opacity;source.Select(prefs.Source);app.Select(prefs.App);timer.Interval=TimeSpan.FromSeconds(prefs.RefreshSeconds);history.Configure(prefs.ShowHeatmap,prefs.ShowTrend,prefs.TrendDays);UpdateSource();BuildCards();UpdateButtons();SelectionChanged();
             }
             else Opacity=original;
-            Theme.Apply(prefs);
+            Theme.Apply(prefs);quota.ApplyTheme();
         }
         private string Scope(){return prefs.Source=="local"?"本地 Codex": "CC Switch · "+(String.IsNullOrEmpty(prefs.App)?"全部应用":prefs.App);}
         private void SetTrendRange(int value){prefs.TrendDays=value;history.SetRange(value);if(largeHistory!=null)largeHistory.SetRange(value);Persist();}
@@ -178,8 +182,8 @@ namespace CodexUserData
             if(prefs.MinimizeToTray)
             {
                 // Keep scanners/quota timers running; hide owned charts too, preserving their selection.
-                if(historyWindow!=null&&historyWindow.IsVisible){restoreHistoryAfterMinimize=true;historyWindow.Hide();}
-                ShowInTaskbar=false;Hide();
+                if(historyWindow!=null&&historyWindow.IsVisible){restoreHistoryAfterMinimize=true;WindowInteraction.Hide(historyWindow);}
+                ShowInTaskbar=false;WindowInteraction.Hide(this);
             }
             else WindowState=WindowState.Minimized;
         }
@@ -190,7 +194,7 @@ namespace CodexUserData
         }
         private void RestoreWindow()
         {
-            bool fromBall=prefs.BallMode;prefs.BallMode=false;if(ball!=null)ball.Hide();
+            bool fromBall=prefs.BallMode;prefs.BallMode=false;if(ball!=null)WindowInteraction.Hide(ball);
             ShowInTaskbar=true;Show();WindowState=WindowState.Normal;RestoreHistory();
             if(fromBall){changingLayout=true;prefs.Collapsed=false;Height=Math.Max(480,expandedRestoreHeight);UpdateButtons();changingLayout=false;}
             Activate();if(snapshot!=null)ApplySnapshot(snapshot);Persist();
@@ -198,8 +202,8 @@ namespace CodexUserData
         private void OpenBall()
         {
             if(preview)return;Persist();prefs.BallMode=true;
-            if(ball==null){ball=new FloatingBall(()=>prefs,Persist,RestoreWindow,()=>Close());ball.PreviewMouseMove+=delegate{quota.AcknowledgeCompletion();};ball.SettingsRequested=()=>{RestoreWindow();OpenSettings();};if(Double.IsNaN(prefs.BallLeft)){ball.Left=Left+20;ball.Top=Top+20;}}
-            UpdateBall();if(historyWindow!=null)historyWindow.Close();ball.Show();Hide();Persist();
+            if(ball==null){ball=new FloatingBall(()=>prefs,Persist,RestoreWindow,()=>WindowInteraction.Close(this));ball.PreviewMouseMove+=delegate{quota.AcknowledgeCompletion();};ball.SettingsRequested=()=>{RestoreWindow();OpenSettings();};if(Double.IsNaN(prefs.BallLeft)){ball.Left=Left+20;ball.Top=Top+20;}}
+            UpdateBall();if(historyWindow!=null)WindowInteraction.Close(historyWindow);ball.Show();WindowInteraction.Hide(this);Persist();
         }
         private void UpdateBall()
         {

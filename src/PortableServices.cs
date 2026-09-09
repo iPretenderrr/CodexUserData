@@ -56,14 +56,6 @@ namespace CodexUserData
     internal static class StartupRegistration
     {
         private const string Key=@"Software\Microsoft\Windows\CurrentVersion\Run";
-        internal static void Apply(bool enabled,string executable)
-        {
-            // HKCU only; no elevation, scheduled task, or global startup entry.
-            using(var key=Registry.CurrentUser.CreateSubKey(Key))
-            {
-                ApplyValue(key,enabled,executable);
-            }
-        }
         internal static void Configure(Preferences p,string executable)
         {
             using(var key=Registry.CurrentUser.CreateSubKey(Key))ConfigureValue(key,p.StartWithWindows,p.StartWithCodex,executable);

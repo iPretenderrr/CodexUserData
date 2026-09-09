@@ -68,8 +68,9 @@ namespace CodexUserData
             draft=current.Clone();OrbPalette.Normalize(draft);Title="圆环配色";Width=440;Height=760;MinWidth=360;MinHeight=460;MaxHeight=SystemParameters.WorkArea.Height;ShowInTaskbar=false;WindowStartupLocation=WindowStartupLocation.CenterOwner;Theme.InstallStyles(this);
             var outer=new DockPanel{Margin=new Thickness(22,8,22,16)};SetBody(outer,"圆环配色","ORBIT COLORS",true);
             var actions=new StackPanel{Orientation=Orientation.Horizontal,HorizontalAlignment=HorizontalAlignment.Right,Margin=new Thickness(0,12,0,0)};DockPanel.SetDock(actions,Dock.Bottom);outer.Children.Add(actions);
-            var cancel=Theme.Button("取消","取消配色修改",76);cancel.Margin=new Thickness(4);cancel.Click+=delegate{DialogResult=false;};actions.Children.Add(cancel);
-            var save=Theme.Button("保存配色","保存圆环配色",100);save.Margin=new Thickness(4);save.Click+=delegate{if(!IsValid){validation.Text="请检查颜色格式，使用 #RRGGBB。";return;}Result=draft;DialogResult=true;};actions.Children.Add(save);
+            var cancel=Theme.Button("取消","取消配色修改",76);cancel.Margin=new Thickness(4);cancel.Click+=delegate{WindowInteraction.CompleteDialog(this,false);};actions.Children.Add(cancel);
+            var save=Theme.Button("保存配色","保存圆环配色",100);save.Margin=new Thickness(4);save.Click+=delegate{if(!IsValid){validation.Text="请检查颜色格式，使用 #RRGGBB。";return;}Result=draft;WindowInteraction.CompleteDialog(this,true);};actions.Children.Add(save);
+            PreviewKeyDown+=delegate(object sender,System.Windows.Input.KeyEventArgs args){if(args.Key==System.Windows.Input.Key.Escape){args.Handled=true;WindowInteraction.CompleteDialog(this,false);}};
             var body=new StackPanel();outer.Children.Add(new ScrollViewer{Content=body,VerticalScrollBarVisibility=ScrollBarVisibility.Auto,HorizontalScrollBarVisibility=ScrollBarVisibility.Disabled});
             var preview=new StackPanel{HorizontalAlignment=HorizontalAlignment.Center};preview.Children.Add(example);preview.Children.Add(Theme.Text("演示额度 · 悬停体验动画",11,Theme.Muted));body.Children.Add(preview);
             long now=LocalCodexUsage.Unix(DateTime.Now);demo=new QuotaBucket{ObservedAt=now,Primary=new QuotaWindow{Minutes=300,UsedPercent=18,ResetsAt=now+86400},Secondary=new QuotaWindow{Minutes=10080,UsedPercent=34,ResetsAt=now+86400}};

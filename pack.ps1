@@ -1,4 +1,4 @@
-﻿param([string]$Version='1.6.2')
+param([string]$Version='1.6.6')
 $ErrorActionPreference='Stop'
 if($Version -notmatch '^\d+\.\d+\.\d+$'){throw 'Version must be major.minor.patch'}
 $root=[IO.Path]::GetFullPath($PSScriptRoot)
@@ -27,7 +27,7 @@ foreach($name in @('Microsoft.Web.WebView2.Core.dll','Microsoft.Web.WebView2.Wpf
 $binary=Join-Path $protected 'CodexUserData.exe';$map=Join-Path $protected 'Mapping.txt'
 if(-not(Test-Path -LiteralPath $binary) -or -not(Test-Path -LiteralPath $map)){throw 'Obfuscation output missing'}
 if((Get-FileHash -LiteralPath $binary).Hash -eq (Get-FileHash -LiteralPath (Join-Path $inputDir 'CodexUserData.exe')).Hash){throw 'Obfuscator did not transform the binary'}
-$refs=@('WPF/PresentationCore.dll','WPF/PresentationFramework.dll','WPF/WindowsBase.dll','System.Xaml.dll','System.Web.Extensions.dll') | ForEach-Object {'/r:'+(Join-Path $framework $_)}
+$refs=@('WPF/PresentationCore.dll','WPF/PresentationFramework.dll','WPF/WindowsBase.dll','System.Xaml.dll','System.Web.Extensions.dll','System.Drawing.dll') | ForEach-Object {'/r:'+(Join-Path $framework $_)}
 $probe=Join-Path $run 'ReleaseProbe.exe'
 & (Join-Path $framework 'csc.exe') /nologo /target:exe /platform:x64 ('/out:'+$probe) @refs (Join-Path $root 'tools\ReleaseProbe.cs')
 if($LASTEXITCODE -ne 0){throw 'Release verifier compilation failed'}

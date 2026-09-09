@@ -38,9 +38,10 @@ namespace CodexUserData
             var footer=new StackPanel{Margin=new Thickness(0,10,0,0)};DockPanel.SetDock(footer,Dock.Bottom);root.Children.Add(footer);
             error.TextWrapping=TextWrapping.Wrap;footer.Children.Add(error);
             var actions=new StackPanel{Orientation=Orientation.Horizontal,HorizontalAlignment=HorizontalAlignment.Right};footer.Children.Add(actions);
-            var cancel=Theme.Button("取消","取消价格编辑",72);cancel.IsCancel=true;cancel.Click+=delegate{DialogResult=false;};actions.Children.Add(cancel);
+            var cancel=Theme.Button("取消","取消价格编辑",72);cancel.Click+=delegate{WindowInteraction.CompleteDialog(this,false);};actions.Children.Add(cancel);
             var save=Theme.Button("应用到设置","应用模型价格",108);save.Background=Theme.Hover;save.Foreground=Theme.Accent;save.Click+=delegate{Save();};actions.Children.Add(save);
             var scroll=new ScrollViewer{Content=list,VerticalScrollBarVisibility=ScrollBarVisibility.Auto,HorizontalScrollBarVisibility=ScrollBarVisibility.Disabled};root.Children.Add(scroll);
+            PreviewKeyDown+=delegate(object sender,System.Windows.Input.KeyEventArgs args){if(args.Key==System.Windows.Input.Key.Escape){args.Handled=true;WindowInteraction.CompleteDialog(this,false);}};
             AddModels(draft.KnownModels.Concat(draft.PriceOverrides.Keys).Concat(ApiPrices.DefaultModels));
             Loaded+=delegate{LoadModels();};Closed+=delegate{closed=true;};
         }
@@ -105,7 +106,7 @@ namespace CodexUserData
                 var rates=new decimal[4];for(int i=0;i<4;i++)if(!Parse(row.Inputs[i].Text,out rates[i])){error.Text=row.Model+"：请输入 0–1000000 的价格，或留空；小数点使用 .";search.Text="";row.Inputs[i].BringIntoView();row.Inputs[i].Focus();return;}
                 if(row.Custom)result[row.Model]=rates;
             }
-            Result=result;KnownModels=rows.Keys.ToArray();DialogResult=true;
+            Result=result;KnownModels=rows.Keys.ToArray();WindowInteraction.CompleteDialog(this,true);
         }
     }
 }

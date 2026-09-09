@@ -34,6 +34,11 @@ internal static class ReleaseProbe
   var m=Regex.Match(map,@"CodexUserData\."+Regex.Escape(type)+"::"+Regex.Escape(key)+@" -> ([^\r\n]+)");
   return (T)instance.GetType().GetFields(BindingFlags.Instance|BindingFlags.Public|BindingFlags.NonPublic).Single(f=>f.Name==m.Groups[1].Value.Trim()&&f.FieldType==typeof(T)).GetValue(instance);
  }
+ static void SetInternal<T>(string type,object instance,string key,T value)
+ {
+  var m=Regex.Match(map,@"CodexUserData\."+Regex.Escape(type)+"::"+Regex.Escape(key)+@" -> ([^\r\n]+)");
+  instance.GetType().GetFields(BindingFlags.Instance|BindingFlags.Public|BindingFlags.NonPublic).Single(f=>f.Name==m.Groups[1].Value.Trim()&&f.FieldType==typeof(T)).SetValue(instance,value);
+ }
  static void ActivityRegression(string dir,JavaScriptSerializer json)
  {
   string home=Path.Combine(dir,"activity150"),logs=Path.Combine(home,"sessions");Directory.CreateDirectory(logs);string file=Path.Combine(logs,"rollout-large.jsonl");var start=DateTime.UtcNow;
@@ -53,6 +58,12 @@ internal static class ReleaseProbe
  }
  static void Set(object o,string key,object value){o.GetType().GetProperty(key).SetValue(o,value,null);}
  static void Check(bool ok,string message){if(!ok)throw new Exception(message);checks++;Console.WriteLine("PASS "+message);}
+ static FrameworkElement FindAutomation(DependencyObject root,string id)
+ {
+  var pending=new Queue<DependencyObject>();pending.Enqueue(root);
+  while(pending.Count>0){var node=pending.Dequeue();var element=node as FrameworkElement;if(element!=null&&System.Windows.Automation.AutomationProperties.GetAutomationId(element)==id)return element;for(int i=0;i<VisualTreeHelper.GetChildrenCount(node);i++)pending.Enqueue(VisualTreeHelper.GetChild(node,i));}
+  return null;
+ }
  [StructLayout(LayoutKind.Sequential)] struct WindowRect {public int Left,Top,Right,Bottom;}
  [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr window,out WindowRect rect);
  [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr window,uint message,IntPtr w,IntPtr l);
@@ -72,6 +83,24 @@ internal static class ReleaseProbe
   foreach(var p in new[]{new[]{r.Left+inset,midY,10},new[]{r.Right-inset,midY,11},new[]{midX,r.Top+inset,12},new[]{midX,r.Bottom-inset,15},new[]{r.Left+inset,r.Top+inset,13},new[]{r.Right-inset,r.Top+inset,14},new[]{r.Left+inset,r.Bottom-inset,16},new[]{r.Right-inset,r.Bottom-inset,17}})
   {int packed=(p[0]&0xffff)|((p[1]&0xffff)<<16);if(SendMessage(hwnd,0x84,IntPtr.Zero,new IntPtr(packed)).ToInt32()!=p[2])return false;}return true;
  }
+ static byte[] CapsuleFrame(Window ball,FrameworkElement chrome,double phase,double breath,string path)
+ {
+  // Snapshot the activity layer after opening, independent of the separate reveal animation.
+  var content=(FrameworkElement)ball.Content;content.BeginAnimation(UIElement.OpacityProperty,null);content.Opacity=1;content.RenderTransform=Transform.Identity;
+  foreach(var field in chrome.GetType().GetFields(BindingFlags.Static|BindingFlags.Public|BindingFlags.NonPublic))
+  {
+   var dp=field.GetValue(null) as DependencyProperty;if(dp==null)continue;
+   if(dp.Name=="Phase"||dp.Name=="Breath"){chrome.BeginAnimation(dp,null);chrome.SetValue(dp,dp.Name=="Phase"?phase:breath);}
+  }
+  chrome.UpdateLayout();var bitmap=new RenderTargetBitmap((int)ball.Width,(int)ball.Height,96,96,PixelFormats.Pbgra32);bitmap.Render((Visual)ball.Content);
+  var png=new PngBitmapEncoder();png.Frames.Add(BitmapFrame.Create(bitmap));using(var file=File.Create(path))png.Save(file);
+  var pixels=new byte[bitmap.PixelWidth*bitmap.PixelHeight*4];bitmap.CopyPixels(pixels,bitmap.PixelWidth*4,0);return pixels;
+ }
+ static bool InteriorChanged(byte[] a,byte[] b,int width,int height)
+ {
+  int changed=0,count=0;for(int y=8;y<height-8;y++)for(int x=12;x<width-12;x++){int n=(y*width+x)*4;count++;if(Math.Abs(a[n]-b[n])+Math.Abs(a[n+1]-b[n+1])+Math.Abs(a[n+2]-b[n+2])>24)changed++;}
+  return changed>count*.25;
+ }
  [STAThread] static int Main(string[] args)
  {
   try{
@@ -88,7 +117,8 @@ internal static class ReleaseProbe
    Check((long)Get(snapshot,"TotalTokens")==110&&(long)Get(snapshot,"Requests")==1,"actual obfuscated ledger deduplicates usage and preserves totals");
    Call("LocalCodexUsage",reader,"SaveCache",true);reader=New("LocalCodexUsage",home,cache,false);snapshot=Call("LocalCodexUsage",reader,"Read","today",DateTime.Now,null,null);
    Check((long)Get(snapshot,"TotalTokens")==110&&File.Exists(cache),"serialized cache remains readable by a new reader");
-   var reply=json.DeserializeObject("{\"rateLimits\":{\"primary\":{\"usedPercent\":7,\"windowDurationMins\":300,\"resetsAt\":9999999999}}}");var quotas=(IList)Call("QuotaReader",null,"ParseResult",reply,100L);Check(quotas.Count==1&&(double)Get(Get(quotas[0],"Primary"),"UsedPercent")==7,"quota JSON still parses with expected keys");
+   var reply=json.DeserializeObject("{\"rateLimits\":{\"primary\":{\"usedPercent\":7,\"windowDurationMins\":300,\"resetsAt\":9999999999}}}");var quotas=(IList)Call("QuotaReader",null,"ParseResult",reply,100L);var parsedWindow=Get(quotas[0],"Primary");Check(quotas.Count==1&&(double)Get(parsedWindow,"UsedPercent")==7,"quota JSON still parses with expected keys");
+   Check((double?)Call("QuotaWindow",parsedWindow,"RemainingPercent",quotas[0],100L)==93d&&(double?)Call("QuotaWindow",parsedWindow,"RemainingPercent",quotas[0],406L)==null&&(double?)Call("QuotaWindow",parsedWindow,"RemainingPercent",quotas[0],94L)==null,"quota freshness is consistent for valid, stale, and future snapshots");
    string dbPath=Path.Combine(dir,"fixture.db");IntPtr db,error;
    if(Open(Encoding.UTF8.GetBytes(dbPath+"\0"),out db,6,IntPtr.Zero)!=0)throw new Exception("SQLite fixture open failed");
    try{if(Exec(db,Encoding.UTF8.GetBytes("CREATE TABLE proxy_request_logs(model TEXT); CREATE TABLE usage_daily_rollups(model TEXT); INSERT INTO proxy_request_logs VALUES('fixture-model');\0"),IntPtr.Zero,IntPtr.Zero,out error)!=0)throw new Exception("SQLite fixture setup failed");}finally{CloseDb(db);}
@@ -118,22 +148,50 @@ internal static class ReleaseProbe
    var settingsWindow=(Window)New("SettingsWindow",prefs,null);Check(settingsWindow.Content!=null,"settings UI opens with compatible cloned preferences");
    var settingsFields=settingsWindow.GetType().GetFields(BindingFlags.Instance|BindingFlags.Public|BindingFlags.NonPublic);
    IDictionary settingsPages=(IDictionary)settingsFields.Single(f=>f.FieldType==typeof(Dictionary<string,ScrollViewer>)).GetValue(settingsWindow),settingsNavigation=(IDictionary)settingsFields.Single(f=>f.FieldType==typeof(Dictionary<string,Button>)).GetValue(settingsWindow);
-   bool categories=settingsPages.Count==5&&settingsNavigation.Count==5;
-   foreach(string key in new[]{"appearance","floating","display","data","behavior"})
+   bool categories=settingsPages.Count==6&&settingsNavigation.Count==6;
+   foreach(string key in new[]{"appearance","floating","display","data","behavior","about"})
    {
     Call("SettingsWindow",settingsWindow,"SelectPage",key);
     categories=categories&&settingsPages.Values.Cast<ScrollViewer>().Count(x=>x.Visibility==Visibility.Visible)==1&&settingsNavigation.Values.Cast<Button>().Count(x=>(string)x.Tag=="selected")==1;
    }
-   Check(categories,"settings are split into five switchable categories");
+   Check(categories,"settings are split into six switchable categories");
+   var settingsBody=(FrameworkElement)settingsWindow.Content;settingsBody.Measure(new Size(760,720));settingsBody.Arrange(new Rect(0,0,760,720));settingsBody.UpdateLayout();
+   var aboutVersion=FindAutomation((DependencyObject)settingsWindow.Content,"AboutVersion") as TextBlock;Check(aboutVersion!=null&&aboutVersion.Text=="v"+assembly.GetName().Version.ToString(3),"about page reports the protected assembly version");
    Set(prefs,"ThemeMode","custom");Set(prefs,"GradientColors",new[]{"#F7BBE3","#E6D7FA","#AAF1ED"});Set(prefs,"GradientStops",new[]{0d,48d,100d});Set(prefs,"GradientKind","radial");Set(prefs,"GradientSpan",65d);
    var themeClone=Call("Preferences",prefs,"Clone");Check((string)Get(themeClone,"ThemeMode")=="custom"&&((string[])Get(themeClone,"GradientColors")).Length==3&&(double)Get(themeClone,"GradientSpan")==65,"theme settings survive protected JSON roundtrip");
    Call("Theme",null,"Apply",prefs);body.UpdateLayout();bitmap.Render(body);Set(prefs,"ThemeMode","light");Call("Theme",null,"Apply",prefs);body.UpdateLayout();bitmap.Render(body);
    var themeSettings=(Window)New("SettingsWindow",themeClone,null);var themeBody=(FrameworkElement)themeSettings.Content;themeBody.Measure(new Size(760,720));themeBody.Arrange(new Rect(0,0,760,720));themeBody.UpdateLayout();
    Check(themeBody.ActualWidth==760,"protected theme editor renders and palettes switch after template sealing");
    var flyout=(Window)New("TrayFlyout",new Action(()=>{}),new Action(()=>{}),new Action(()=>{}));Check(flyout.Content!=null,"tray flyout constructs after string hiding");
+   var badge=(System.Drawing.Bitmap)Call("QuotaStatus",null,"CreateBadge","80",themeClone,false,0d);var pulseBadge=(System.Drawing.Bitmap)Call("QuotaStatus",null,"CreateBadge","80",themeClone,true,1d);
+   try
+   {
+    int minX=badge.Width,minY=badge.Height,maxX=-1,maxY=-1;bool pulseDiffers=false;
+    for(int y=0;y<badge.Height;y++)for(int x=0;x<badge.Width;x++){if(badge.GetPixel(x,y).A>16){minX=Math.Min(minX,x);minY=Math.Min(minY,y);maxX=Math.Max(maxX,x);maxY=Math.Max(maxY,y);}if(badge.GetPixel(x,y).ToArgb()!=pulseBadge.GetPixel(x,y).ToArgb())pulseDiffers=true;}
+    Check(badge.Width==64&&badge.Height==64&&minX<=1&&minY<=1&&maxX>=62&&maxY>=62,"tray badge fills its source canvas for a clearer Windows tray downsample");
+    Check(pulseDiffers,"running-task tray badge has a distinct breathing frame");
+   }
+   finally{badge.Dispose();pulseBadge.Dispose();}
    Check(ClearCorners(window,600,700)&&ClearCorners(settingsWindow,760,720)&&ClearCorners(flyout,370,610),"main and popup corners are fully transparent at 100/150/200 percent DPI");
-   Set(prefs,"BallDock","");Set(prefs,"BallStyle","capsule");var getPrefs=System.Linq.Expressions.Expression.Lambda(typeof(Func<>).MakeGenericType(TypeFor("Preferences")),System.Linq.Expressions.Expression.Constant(prefs)).Compile();
-   foreach(bool expanded in new[]{false,true}){Set(prefs,"BallExpanded",expanded);var ball=(Window)New("FloatingBall",getPrefs,new Action(()=>{}),new Action(()=>{}),new Action(()=>{}));Check(ClearCorners(ball,(int)ball.Width,(int)ball.Height),"floating ball corners are fully transparent: "+(expanded?"large":"small"));}
+   Set(prefs,"BallDock","");Set(prefs,"BallStyle","capsule");Set(prefs,"OrbAnimation","smooth");var getPrefs=System.Linq.Expressions.Expression.Lambda(typeof(Func<>).MakeGenericType(TypeFor("Preferences")),System.Linq.Expressions.Expression.Constant(prefs)).Compile();
+   var capsuleActivity=New("ActivityReport");SetInternal("ActivityReport",capsuleActivity,"ActiveTasks",1);SetInternal("ActivityReport",capsuleActivity,"Until",DateTimeOffset.Now.ToUnixTimeSeconds()+60);
+   foreach(bool expanded in new[]{false,true})
+   {
+    Set(prefs,"BallExpanded",expanded);var ball=(Window)New("FloatingBall",getPrefs,new Action(()=>{}),new Action(()=>{}),new Action(()=>{}));Check(ClearCorners(ball,(int)ball.Width,(int)ball.Height),"floating ball corners are fully transparent: "+(expanded?"large":"small"));
+    string form=expanded?"large":"small";var chrome=FindAutomation((DependencyObject)ball.Content,"CapsuleActivityChrome");Check(chrome!=null,"full-window activity chrome is shared by "+form+" form");
+    ball.Show();Call("FloatingBall",ball,"ApplyActivity",capsuleActivity);Check(chrome.HasAnimatedProperties,"running task animates the full capsule and continuous perimeter: "+form);
+    foreach(string theme in new[]{"dark","light"})
+    {
+     Set(prefs,"ThemeMode",theme);Call("Theme",null,"Apply",prefs);Call("FloatingBall",ball,"Apply",snapshot,quotas[0],"fixture","fixture");
+     string prefix=Path.Combine(dir,"capsule-"+form+"-"+theme);
+     var low=CapsuleFrame(ball,chrome,.45,0,prefix+"-low.png");var high=CapsuleFrame(ball,chrome,.45,1,prefix+"-high.png");var flow=CapsuleFrame(ball,chrome,.03,1,prefix+"-flow.png");
+     Check(InteriorChanged(low,high,(int)ball.Width,(int)ball.Height),"breathing visibly changes the whole "+theme+" "+form+" background");
+     Check(InteriorChanged(high,flow,(int)ball.Width,(int)ball.Height),"flow crosses the whole "+theme+" "+form+" background");
+    }
+    Check(ClearCorners(ball,(int)ball.Width,(int)ball.Height),"active capsule keeps transparent corners: "+form);
+    ball.Hide();Check(!chrome.HasAnimatedProperties,"hidden capsule stops animation: "+form);ball.Show();Check(chrome.HasAnimatedProperties,"shown active capsule resumes animation: "+form);
+    Call("FloatingBall",ball,"ApplyActivity",New("ActivityReport"));Check(!chrome.HasAnimatedProperties,"idle capsule stops animation: "+form);((IDisposable)ball).Dispose();
+   }
    Set(prefs,"BallStyle","orb");Set(prefs,"OrbQuotaWindow","short");Set(prefs,"OrbSize",100d);Set(prefs,"OrbAnimation","eco");var orbPrefs=Call("Preferences",prefs,"Clone");
    Check((string)Get(orbPrefs,"BallStyle")=="orb"&&(string)Get(orbPrefs,"OrbAnimation")=="eco"&&(double)Get(orbPrefs,"OrbSize")==100,"orb settings survive protected JSON roundtrip");
    Set(prefs,"OrbShortColors",new[]{"#20BBAA","#73DBAD","#AADDEE"});Set(prefs,"OrbLongColors",new[]{"#FA9566","#EFC578"});Set(prefs,"OrbShortAngle",125d);Set(prefs,"OrbLongAngle",70d);var colorClone=Call("Preferences",prefs,"Clone");

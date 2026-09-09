@@ -24,6 +24,17 @@ namespace CodexUserData
         private static readonly List<WeakReference> themedViews=new List<WeakReference>();
         internal static int Revision {get;private set;}
         internal static bool IsLight {get;private set;}
+        private static string motionMode="auto";
+        internal static string MotionMode {get{return motionMode;}private set{motionMode=value;}}
+        internal static bool MotionAllowed {get{return MotionMode!="off"&&SystemParameters.ClientAreaAnimation&&!SystemParameters.HighContrast&&(RenderCapability.Tier>>16)>0;}}
+        internal static int MotionFrameRate {get{return MotionMode=="eco"?30:(RenderCapability.Tier>>16)>=2?60:30;}}
+        internal static int ActivityFrameRate(string mode)
+        {
+            if(mode=="off"||!SystemParameters.ClientAreaAnimation||SystemParameters.HighContrast)return 0;
+            if(mode=="eco"||(RenderCapability.Tier>>16)==0)return 30;
+            if(mode=="auto"&&System.Windows.Forms.SystemInformation.PowerStatus.PowerLineStatus==System.Windows.Forms.PowerLineStatus.Offline)return 30;
+            return 60;
+        }
         private static string appliedKey;
         private static DrawingBrush LiveDrawing(){var b=new DrawingBrush{Stretch=Stretch.Fill};BindingOperations.SetBinding(b,Brush.OpacityProperty,new Binding("UnitOpacity"){Source=brushState});return b;}
         internal static void Watch(FrameworkElement view){themedViews.Add(new WeakReference(view));}
@@ -57,7 +68,7 @@ namespace CodexUserData
         private static void Paint(DrawingBrush b,Brush paint){var d=new GeometryDrawing(paint,null,new RectangleGeometry(new Rect(0,0,1,1)));d.Freeze();b.Drawing=d;}
         internal static void Apply(Preferences p)
         {
-            Normalize(p);string key=p.ThemeMode+"/"+p.ThemeBase+"/"+p.GradientKind+"/"+p.GradientSpread+"/"+String.Join(",",p.GradientColors)+"/"+String.Join(",",p.GradientStops)+"/"+p.GradientAngle+"/"+p.GradientCenterX+"/"+p.GradientCenterY+"/"+p.GradientRadius+"/"+p.GradientStrength+"/"+p.ThemeCardOpacity;
+            Normalize(p);MotionMode=new[]{"auto","smooth","eco","off"}.Contains(p.OrbAnimation)?p.OrbAnimation:"auto";string key=p.ThemeMode+"/"+p.ThemeBase+"/"+p.GradientKind+"/"+p.GradientSpread+"/"+String.Join(",",p.GradientColors)+"/"+String.Join(",",p.GradientStops)+"/"+p.GradientAngle+"/"+p.GradientCenterX+"/"+p.GradientCenterY+"/"+p.GradientRadius+"/"+p.GradientStrength+"/"+p.ThemeCardOpacity+"/"+MotionMode;
             key+="/"+p.GradientSpan;if(key==appliedKey)return;appliedKey=key;bool custom=p.ThemeMode=="custom";
             double luminance=p.GradientColors.Select(c=>{var col=ColorOf(c);return (.2126*col.R+.7152*col.G+.0722*col.B)/255;}).Average();
             IsLight=p.ThemeMode=="light"||(custom&&(p.ThemeBase=="light"||p.ThemeBase=="auto"&&luminance>.6));

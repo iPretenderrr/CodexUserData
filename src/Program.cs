@@ -10,8 +10,8 @@ using System.Windows;
 
 [assembly: System.Reflection.AssemblyTitle("CodexUserData")]
 [assembly: System.Reflection.AssemblyProduct("CodexUserData")]
-[assembly: System.Reflection.AssemblyVersion("1.6.2.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.6.2.0")]
+[assembly: System.Reflection.AssemblyVersion("1.6.6.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.6.6.0")]
 
 namespace CodexUserData
 {
@@ -98,10 +98,11 @@ namespace CodexUserData
         internal static readonly string SettingsPath=Path.Combine(DataFolder,"widget-settings.json");
         internal static readonly JavaScriptSerializer Json=new JavaScriptSerializer {MaxJsonLength=64*1024*1024};
         internal const string WindowTitle="CodexUserData";
+        internal static readonly int ShowMainMessage=(int)RegisterWindowMessage("CodexUserData.ShowMain.v1");
         private static bool saveWarningShown;
         [DllImport("user32.dll",CharSet=CharSet.Unicode)] private static extern IntPtr FindWindow(string cls,string name);
-        [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr h);
-        [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr h,int n);
+        [DllImport("user32.dll",CharSet=CharSet.Unicode)] private static extern uint RegisterWindowMessage(string name);
+        [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr h,int message,IntPtr wParam,IntPtr lParam);
         [STAThread] public static int Main(string[] args)
         {
             Mutex instance=null;
@@ -114,7 +115,14 @@ namespace CodexUserData
                 if(!diagnostic)
                 {
                     bool created;instance=new Mutex(true,"Local\\CodexUserData_v1",out created);
-                    if(!created){if(args.Contains("--codex-auto"))return 0;IntPtr h=FindWindow(null,WindowTitle);if(h!=IntPtr.Zero){ShowWindow(h,9);SetForegroundWindow(h);}return 0;}
+                    if(!created)
+                    {
+                        if(args.Contains("--codex-auto"))return 0;
+                        // Let the existing process restore its own state. Native ShowWindow alone
+                        // could expose the main window while leaving an active floating ball behind.
+                        IntPtr h=IntPtr.Zero;for(int attempt=0;attempt<20&&h==IntPtr.Zero;attempt++){h=FindWindow(null,WindowTitle);if(h==IntPtr.Zero)Thread.Sleep(50);}
+                        if(h!=IntPtr.Zero)PostMessage(h,ShowMainMessage,IntPtr.Zero,IntPtr.Zero);return 0;
+                    }
                 }
                 PortableStore.Initialize(DataFolder,Path.Combine(Folder,"data"));Preferences p=ReadPreferences();ApiPrices.Configure(p.PriceOverrides);
                 if(args.Length>1 && args[0]=="--quota-check")

@@ -234,7 +234,6 @@ namespace CodexUserData
             // The same nonnegative smoothstep weights are used at every boundary. Layers cannot cross or create negative usage.
             double dx=(end.X-start.X)/3;context.BezierTo(new Point(start.X+dx,start.Y),new Point(end.X-dx,end.Y),end,true,false);
         }
-        internal static double Monotone(double a,double b){return a*b<=0?0:2*a*b/(a+b);}
         internal static double NiceMax(double value)
         {
             if(value<=0)return 4;double power=Math.Pow(10,Math.Floor(Math.Log10(value)));double n=value/power;return (n<=1?1:n<=2?2:n<=4?4:n<=6?6:n<=8?8:10)*power;

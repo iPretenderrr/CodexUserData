@@ -24,6 +24,13 @@ internal static class HtmlReleaseProbe
         var matches=T(type).GetMethods(BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance|BindingFlags.Static).Where(x=>!x.ContainsGenericParameters&&x.IsStatic==(instance==null)&&x.Name==renamed&&x.GetParameters().Length==args.Length&&x.GetParameters().Select((p,i)=>args[i]==null?!p.ParameterType.IsValueType:p.ParameterType.IsInstanceOfType(args[i])).All(b=>b)).ToArray();
         return matches.Single().Invoke(instance,args);
     }
+    static object Field(string type,object instance,string name)
+    {
+        var match=Regex.Match(map,@"CodexUserData\."+Regex.Escape(type)+"::"+Regex.Escape(name)+@" -> ([^\r\n]+)");
+        if(!match.Success||instance==null)return null;
+        var owner=T(type);Type expected=name=="custom"?T("CustomShapeView"):typeof(string);
+        return owner.GetFields(BindingFlags.Instance|BindingFlags.Public|BindingFlags.NonPublic).Single(f=>f.DeclaringType==owner&&f.Name==match.Groups[1].Value.Trim()&&f.FieldType==expected).GetValue(instance);
+    }
     static U Find<U>(DependencyObject root) where U:DependencyObject
     {if(root is U)return (U)root;for(int i=0;i<VisualTreeHelper.GetChildrenCount(root);i++){var result=Find<U>(VisualTreeHelper.GetChild(root,i));if(result!=null)return result;}return null;}
     static void Check(bool ok,string title){if(!ok)throw new Exception(title);Console.WriteLine("PASS "+title);checks++;}
@@ -38,8 +45,13 @@ internal static class HtmlReleaseProbe
         var daily=New("DailyUsage");Set(daily,"Date",DateTime.Today.ToString("yyyy-MM-dd"));Set(daily,"Tokens",2468000L);var days=Array.CreateInstance(T("DailyUsage"),1);days.SetValue(daily,0);var snapshot=New("UsageSnapshot");Set(snapshot,"Daily",days);
         Call("FloatingBall",ball,"Apply",snapshot,null,"fixture","fixture");ball.ShowActivated=false;ball.Show();
         var until=DateTime.UtcNow.AddSeconds(18);WebView2CompositionControl web=null;
-        while(web==null||web.CoreWebView2==null){if(DateTime.UtcNow>until)throw new Exception("Protected HTML initialization timed out");web=Find<WebView2CompositionControl>(ball);await Task.Delay(100);}
-        string value="";while(!value.Contains("246")){if(DateTime.UtcNow>until)throw new Exception("Protected HTML never received numeric snapshot: "+value);value=await web.ExecuteScriptAsync("document.getElementById('value')?.textContent??''");await Task.Delay(100);}
+        while(true)
+        {
+            try{if(web!=null&&web.CoreWebView2!=null)break;}
+            catch(ObjectDisposedException ex){var custom=Field("FloatingBall",ball,"custom");throw new Exception("Protected HTML renderer was disposed at "+Convert.ToString(Field("CustomShapeView",custom,"LoadStage"))+": "+Convert.ToString(Field("CustomShapeView",custom,"LastError")),ex);}
+            if(DateTime.UtcNow>until)throw new Exception("Protected HTML initialization timed out");web=Find<WebView2CompositionControl>(ball);await Task.Delay(100);
+        }
+        string value="";while(!value.Contains("246")){if(DateTime.UtcNow>until)throw new Exception("Protected HTML never received numeric snapshot: "+value);try{value=await web.ExecuteScriptAsync("document.getElementById('value')?.textContent??''");}catch(ObjectDisposedException ex){var custom=Field("FloatingBall",ball,"custom");throw new Exception("Protected HTML renderer was disposed at "+Convert.ToString(Field("CustomShapeView",custom,"LoadStage"))+": "+Convert.ToString(Field("CustomShapeView",custom,"LastError")),ex);}await Task.Delay(100);}
         Check(value.Contains("246"),"actual protected HTML host publishes its versioned data contract");
         Check(web.DefaultBackgroundColor.A==0&&ball.Width==240&&ball.Height==84,"protected browser renderer keeps transparent background and manifest dimensions");
         var menu=((Border)ball.Content).ContextMenu;

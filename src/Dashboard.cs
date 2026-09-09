@@ -64,7 +64,7 @@ namespace CodexUserData
             var border=new Border{Background=Theme.WindowBackground,CornerRadius=new CornerRadius(14),BorderThickness=new Thickness(1),BorderBrush=Theme.Frame};var root=new Grid();border.Child=root;Content=border;
             root.RowDefinitions.Add(new RowDefinition{Height=GridLength.Auto});root.RowDefinitions.Add(new RowDefinition());root.RowDefinitions.Add(new RowDefinition{Height=GridLength.Auto});
             var header=new DockPanel{Margin=new Thickness(18,12,12,10),Background=Brushes.Transparent};root.Children.Add(header);
-            var close=Theme.ToolbarButton("close","关闭"+caption);close.Click+=delegate{Close();};DockPanel.SetDock(close,Dock.Right);header.Children.Add(close);
+            var close=Theme.ToolbarButton("close","关闭"+caption);close.Click+=delegate{WindowInteraction.Close(this);};DockPanel.SetDock(close,Dock.Right);header.Children.Add(close);
             if(resize){var maximize=Theme.ToolbarButton("maximize","最大化 / 还原");maximize.Click+=delegate{WindowState=WindowState==WindowState.Maximized?WindowState.Normal:WindowState.Maximized;};StateChanged+=delegate{maximize.Content=Theme.ToolbarIcon(WindowState==WindowState.Maximized?"restore":"maximize");};DockPanel.SetDock(maximize,Dock.Right);header.Children.Add(maximize);}
             var title=new StackPanel();title.Children.Add(Theme.Text("●  "+eyebrow,9,Theme.Muted));var text=Theme.Text(caption,17,Theme.Ink);text.Margin=new Thickness(0,5,0,0);title.Children.Add(text);header.Children.Add(title);
             WindowInteraction.Header(this,header,()=>{if(resize)WindowState=WindowState==WindowState.Maximized?WindowState.Normal:WindowState.Maximized;});WindowInteraction.Attach(this);

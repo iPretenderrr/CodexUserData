@@ -22,9 +22,10 @@ namespace CodexUserData
         private readonly Border shell;
         private TextBlock tokenText;
         private Border dockTrack,dockFill;
+        private CapsuleActivityChrome capsuleChrome;
         private TranslateTransform dockFlow;
-        private int dockPulseFps;
-        private readonly DispatcherTimer dockPulseClock=new DispatcherTimer{Interval=TimeSpan.FromSeconds(1)};
+        private int activityMotionFps;
+        private readonly DispatcherTimer activityMotionClock=new DispatcherTimer{Interval=TimeSpan.FromSeconds(1)};
         private QuotaOrb orb;
         private CustomShapeView custom;
         internal bool IsCustom {get{return !IsPillar&&preferences().BallStyle=="html";}}
@@ -39,7 +40,6 @@ namespace CodexUserData
         private double dockAnchor;
         internal bool Expanded {get{return preferences().BallStyle=="capsule"&&preferences().BallExpanded;}}
         internal bool IsOrb {get{return !IsPillar&&preferences().BallStyle=="orb";}}
-        internal string DockSide {get{return dock;}}
         internal bool IsPillar {get{return dock.Length>0;}}
         [StructLayout(LayoutKind.Sequential)] private struct NativeRect {public int Left,Top,Right,Bottom;}
         [StructLayout(LayoutKind.Sequential)] private struct Monitor {public int Size;public NativeRect Screen,Work;public uint Flags;}
@@ -52,7 +52,7 @@ namespace CodexUserData
         {
             preferences=get;save=persist;restore=showMain;exit=quit;
             Title="今日用量悬浮球";ShowInTaskbar=false;ShowActivated=false;Topmost=true;ResizeMode=ResizeMode.NoResize;WindowStyle=WindowStyle.None;AllowsTransparency=true;Background=Brushes.Transparent;
-            FontFamily=new FontFamily("Segoe UI, Microsoft YaHei UI");UseLayoutRounding=true;Theme.InstallStyles(this);
+            FontFamily=new FontFamily("Segoe UI, Microsoft YaHei UI");UseLayoutRounding=true;Theme.InstallStyles(this);WindowInteraction.EnableMotion(this);
             shell=new Border{Background=Theme.WindowBackground,BorderBrush=Theme.Frame,BorderThickness=new Thickness(1),CornerRadius=new CornerRadius(22),Padding=new Thickness(12,9,10,9)};Content=shell;
             var menu=Theme.Menu();
             AddMenu(menu,"光环 · 圆形额度球",SetOrb);
@@ -78,7 +78,7 @@ namespace CodexUserData
                 if(dock.Length>0)PositionDock();else Clamp();SavePosition();
             };
             Closing+=delegate(object sender,System.ComponentModel.CancelEventArgs e){if(!disposing){e.Cancel=true;restore();}};
-            IsVisibleChanged+=delegate{UpdateDockPulse();};dockPulseClock.Tick+=delegate{UpdateDockPulse();};
+            IsVisibleChanged+=delegate{UpdateActivityMotion();};activityMotionClock.Tick+=delegate{UpdateActivityMotion();};
             Build();
         }
         private IntPtr Handle {get{return new WindowInteropHelper(this).Handle;}}
@@ -88,31 +88,39 @@ namespace CodexUserData
         {
             Opacity=preferences().BallOpacity;usage=snapshot;bucket=quota;source=scope;quotaStamp=status;Build();
         }
-        internal void ApplyActivity(ActivityReport report){activity=report;if(orb!=null)orb.ApplyActivity(report);if(custom!=null)custom.Apply(usage,bucket,activity,preferences());UpdateDockPulse();}
-        internal bool DockPulseActive {get{return dockPulseFps>0;}}
-        private void StopDockPulse()
+        internal void ApplyActivity(ActivityReport report){activity=report;if(orb!=null)orb.ApplyActivity(report);if(custom!=null)custom.Apply(usage,bucket,activity,preferences());UpdateActivityMotion();}
+        private void StopActivityMotion()
         {
-            dockPulseClock.Stop();dockPulseFps=0;
+            activityMotionClock.Stop();activityMotionFps=0;
             if(dockTrack!=null)dockTrack.BeginAnimation(OpacityProperty,null);
             if(dockFill!=null){dockFill.BeginAnimation(OpacityProperty,null);var light=dockFill.Child as UIElement;if(light!=null)light.Opacity=0;}
             if(dockFlow!=null){dockFlow.BeginAnimation(TranslateTransform.XProperty,null);dockFlow.BeginAnimation(TranslateTransform.YProperty,null);}
+            if(capsuleChrome!=null)capsuleChrome.Stop();
         }
-        private void UpdateDockPulse()
+        private void UpdateActivityMotion()
         {
             var p=preferences();long now=LocalCodexUsage.Unix(DateTime.Now);
-            bool running=!disposing&&IsVisible&&IsPillar&&dockTrack!=null&&activity!=null&&activity.ActiveTasks>0&&activity.Until>now;
-            int fps=!running||p.OrbAnimation=="off"||!SystemParameters.ClientAreaAnimation||SystemParameters.HighContrast?0:p.OrbAnimation=="eco"||(RenderCapability.Tier>>16)==0?20:30;
-            if(fps==dockPulseFps)return;StopDockPulse();if(fps==0)return;dockPulseFps=fps;
-            // Animate paint only: quota length, hit targets and native edge coordinates never move.
-            var breath=new DoubleAnimation(1,.64,TimeSpan.FromSeconds(1.1)){AutoReverse=true,RepeatBehavior=RepeatBehavior.Forever};Timeline.SetDesiredFrameRate(breath,fps);
-            dockFill.BeginAnimation(OpacityProperty,breath);
-            // Unknown/empty quota only breathes its neutral track; no fake remaining balance.
-            if(dockFill.Visibility!=Visibility.Visible)dockTrack.BeginAnimation(OpacityProperty,breath);
-            var light=dockFill.Child as UIElement;if(light!=null)light.Opacity=.55;
-            bool horizontal=dock=="top"||dock=="bottom";
-            var flow=new DoubleAnimation(horizontal?-1:1,horizontal?1:-1,TimeSpan.FromSeconds(1.9)){RepeatBehavior=RepeatBehavior.Forever};Timeline.SetDesiredFrameRate(flow,fps);
-            if(dockFlow!=null)dockFlow.BeginAnimation(horizontal?TranslateTransform.XProperty:TranslateTransform.YProperty,flow);
-            dockPulseClock.Start();
+            bool capsule=!IsPillar&&!IsOrb&&!IsCustom&&capsuleChrome!=null,ready=IsPillar&&dockTrack!=null||capsule;
+            bool running=!disposing&&IsVisible&&ready&&activity!=null&&activity.ActiveTasks>0&&activity.Until>now;
+            int fps=running?Theme.ActivityFrameRate(p.OrbAnimation):0;
+            if(fps==activityMotionFps)return;StopActivityMotion();if(fps==0)return;activityMotionFps=fps;
+            // Animate paint only: quota length, hit targets and native window coordinates never move.
+            var breath=new DoubleAnimation(1,.58,TimeSpan.FromSeconds(1.05)){AutoReverse=true,RepeatBehavior=RepeatBehavior.Forever};Timeline.SetDesiredFrameRate(breath,fps);
+            if(IsPillar)
+            {
+                dockFill.BeginAnimation(OpacityProperty,breath);
+                // Unknown quota breathes its neutral track without implying a remaining balance.
+                if(dockFill.Visibility!=Visibility.Visible)dockTrack.BeginAnimation(OpacityProperty,breath);
+                var light=dockFill.Child as UIElement;if(light!=null)light.Opacity=.55;
+                bool horizontal=dock=="top"||dock=="bottom";
+                var flow=new DoubleAnimation(horizontal?-1:1,horizontal?1:-1,TimeSpan.FromSeconds(1.9)){RepeatBehavior=RepeatBehavior.Forever};Timeline.SetDesiredFrameRate(flow,fps);
+                if(dockFlow!=null)dockFlow.BeginAnimation(horizontal?TranslateTransform.XProperty:TranslateTransform.YProperty,flow);
+            }
+            else
+            {
+                capsuleChrome.Start(fps);
+            }
+            activityMotionClock.Start();
         }
         private static bool Finite(double value){return !Double.IsNaN(value)&&!Double.IsInfinity(value);}
         private static string NormalizeDock(string side){return new[]{"left","right","top","bottom"}.Contains(side)?side:"";}
@@ -132,7 +140,7 @@ namespace CodexUserData
             double size=Theme.Bound(preferences().OrbSize,56,128,84);
             string shape=pillar?dock:IsCustom?"html:"+preferences().CustomShape:circle?"orb:"+size:large?"large":"small";
             // Repeated drops/data refreshes keep the same visual tree, avoiding needless layout and flashing.
-            if(builtShape==shape){UpdateValues();UpdateDockPulse();return;}StopDockPulse();dockFlow=null;builtShape=shape;
+            if(builtShape==shape){UpdateValues();UpdateActivityMotion();return;}StopActivityMotion();dockFlow=null;builtShape=shape;
             if(orb!=null){orb.Dispose();orb=null;}if(custom!=null){custom.Dispose();custom=null;}
             Width=pillar?(horizontal?80:16):circle?size:(large?340:174);Height=pillar?(horizontal?16:80):circle?size:(large?54:48);
             // Only the dock strip needs an extended grab area. Free-floating forms leave the
@@ -141,7 +149,7 @@ namespace CodexUserData
             shell.BorderThickness=new Thickness(pillar||circle?0:1);shell.BorderBrush=pillar||circle?(Brush)Brushes.Transparent:Theme.Frame;
             // Put all invisible grab padding on the inward side, so the visible track touches the edge.
             shell.Padding=circle?new Thickness(0):pillar?(dock=="top"?new Thickness(0,0,0,10):dock=="bottom"?new Thickness(0,10,0,0):dock=="left"?new Thickness(0,0,10,0):new Thickness(10,0,0,0)):new Thickness(8,5,6,5);shell.CornerRadius=new CornerRadius(pillar?8:16);
-            valuesKey=null;tokenText=null;quotaRows=null;dockTrack=null;dockFill=null;
+            valuesKey=null;tokenText=null;quotaRows=null;dockTrack=null;dockFill=null;capsuleChrome=null;
             AutomationProperties.SetItemStatus(this,pillar?"贴边额度条":circle?"圆环剩余额度":large?"额度与今日 Tokens":"仅今日 Tokens");
             if(IsCustom)
             {
@@ -164,7 +172,11 @@ namespace CodexUserData
             else
             {
                 ToolTipService.SetIsEnabled(shell,true);
-                var row=new DockPanel{VerticalAlignment=VerticalAlignment.Center};shell.Child=row;
+                // The chrome covers the full window beneath the controls; its rim is the outer border.
+                shell.Padding=new Thickness(0);shell.BorderThickness=new Thickness(0);var stage=new Grid();shell.Child=stage;
+                capsuleChrome=new CapsuleActivityChrome();stage.Children.Add(capsuleChrome);
+                AutomationProperties.SetAutomationId(capsuleChrome,"CapsuleActivityChrome");
+                var row=new DockPanel{VerticalAlignment=VerticalAlignment.Center,Margin=new Thickness(8,5,6,5)};stage.Children.Add(row);
                 var actions=new StackPanel{Orientation=Orientation.Horizontal};DockPanel.SetDock(actions,Dock.Right);row.Children.Add(actions);
                 var toggle=Theme.ToolbarButton(large?"collapse":"expand","切换悬浮球大小");toggle.Width=22;toggle.MinWidth=22;toggle.Height=24;toggle.Padding=new Thickness(2);toggle.Margin=new Thickness(1);toggle.Click+=delegate{SetExpanded(!Expanded);};actions.Children.Add(toggle);
                 var back=Theme.ToolbarButton("restore","返回完整窗口");back.Width=22;back.MinWidth=22;back.Height=24;back.Padding=new Thickness(2);back.Margin=new Thickness(1);back.Click+=delegate{restore();};actions.Children.Add(back);
@@ -173,29 +185,28 @@ namespace CodexUserData
                 tokens.Children.Add(new Viewbox{Child=tokenText,Stretch=Stretch.Uniform,StretchDirection=StretchDirection.DownOnly,HorizontalAlignment=HorizontalAlignment.Left,Height=24});AutomationProperties.SetAutomationId(tokenText,"BallTodayTokens");
                 if(large){quotaRows=new StackPanel{VerticalAlignment=VerticalAlignment.Center};row.Children.Add(quotaRows);}
             }
-            UpdateValues();UpdateDockPulse();
+            UpdateValues();UpdateActivityMotion();
         }
-        private static double RemainingFraction(QuotaWindow window,long now)
+        private static double RemainingFraction(QuotaBucket owner,QuotaWindow window,long now)
         {
-            if(window==null||!Finite(window.UsedPercent)||(window.ResetsAt>0&&now>=window.ResetsAt))return 0;
-            return Math.Max(0,Math.Min(1,1-window.UsedPercent/100));
+            double? value=window==null?null:window.RemainingPercent(owner,now);return value.HasValue?value.Value/100:0;
         }
         private void UpdateValues()
         {
             if(custom!=null)custom.Apply(usage,bucket,activity,preferences());
             if(orb!=null){var p=preferences();orb.ApplyActivity(activity);orb.Apply(p,bucket,usage,source+"|"+p.Source+"|"+p.CodexHome+"|"+p.Database);}
             long now=LocalCodexUsage.Unix(DateTime.Now);var today=usage==null?null:usage.Daily.LastOrDefault(d=>d.Date==DateTime.Now.ToString("yyyy-MM-dd",CultureInfo.InvariantCulture));
-            string key=(today==null?"none":today.Date+":"+today.Tokens)+"/"+source+"/"+quotaStamp+"/"+OrbPalette.Key(preferences())+"/"+(bucket==null?"none":bucket.Origin+"/"+String.Join("|",new[]{bucket.Primary,bucket.Secondary}.Where(w=>w!=null).Select(w=>w.Label+":"+w.Remaining(now))));
+            string key=(today==null?"none":today.Date+":"+today.Tokens)+"/"+source+"/"+quotaStamp+"/"+OrbPalette.Key(preferences())+"/"+(bucket==null?"none":bucket.Origin+"/"+String.Join("|",new[]{bucket.Primary,bucket.Secondary}.Where(w=>w!=null).Select(w=>w.Label+":"+w.Remaining(bucket,now))));
             if(valuesKey==key)return;valuesKey=key;
             if(tokenText!=null){tokenText.Text=today==null?"—":TokenText.Compact(today.Tokens);tokenText.ToolTip="今日已记录 Tokens · "+source;}
             var windows=bucket==null?new QuotaWindow[0]:new[]{bucket.Primary,bucket.Secondary}.Where(w=>w!=null).ToArray();
             if(dockTrack!=null)
             {
-                var main=preferences().BallStyle=="orb"?QuotaOrb.SelectWindow(bucket,preferences().OrbQuotaWindow):windows.LastOrDefault();double fraction=bucket==null||now-bucket.ObservedAt>300?0:RemainingFraction(main,now);bool horizontal=dock=="top"||dock=="bottom";
+                var main=preferences().BallStyle=="orb"?QuotaOrb.SelectWindow(bucket,preferences().OrbQuotaWindow):windows.LastOrDefault();double fraction=RemainingFraction(bucket,main,now);bool horizontal=dock=="top"||dock=="bottom";
                 if(horizontal)dockFill.Width=80*fraction;else dockFill.Height=80*fraction;
-                var visibility=fraction>0?Visibility.Visible:Visibility.Collapsed;if(dockFill.Visibility!=visibility)StopDockPulse();dockFill.Visibility=visibility;
+                var visibility=fraction>0?Visibility.Visible:Visibility.Collapsed;if(dockFill.Visibility!=visibility)StopActivityMotion();dockFill.Visibility=visibility;
                 dockFill.Background=OrbPalette.ForBar(preferences(),main!=null&&main.Minutes>=1440,!horizontal);
-                AutomationProperties.SetName(dockTrack,main==null?"额度暂不可用":main.Label+" 剩余 "+main.Remaining(now));
+                AutomationProperties.SetName(dockTrack,main==null?"额度暂不可用":main.Label+" 剩余 "+main.Remaining(bucket,now));
             }
             if(quotaRows!=null)
             {
@@ -205,15 +216,16 @@ namespace CodexUserData
                 {
                     var line=new DockPanel{Height=18};quotaRows.Children.Add(line);
                     var label=Theme.Text(w.Label,9,Theme.Muted);label.Width=24;label.VerticalAlignment=VerticalAlignment.Center;DockPanel.SetDock(label,Dock.Left);line.Children.Add(label);
-                    var amount=Theme.Text(w.Remaining(now),10,Theme.Ink);amount.FontWeight=FontWeights.SemiBold;amount.MinWidth=32;amount.Margin=new Thickness(5,0,0,0);amount.VerticalAlignment=VerticalAlignment.Center;DockPanel.SetDock(amount,Dock.Right);line.Children.Add(amount);
-                    double fraction=RemainingFraction(w,now);
+                    var amount=Theme.Text(w.Remaining(bucket,now),10,Theme.Ink);amount.FontWeight=FontWeights.SemiBold;amount.MinWidth=32;amount.Margin=new Thickness(5,0,0,0);amount.VerticalAlignment=VerticalAlignment.Center;DockPanel.SetDock(amount,Dock.Right);line.Children.Add(amount);
+                    double fraction=RemainingFraction(bucket,w,now);
                     var bar=new Grid{Height=5,VerticalAlignment=VerticalAlignment.Center};line.Children.Add(bar);
                     bar.Children.Add(new Border{Background=Theme.Line,CornerRadius=new CornerRadius(3)});
                     var fillGrid=new Grid();bar.Children.Add(fillGrid);fillGrid.ColumnDefinitions.Add(new ColumnDefinition{Width=new GridLength(fraction,GridUnitType.Star)});fillGrid.ColumnDefinitions.Add(new ColumnDefinition{Width=new GridLength(1-fraction,GridUnitType.Star)});
                     fillGrid.Children.Add(new Border{CornerRadius=new CornerRadius(3),Background=OrbPalette.ForBar(preferences(),w.Minutes>=1440)});
                 }
             }
-            if(!IsPillar&&!IsOrb&&!IsCustom)shell.ToolTip=source+" · 今日 "+(today==null?"等待记录":TokenText.Compact(today.Tokens)+" Tokens")+"\n"+quotaStamp+"\n"+String.Join(" · ",windows.Select(w=>w.Label+" 剩余 "+w.Remaining(now)))+"\n拖动移动 · 双击切换大小 · 右键更多选项";
+            if(capsuleChrome!=null)capsuleChrome.ApplyPalette(preferences());
+            if(!IsPillar&&!IsOrb&&!IsCustom)shell.ToolTip=source+" · 今日 "+(today==null?"等待记录":TokenText.Compact(today.Tokens)+" Tokens")+"\n"+quotaStamp+"\n"+String.Join(" · ",windows.Select(w=>w.Label+" 剩余 "+w.Remaining(bucket,now)))+"\n拖动移动 · 双击切换大小 · 右键更多选项";
         }
         private void Drag(object sender,MouseButtonEventArgs e)
         {
@@ -272,6 +284,95 @@ namespace CodexUserData
         {
             NativeRect r;if(Handle!=IntPtr.Zero&&GetWindowRect(Handle,out r)){var p=preferences();p.BallLeft=r.Left;p.BallTop=r.Top;p.BallDock=dock;save();}
         }
-        public void Dispose(){disposing=true;StopDockPulse();if(orb!=null)orb.Dispose();if(custom!=null)custom.Dispose();Close();}
+        public void Dispose(){disposing=true;StopActivityMotion();if(orb!=null)orb.Dispose();if(custom!=null)custom.Dispose();Close();}
+    }
+
+    // A single paint layer for both capsule sizes. Cached pens and perimeter samples avoid
+    // layout, blur surfaces and per-frame geometry/brush allocations on low-end devices.
+    internal sealed class CapsuleActivityChrome : FrameworkElement
+    {
+        internal static readonly DependencyProperty PhaseProperty=DependencyProperty.Register("Phase",typeof(double),typeof(CapsuleActivityChrome),new FrameworkPropertyMetadata(0.0,FrameworkPropertyMetadataOptions.AffectsRender));
+        internal static readonly DependencyProperty BreathProperty=DependencyProperty.Register("Breath",typeof(double),typeof(CapsuleActivityChrome),new FrameworkPropertyMetadata(0.0,FrameworkPropertyMetadataOptions.AffectsRender));
+        private const int Samples=512,TailSteps=72;
+        private readonly Point[] perimeter=new Point[Samples+1];
+        private readonly Pen[] trail=new Pen[TailSteps],halo=new Pen[TailSteps];
+        private readonly TranslateTransform sweepPosition=new TranslateTransform();
+        private readonly Pen frame=new Pen(Theme.Frame,1);
+        private Brush tint,sweep;
+        private Pen rim;
+        private RectangleGeometry clip;
+        private Rect bounds;
+        private double tailFraction;
+        private string paletteKey;
+        private bool active;
+
+        internal CapsuleActivityChrome(){IsHitTestVisible=false;}
+        internal void ApplyPalette(Preferences p)
+        {
+            string key=OrbPalette.Key(p);if(key==paletteKey)return;paletteKey=key;
+            var colors=OrbPalette.EffectiveColors(p,false).Select(c=>(Color)ColorConverter.ConvertFromString(c)).ToArray();
+            tint=OrbPalette.ForBar(p,false);rim=new Pen(tint,1.2);rim.Freeze();
+            var light=new LinearGradientBrush{StartPoint=new Point(0,0),EndPoint=new Point(1,.3)};
+            light.GradientStops.Add(new GradientStop(Colors.Transparent,0));
+            for(int i=0;i<colors.Length;i++)light.GradientStops.Add(new GradientStop(colors[i],.25+.5*i/Math.Max(1,colors.Length-1)));
+            light.GradientStops.Add(new GradientStop(Colors.Transparent,1));light.Freeze();sweep=light;
+            for(int i=0;i<TailSteps;i++)
+            {
+                double t=(i+1.0)/TailSteps,index=t*(colors.Length-1);int a=(int)index,b=Math.Min(colors.Length-1,a+1);double mix=index-a;
+                Color color=Color.FromRgb((byte)(colors[a].R+(colors[b].R-colors[a].R)*mix),(byte)(colors[a].G+(colors[b].G-colors[a].G)*mix),(byte)(colors[a].B+(colors[b].B-colors[a].B)*mix));
+                // Overlapping round segments form one uninterrupted comet with a fading tail.
+                trail[i]=MakePen(color,Math.Pow(t,1.6),2.1);halo[i]=MakePen(color,.17*Math.Pow(t,2),6);
+            }
+            InvalidateVisual();
+        }
+        private static Pen MakePen(Color color,double alpha,double width)
+        {
+            color.A=(byte)Math.Round(255*alpha);var pen=new Pen(new SolidColorBrush(color),width){StartLineCap=PenLineCap.Round,EndLineCap=PenLineCap.Round};pen.Freeze();return pen;
+        }
+        internal void Start(int fps)
+        {
+            active=true;
+            var phase=new DoubleAnimation(0,1,TimeSpan.FromSeconds(3.2)){RepeatBehavior=RepeatBehavior.Forever};Timeline.SetDesiredFrameRate(phase,fps);
+            var breath=new DoubleAnimation(0,1,TimeSpan.FromSeconds(1.35)){AutoReverse=true,RepeatBehavior=RepeatBehavior.Forever,EasingFunction=new SineEase{EasingMode=EasingMode.EaseInOut}};Timeline.SetDesiredFrameRate(breath,fps);
+            BeginAnimation(PhaseProperty,phase);BeginAnimation(BreathProperty,breath);
+        }
+        internal void Stop(){active=false;BeginAnimation(PhaseProperty,null);BeginAnimation(BreathProperty,null);InvalidateVisual();}
+        protected override void OnRenderSizeChanged(SizeChangedInfo info)
+        {
+            base.OnRenderSizeChanged(info);if(ActualWidth<4||ActualHeight<4)return;
+            bounds=new Rect(1.05,1.05,ActualWidth-2.1,ActualHeight-2.1);
+            clip=new RectangleGeometry(new Rect(0,0,ActualWidth,ActualHeight),16,16);clip.Freeze();
+            var path=new RectangleGeometry(bounds,14.95,14.95).GetFlattenedPathGeometry(.05,ToleranceType.Absolute);
+            for(int i=0;i<=Samples;i++){Point tangent;path.GetPointAtFractionLength(i/(double)Samples,out perimeter[i],out tangent);}
+            double length=2*(bounds.Width+bounds.Height-4*14.95)+2*Math.PI*14.95;
+            tailFraction=Math.Min(150,Math.Max(85,length*.24))/length;
+        }
+        private Point At(double fraction)
+        {
+            fraction-=Math.Floor(fraction);double index=fraction*Samples;int a=(int)index;double t=index-a;
+            return new Point(perimeter[a].X+(perimeter[a+1].X-perimeter[a].X)*t,perimeter[a].Y+(perimeter[a+1].Y-perimeter[a].Y)*t);
+        }
+        protected override void OnRender(DrawingContext dc)
+        {
+            if(clip==null)return;
+            dc.DrawRoundedRectangle(null,frame,bounds,14.95,14.95);
+            if(!active||tint==null)return;
+            double phase=(double)GetValue(PhaseProperty),breath=(double)GetValue(BreathProperty);
+            dc.PushClip(clip);
+            // Brightness changes the whole background, never the text opacity or hit targets.
+            dc.PushOpacity(.06+(Theme.IsLight?.25:.34)*breath);dc.DrawRectangle(tint,null,new Rect(RenderSize));dc.Pop();
+            sweepPosition.X=(-1.05+2.1*phase)*ActualWidth;
+            dc.PushOpacity(.14+.22*breath);dc.PushTransform(sweepPosition);
+            dc.DrawRectangle(sweep,null,new Rect(0,0,ActualWidth,ActualHeight));dc.Pop();dc.Pop();
+            dc.PushOpacity(.28+.40*breath);dc.DrawRoundedRectangle(null,rim,bounds,14.95,14.95);dc.Pop();
+            dc.PushOpacity(.72+.28*breath);
+            Point previous=At(phase-tailFraction);
+            for(int i=0;i<TailSteps;i++)
+            {
+                Point next=At(phase-tailFraction+tailFraction*(i+1)/TailSteps);
+                dc.DrawLine(halo[i],previous,next);dc.DrawLine(trail[i],previous,next);previous=next;
+            }
+            dc.Pop();dc.Pop();
+        }
     }
 }

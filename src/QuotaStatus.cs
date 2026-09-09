@@ -28,10 +28,15 @@ namespace CodexUserData
         private readonly DispatcherTimer hoverTimer=new DispatcherTimer{Interval=TimeSpan.FromMilliseconds(100)};
         private Drawing.Point anchor;
         private DateTime hoverStarted,lastInside;
-        private bool busy,disposed;
+        private bool busy,disposed,refreshPending;
         private readonly bool preview;
         private string failure="",iconKey="";
         private string balanceIcon="?";
+        private string pulseIconKey="";
+        private Drawing.Icon staticTrayIcon;
+        private Drawing.Icon[] pulseTrayIcons;
+        private int pulseFrame;
+        private readonly DispatcherTimer trayPulseTimer=new DispatcherTimer();
         private ActivityReport activity;
         private bool completionPending;
         internal event Action CompletionChanged;
@@ -61,10 +66,11 @@ namespace CodexUserData
                 var menu=new Forms.ContextMenuStrip();menu.Items.Add("额度与今日用量",null,delegate{Dispatcher.BeginInvoke(new Action(()=>ShowFlyout()));});menu.Items.Add("显示 / 隐藏悬浮窗",null,delegate{Dispatcher.BeginInvoke(toggle);});
                 menu.Items.Add("立即刷新额度",null,delegate{Dispatcher.BeginInvoke(new Action(Refresh));});
                 menu.Items.Add("退出",null,delegate{Dispatcher.BeginInvoke(exit);});tray.ContextMenuStrip=menu;
-                tray.DoubleClick+=delegate{Dispatcher.BeginInvoke(new Action(()=>{if(flyout!=null)flyout.Hide();hoverTimer.Stop();toggle();}));};
+                tray.DoubleClick+=delegate{Dispatcher.BeginInvoke(new Action(()=>{if(flyout!=null)flyout.Dismiss();hoverTimer.Stop();toggle();}));};
                 tray.MouseMove+=delegate{AcknowledgeCompletion();if(!hoverTimer.IsEnabled){anchor=Forms.Cursor.Position;hoverStarted=lastInside=DateTime.UtcNow;hoverTimer.Start();}};
                 tray.MouseClick+=delegate(object sender,Forms.MouseEventArgs e){if(e.Button==Forms.MouseButtons.Left&&e.Clicks==1)Dispatcher.BeginInvoke(new Action(()=>ShowFlyout()));};
             }
+            trayPulseTimer.Interval=TimeSpan.FromMilliseconds(90);trayPulseTimer.Tick+=delegate{if(!TrayPulseAllowed()){trayPulseTimer.Stop();pulseFrame=0;UpdateTrayIcon();return;}pulseFrame=(pulseFrame+1)%16;UpdateTrayIcon();};
             completionTimer.Tick+=delegate{completionStep++;if(!CompletionVisible)completionTimer.Stop();UpdateTrayIcon();UpdateActivityText();};
             hoverTimer.Tick+=HoverTick;clock.Tick+=delegate{Render();Refresh();};Render();
         }
@@ -80,6 +86,7 @@ namespace CodexUserData
         {
             if(newAccount){latest.Clear();SetCompletion(false);}Render();Refresh();
         }
+        internal void ApplyTheme(){iconKey="";pulseIconKey="";UpdateTrayPulse();UpdateTrayIcon();}
         internal void Accept(IEnumerable<QuotaBucket> buckets)
         {
             foreach(var b in buckets??new QuotaBucket[0]){QuotaBucket old;if(!latest.TryGetValue(b.Id,out old)||b.ObservedAt>=old.ObservedAt)latest[b.Id]=b;}Render();
@@ -91,7 +98,7 @@ namespace CodexUserData
         {
             activity=report;bool next=preferences().CompletionFlash&&report!=null&&report.ActiveTasks==0&&(completionPending||report.CompletedTasks>0);SetCompletion(next);
             // The activity poll only updates a label and a cached icon, never rebuilds the flyout.
-            UpdateTrayIcon();UpdateActivityText();
+            UpdateTrayPulse();UpdateTrayIcon();UpdateActivityText();
         }
         internal void AcknowledgeCompletion(){SetCompletion(false);}
         private void SetCompletion(bool pending)
@@ -100,11 +107,34 @@ namespace CodexUserData
             if(pending)completionTimer.Start();else completionTimer.Stop();UpdateTrayIcon();UpdateActivityText();if(CompletionChanged!=null)CompletionChanged();
         }
         private void UpdateActivityText(){if(flyout!=null)flyout.ApplyActivity(activity,CompletionVisible);}
+        private bool TrayTaskRunning()
+        {
+            return activity!=null&&activity.ActiveTasks>0&&activity.Until>LocalCodexUsage.Unix(DateTime.Now);
+        }
+        private bool TrayPulseAllowed()
+        {
+            return TrayTaskRunning()&&!disposed&&tray!=null&&Theme.MotionAllowed;
+        }
+        private void UpdateTrayPulse()
+        {
+            bool enabled=TrayPulseAllowed();
+            if(enabled)
+            {
+                int milliseconds=pulseInterval();if((int)trayPulseTimer.Interval.TotalMilliseconds!=milliseconds)trayPulseTimer.Interval=TimeSpan.FromMilliseconds(milliseconds);
+                if(!trayPulseTimer.IsEnabled)trayPulseTimer.Start();
+            }
+            else if(trayPulseTimer.IsEnabled){trayPulseTimer.Stop();pulseFrame=0;}
+        }
+        private int pulseInterval()
+        {
+            var p=preferences();return p.OrbAnimation=="eco"||(System.Windows.Media.RenderCapability.Tier>>16)==0?160:90;
+        }
         private void UpdateTrayIcon()
         {
             if(tray==null||disposed)return;
             bool check=CompletionVisible&&(!SystemParameters.ClientAreaAnimation||completionStep%2==0);
-            SetIcon(check?"✓":balanceIcon);
+            string value=check?"✓":balanceIcon;
+            if(TrayPulseAllowed())SetPulseIcon(value);else SetIcon(value);
         }
         private void ShowFlyout()
         {
@@ -118,25 +148,25 @@ namespace CodexUserData
             var point=Forms.Cursor.Position;bool near=Math.Abs(point.X-anchor.X)<=20&&Math.Abs(point.Y-anchor.Y)<=20;
             if(flyout==null||!flyout.IsVisible){if(!near){hoverTimer.Stop();return;}if((DateTime.UtcNow-hoverStarted).TotalMilliseconds>=250)ShowFlyout();return;}
             if(near||flyout.Contains(point)){lastInside=DateTime.UtcNow;if(flyout.Dismissing)flyout.Reveal(anchor);}
-            else if((DateTime.UtcNow-lastInside).TotalMilliseconds>550){flyout.Dismiss();hoverTimer.Stop();}
+            else if((DateTime.UtcNow-lastInside).TotalMilliseconds>550){flyout.Dismiss(null,true);hoverTimer.Stop();}
         }
         internal async void Refresh()
         {
-            if(disposed||busy||preview)return;var p=preferences();if(!p.LiveQuota){failure="在线查询已关闭";Render();return;}busy=true;
+            if(disposed||preview)return;if(busy){refreshPending=true;return;}var p=preferences();if(!p.LiveQuota){failure="在线查询已关闭";Render();return;}busy=true;
             string home=p.CodexHome,cli=p.QuotaCli;
             try
             {
                 var result=await Task.Run(()=>QuotaReader.Query(cli,home));
-                if(!disposed&&home==preferences().CodexHome&&cli==preferences().QuotaCli){failure="";Accept(result);}
+                if(!disposed&&preferences().LiveQuota&&home==preferences().CodexHome&&cli==preferences().QuotaCli){failure="";Accept(result);}
             }
             catch(Exception){if(!disposed){failure="在线额度暂不可用";Render();}}
-            finally{busy=false;}
+            finally{busy=false;if(refreshPending&&!disposed){refreshPending=false;var dispatch=Dispatcher.BeginInvoke(new Action(Refresh));}}
         }
-        private static void Window(QuotaWindow window,TextBlock label,Border bar,long now)
+        private static void Window(QuotaBucket bucket,QuotaWindow window,TextBlock label,Border bar,long now)
         {
-            bool valid=window!=null&&!(window.ResetsAt>0&&now>=window.ResetsAt);
-            label.Text=window==null?"未返回额度":window.Label+" · "+window.Remaining(now);
-            double fraction=valid?Math.Max(0,Math.Min(1,1-window.UsedPercent/100)):0;
+            double? remaining=window==null?null:window.RemainingPercent(bucket,now);
+            label.Text=window==null?"未返回额度":window.Label+" · "+window.Remaining(bucket,now);
+            double fraction=remaining.HasValue?remaining.Value/100:0;
             bar.Tag=fraction;bar.Width=Math.Max(0,((FrameworkElement)bar.Parent).ActualWidth*fraction);bar.Background=fraction<.15?Theme.Warning:Theme.Accent;
         }
         private void Render()
@@ -145,7 +175,7 @@ namespace CodexUserData
             // Spark is a separate quota bucket. Never silently substitute it for the general Codex balance.
             QuotaBucket bucket;latest.TryGetValue("codex",out bucket);long now=LocalCodexUsage.Unix(DateTime.Now);
             var firstWindow=bucket==null?null:bucket.Primary??bucket.Secondary;var secondWindow=bucket==null||bucket.Primary==null?null:bucket.Secondary;
-            Window(firstWindow,left,barLeft,now);Window(secondWindow,right,barRight,now);
+            Window(bucket,firstWindow,left,barLeft,now);Window(bucket,secondWindow,right,barRight,now);
             var leftColumn=(FrameworkElement)left.Parent;var rightColumn=(FrameworkElement)right.Parent;
             rightColumn.Visibility=secondWindow==null?Visibility.Collapsed:Visibility.Visible;
             Grid.SetColumnSpan(leftColumn,rightColumn.Visibility==Visibility.Collapsed?2:1);
@@ -159,54 +189,116 @@ namespace CodexUserData
             var details=new List<string>{note.Text};
             foreach(var b in latest.Values.OrderBy(b=>b.Id))
             {
-                details.Add((b.Id=="codex"?"Codex":b.Name??b.Id)+"："+Describe(b.Primary??b.Secondary,now)+(b.Primary!=null&&b.Secondary!=null?"；"+Describe(b.Secondary,now):""));
+                details.Add((b.Id=="codex"?"Codex":b.Name??b.Id)+"："+Describe(b,b.Primary??b.Secondary,now)+(b.Primary!=null&&b.Secondary!=null?"；"+Describe(b,b.Secondary,now):""));
             }
             if(latest.Count==0)details.Add("需要 Codex CLI 已登录 ChatGPT；API Key 模式可能没有套餐额度。");
             ToolTip=String.Join("\n",details);if(flyout!=null&&flyout.IsVisible)UpdateFlyout();
             if(tray!=null)
             {
-                string text=bucket==null?"Codex 额度未知 · "+note.Text:"Codex 剩余 "+left.Text+(secondWindow!=null?" / "+right.Text:"")+"\n"+note.Text;
                 // The rich flyout replaces Explorer's limited native tooltip, preventing two overlapping popups.
                 tray.Text=flyout!=null&&flyout.IsVisible?"":"Codex 用量速览";
                 var main=bucket==null?null:bucket.Secondary??bucket.Primary;
                 double? remaining=TrayFlyout.Remaining(bucket,main,now);
-                balanceIcon=remaining.HasValue?remaining.Value.ToString("0",CultureInfo.InvariantCulture):"?";UpdateTrayIcon();
+                balanceIcon=remaining.HasValue?remaining.Value.ToString("0",CultureInfo.InvariantCulture):"?";UpdateTrayPulse();UpdateTrayIcon();
             }
             if(Changed!=null)Changed();
         }
-        private static string Describe(QuotaWindow w,long now)
+        private static string Describe(QuotaBucket bucket,QuotaWindow w,long now)
         {
             if(w==null)return "未返回";string reset=w.ResetsAt>0?new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc).AddSeconds(w.ResetsAt).ToLocalTime().ToString("MM-dd HH:mm"):"未提供";
-            return w.Label+"剩余 "+w.Remaining(now)+"，重置 "+reset;
+            return w.Label+"剩余 "+w.Remaining(bucket,now)+"，重置 "+reset;
         }
         internal static Drawing.Bitmap CreateBadge(string value)
         {
-            // A recognizable 16px silhouette instead of illegible miniature text. Exact balances
-            // live in the flyout; the ring length remains proportional to remaining quota.
-            var bitmap=new Drawing.Bitmap(32,32);int number;bool known=Int32.TryParse(value,out number),done=value=="✓";
-            var from=Drawing.Color.FromArgb(68,127,250);var to=Drawing.Color.FromArgb(80,229,203);
-            if(known&&number<15){from=Drawing.Color.FromArgb(249,173,86);to=Drawing.Color.FromArgb(244,98,133);}
-            using(var g=Drawing.Graphics.FromImage(bitmap))using(var gradient=new Drawing.Drawing2D.LinearGradientBrush(new Drawing.Rectangle(2,2,28,28),from,to,40f))
-            using(var track=new Drawing.Pen(Drawing.Color.FromArgb(130,122,143,167),4))using(var arc=new Drawing.Pen(gradient,4){StartCap=Drawing.Drawing2D.LineCap.Round,EndCap=Drawing.Drawing2D.LineCap.Round})
+            return CreateBadge(value,null,false,0);
+        }
+        private static Drawing.Color BadgeColor(string text,Drawing.Color fallback)
+        {
+            try{return Drawing.ColorTranslator.FromHtml(text);}catch(Exception){return fallback;}
+        }
+        private static Drawing.Color Lighten(Drawing.Color color,double amount)
+        {
+            return Drawing.Color.FromArgb(color.A,(int)Math.Round(color.R+(255-color.R)*amount),(int)Math.Round(color.G+(255-color.G)*amount),(int)Math.Round(color.B+(255-color.B)*amount));
+        }
+        private static Drawing.Bitmap CreateBadge(string value,Preferences preferences,bool active,double phase)
+        {
+            // Explorer still owns the physical tray slot. Filling a 64 px source canvas with a
+            // thicker ring makes the downsampled 16 px icon visibly larger without a blurry scale-up.
+            var bitmap=new Drawing.Bitmap(64,64);int number;bool known=Int32.TryParse(value,out number),done=value=="✓";
+            Drawing.Color from,to;
+            if(preferences!=null&&preferences.ThemeMode=="custom"&&preferences.GradientColors!=null&&preferences.GradientColors.Length>0)
             {
-                g.SmoothingMode=Drawing.Drawing2D.SmoothingMode.AntiAlias;g.Clear(Drawing.Color.Transparent);g.DrawEllipse(track,3,3,26,26);
-                if(done){using(var tick=new Drawing.Pen(gradient,3.6f){StartCap=Drawing.Drawing2D.LineCap.Round,EndCap=Drawing.Drawing2D.LineCap.Round,LineJoin=Drawing.Drawing2D.LineJoin.Round})g.DrawLines(tick,new[]{new Drawing.PointF(9,16),new Drawing.PointF(14,21),new Drawing.PointF(24,11)});g.DrawEllipse(arc,3,3,26,26);}
+                from=BadgeColor(preferences.GradientColors[0],Drawing.Color.FromArgb(78,145,235));
+                to=BadgeColor(preferences.GradientColors[preferences.GradientColors.Length-1],Drawing.Color.FromArgb(93,215,196));
+            }
+            else
+            {
+                from=BadgeColor(Theme.IsLight?"#346EA6":"#82B4E8",Drawing.Color.FromArgb(78,145,235));
+                to=BadgeColor(Theme.IsLight?"#16A0A5":"#75D1DE",Drawing.Color.FromArgb(93,215,196));
+            }
+            if(active){from=Lighten(from,.08+.18*phase);to=Lighten(to,.08+.22*phase);}
+            float angle=preferences==null?40f:(float)preferences.GradientAngle;
+            using(var g=Drawing.Graphics.FromImage(bitmap))
+            using(var gradient=new Drawing.Drawing2D.LinearGradientBrush(new Drawing.Rectangle(0,0,64,64),from,to,angle))
+            using(var track=new Drawing.Pen(Theme.IsLight?Drawing.Color.FromArgb(120,83,102,124):Drawing.Color.FromArgb(145,91,108,128),7.5f))
+            using(var arc=new Drawing.Pen(gradient,active?(float)(8.5+1.4*phase):8.5f){StartCap=Drawing.Drawing2D.LineCap.Round,EndCap=Drawing.Drawing2D.LineCap.Round})
+            {
+                g.SmoothingMode=Drawing.Drawing2D.SmoothingMode.AntiAlias;g.PixelOffsetMode=Drawing.Drawing2D.PixelOffsetMode.HighQuality;g.Clear(Drawing.Color.Transparent);
+                if(active)
+                {
+                    using(var glow=new Drawing.Pen(Drawing.Color.FromArgb((int)(26+58*phase),Lighten(from,.2)),(float)(10+4*phase)))g.DrawEllipse(glow,5,5,54,54);
+                }
+                g.DrawEllipse(track,4,4,56,56);
+                if(done)
+                {
+                    using(var tick=new Drawing.Pen(gradient,7.2f){StartCap=Drawing.Drawing2D.LineCap.Round,EndCap=Drawing.Drawing2D.LineCap.Round,LineJoin=Drawing.Drawing2D.LineJoin.Round})g.DrawLines(tick,new[]{new Drawing.PointF(18,32),new Drawing.PointF(28,42),new Drawing.PointF(47,22)});g.DrawEllipse(arc,4,4,56,56);
+                }
                 else
                 {
-                    if(known&&number>0)g.DrawArc(arc,3,3,26,26,-90,Math.Min(359.9f,360*Math.Max(0,Math.Min(100,number))/100f));
-                    using(var mark=new Drawing.Pen(gradient,2.4f){StartCap=Drawing.Drawing2D.LineCap.Round,EndCap=Drawing.Drawing2D.LineCap.Round}){g.DrawLines(mark,new[]{new Drawing.PointF(11,12),new Drawing.PointF(15,16),new Drawing.PointF(11,20)});g.DrawLine(mark,18,20,22,20);}
+                    if(known&&number>0)g.DrawArc(arc,4,4,56,56,-90,Math.Min(359.9f,360*Math.Max(0,Math.Min(100,number))/100f));
+                    using(var mark=new Drawing.Pen(gradient,5.2f){StartCap=Drawing.Drawing2D.LineCap.Round,EndCap=Drawing.Drawing2D.LineCap.Round,LineJoin=Drawing.Drawing2D.LineJoin.Round}){g.DrawLines(mark,new[]{new Drawing.PointF(21,22),new Drawing.PointF(30,31),new Drawing.PointF(21,40)});g.DrawLine(mark,36,40,45,40);}
                 }
             }
             return bitmap;
         }
+        private static Drawing.Icon IconFrom(Drawing.Bitmap bitmap)
+        {
+            IntPtr handle=bitmap.GetHicon();try{using(var borrowed=Drawing.Icon.FromHandle(handle))return (Drawing.Icon)borrowed.Clone();}finally{DestroyIcon(handle);}
+        }
+        private string ThemeIconKey(string value)
+        {
+            var p=preferences();string colors=p.ThemeMode=="custom"&&p.GradientColors!=null?String.Join(",",p.GradientColors):p.ThemeMode;
+            return value+"/"+Theme.Revision+"/"+colors+"/"+p.GradientAngle;
+        }
         private void SetIcon(string value)
         {
-            if(value==iconKey)return;iconKey=value;
-            using(var bitmap=CreateBadge(value))
+            string key=ThemeIconKey(value);if(iconKey!=key||staticTrayIcon==null)
             {
-                IntPtr handle=bitmap.GetHicon();try{using(var borrowed=Drawing.Icon.FromHandle(handle)){var old=tray.Icon;tray.Icon=(Drawing.Icon)borrowed.Clone();if(old!=null&&old!=Drawing.SystemIcons.Information)old.Dispose();}}finally{DestroyIcon(handle);}
+                using(var bitmap=CreateBadge(value,preferences(),false,0)){var next=IconFrom(bitmap);var old=staticTrayIcon;staticTrayIcon=next;tray.Icon=next;if(old!=null)old.Dispose();}iconKey=key;
             }
+            else tray.Icon=staticTrayIcon;
+            DisposePulseIcons();
         }
-        public void Dispose(){disposed=true;clock.Stop();hoverTimer.Stop();completionTimer.Stop();if(flyout!=null){flyout.Close();flyout=null;}if(tray!=null){tray.Visible=false;var icon=tray.Icon;tray.ContextMenuStrip.Dispose();tray.Dispose();if(icon!=null&&icon!=Drawing.SystemIcons.Information)icon.Dispose();tray=null;}}
+        private void SetPulseIcon(string value)
+        {
+            string key=ThemeIconKey(value);if(pulseIconKey!=key||pulseTrayIcons==null)
+            {
+                var previous=pulseTrayIcons;var next=new Drawing.Icon[16];
+                for(int i=0;i<next.Length;i++){double phase=.5-.5*Math.Cos(2*Math.PI*i/next.Length);using(var bitmap=CreateBadge(value,preferences(),true,phase))next[i]=IconFrom(bitmap);}
+                pulseTrayIcons=next;pulseIconKey=key;tray.Icon=next[pulseFrame%next.Length];
+                if(previous!=null)foreach(var icon in previous)if(icon!=null)icon.Dispose();return;
+            }
+            tray.Icon=pulseTrayIcons[pulseFrame%pulseTrayIcons.Length];
+        }
+        private void DisposePulseIcons()
+        {
+            if(pulseTrayIcons==null)return;foreach(var icon in pulseTrayIcons)if(icon!=null)icon.Dispose();pulseTrayIcons=null;pulseIconKey="";
+        }
+        public void Dispose()
+        {
+            disposed=true;clock.Stop();hoverTimer.Stop();completionTimer.Stop();trayPulseTimer.Stop();
+            if(flyout!=null){flyout.Close();flyout=null;}if(tray!=null){tray.Visible=false;tray.ContextMenuStrip.Dispose();tray.Dispose();tray=null;}
+            DisposePulseIcons();if(staticTrayIcon!=null){staticTrayIcon.Dispose();staticTrayIcon=null;}
+        }
     }
 }

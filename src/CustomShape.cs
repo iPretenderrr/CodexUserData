@@ -112,7 +112,11 @@ namespace CodexUserData
                 core.DownloadStarting+=delegate(object s,CoreWebView2DownloadStartingEventArgs e){e.Cancel=true;};
                 core.NavigationStarting+=delegate(object s,CoreWebView2NavigationStartingEventArgs e){if(!Allowed(e.Uri))e.Cancel=true;};
                 core.FrameNavigationStarting+=delegate(object s,CoreWebView2NavigationStartingEventArgs e){e.Cancel=true;};
-                core.ProcessFailed+=delegate{Fail("形态渲染已停止，可右键重新载入或返回主界面。");};
+                core.ProcessFailed+=delegate(object sender,CoreWebView2ProcessFailedEventArgs e)
+                {
+                    LastError="navigation: WebView2 "+e.ProcessFailedKind+" / "+e.Reason+" / exit "+e.ExitCode;
+                    Fail("形态渲染已停止，可右键重新载入或返回主界面。");
+                };
                 core.AddWebResourceRequestedFilter("*",CoreWebView2WebResourceContext.All);
                 core.WebResourceRequested+=Resource;
                 core.WebMessageReceived+=delegate(object s,CoreWebView2WebMessageReceivedEventArgs e)
@@ -156,7 +160,7 @@ namespace CodexUserData
             snapshot=Program.Json.Serialize(new {type="snapshot",apiVersion=1,data=new{
                 observedAt=now,source=preferences.Source,theme=preferences.ThemeMode,
                 today=today==null?null:new{date=today.Date,tokens=today.Tokens,tokenText=TokenText.Compact(today.Tokens),input=today.Input,output=today.Output,cacheRead=today.CacheRead,cacheWrite=today.CacheWrite,requests=today.Requests,apiEquivalentUsd=today.Models.Sum(m=>m.EquivalentUsd),models=today.Models.Select(m=>new{model=m.Model,effort=m.Effort,tokens=m.Tokens,apiEquivalentUsd=m.EquivalentUsd})},
-                quota=windows.Select(w=>new{minutes=w.Minutes,remainingPercent=(double?)(bucket.ObservedAt<=now&&now-bucket.ObservedAt<=300&&(w.ResetsAt==0||w.ResetsAt>now)&&!Double.IsNaN(w.UsedPercent)&&!Double.IsInfinity(w.UsedPercent)?Math.Max(0,Math.Min(100,100-w.UsedPercent)):(double?)null),resetsAt=w.ResetsAt,observedAt=bucket.ObservedAt}),
+                quota=windows.Select(w=>new{minutes=w.Minutes,remainingPercent=w.RemainingPercent(bucket,now),resetsAt=w.ResetsAt,observedAt=bucket.ObservedAt}),
                 activity=new{activeTasks=activity==null?0:activity.ActiveTasks,uncertainTasks=activity==null?0:activity.UncertainTasks,completedTasks=activity==null?0:activity.CompletedTasks,completionSerial=activity==null?0:activity.CompletionSerial},
                 motion=preferences.OrbAnimation=="off"?"off":preferences.OrbAnimation=="eco"||RenderCapability.Tier==0?"eco":"smooth"
             }});Send();

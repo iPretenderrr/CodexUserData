@@ -12,13 +12,19 @@ namespace CodexUserData
     internal sealed class QuotaWindow
     {
         public double UsedPercent {get;set;} public long Minutes {get;set;} public long ResetsAt {get;set;}
-        internal string Remaining(long now){return ResetsAt>0&&now>=ResetsAt?"待更新":Math.Max(0,Math.Min(100,100-UsedPercent)).ToString("0.#",CultureInfo.InvariantCulture)+"%";}
+        internal double? RemainingPercent(QuotaBucket bucket,long now)
+        {
+            if(bucket==null||!bucket.IsFresh(now)||(ResetsAt>0&&now>=ResetsAt)||Double.IsNaN(UsedPercent)||Double.IsInfinity(UsedPercent))return null;
+            return Math.Max(0,Math.Min(100,100-UsedPercent));
+        }
+        internal string Remaining(QuotaBucket bucket,long now){double? value=RemainingPercent(bucket,now);return value.HasValue?value.Value.ToString("0.#",CultureInfo.InvariantCulture)+"%":"待更新";}
         internal string Label {get{return Minutes>=1440?(Minutes/1440.0).ToString("0.#")+"天":Minutes>=60?(Minutes/60.0).ToString("0.#")+"小时":Minutes+"分钟";}}
     }
     internal sealed class QuotaBucket
     {
         public string Id {get;set;} public string Name {get;set;} public string Origin {get;set;}
         public long ObservedAt {get;set;} public QuotaWindow Primary {get;set;} public QuotaWindow Secondary {get;set;}
+        internal bool IsFresh(long now){return ObservedAt>0&&ObservedAt<=now+5&&now-ObservedAt<=300;}
     }
     internal static class QuotaReader
     {

@@ -87,7 +87,15 @@ namespace CodexUserData
             var border=new FrameworkElementFactory(typeof(Border));border.Name="ItemShell";border.SetValue(Border.PaddingProperty,new Thickness(11,8,11,8));border.SetValue(Border.CornerRadiusProperty,new CornerRadius(6));border.SetValue(Border.BackgroundProperty,Brushes.Transparent);
             var cp=new FrameworkElementFactory(typeof(ContentPresenter));cp.SetValue(ContentPresenter.ContentSourceProperty,"Header");border.AppendChild(cp);
             var t=new ControlTemplate(typeof(MenuItem)){VisualTree=border};var tr=new Trigger{Property=MenuItem.IsHighlightedProperty,Value=true};tr.Setters.Add(new Setter(Border.BackgroundProperty,new DynamicResourceExtension("ThemeHover"),"ItemShell"));t.Triggers.Add(tr);
-            style.Setters.Add(new Setter(Control.TemplateProperty,t));m.ItemContainerStyle=style;return m;
+            style.Setters.Add(new Setter(Control.TemplateProperty,t));m.ItemContainerStyle=style;
+            m.Opened+=delegate
+            {
+                m.BeginAnimation(UIElement.OpacityProperty,null);m.Opacity=1;
+                if(!SystemParameters.MenuAnimation||!MotionAllowed)return;
+                var fade=new System.Windows.Media.Animation.DoubleAnimation(0,1,TimeSpan.FromMilliseconds(120)){EasingFunction=new System.Windows.Media.Animation.CubicEase{EasingMode=System.Windows.Media.Animation.EasingMode.EaseOut}};
+                System.Windows.Media.Animation.Timeline.SetDesiredFrameRate(fade,MotionFrameRate);m.BeginAnimation(UIElement.OpacityProperty,fade);
+            };
+            return m;
         }
         internal static TextBox Input(string text){return new TextBox{Text=text,Background=Surface,Foreground=Ink,BorderBrush=Line,BorderThickness=new Thickness(1),Padding=new Thickness(8,6,8,6),FontSize=12,CaretBrush=Accent};}
         internal static void InstallStyles(FrameworkElement target)

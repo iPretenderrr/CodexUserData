@@ -39,6 +39,7 @@ namespace CodexUserData
             AddNavigation(menu,"display","数据显示");
             AddNavigation(menu,"data","数据与额度");
             AddNavigation(menu,"behavior","启动与行为");
+            AddNavigation(menu,"about","关于软件");
 
             var appearance=Page("外观与主题","窗口主题、渐变和整体透明度");
             themeEditor=new ThemeEditor(draft);appearance.Children.Add(themeEditor);
@@ -66,9 +67,9 @@ namespace CodexUserData
             Label(floating,"悬浮球整体不透明度");
             var ballAlphaLabel=Theme.Text(((int)(draft.BallOpacity*100))+"%",12,Theme.Accent);floating.Children.Add(ballAlphaLabel);
             var ballAlpha=new Slider{Minimum=20,Maximum=100,Value=draft.BallOpacity*100,TickFrequency=5,IsSnapToTickEnabled=true};ballAlpha.ValueChanged+=delegate{draft.BallOpacity=ballAlpha.Value/100;ballAlphaLabel.Text=((int)ballAlpha.Value)+"%";};floating.Children.Add(ballAlpha);
-            Label(floating,"光环动画");
-            var orbMotion=new ChoiceButton(new Dictionary<string,string>{{"auto","自动 · 按设备性能调节"},{"smooth","流畅 · 最高 60 帧"},{"eco","节能 · 最高 30 帧"},{"off","关闭动画"}},"光环动画档位");orbMotion.Select(draft.OrbAnimation);orbMotion.Changed+=v=>draft.OrbAnimation=v;floating.Children.Add(orbMotion);
-            Note(floating,"“自动”会按设备性能调节；节能模式减少粒子和刷新帧率。贴边后停止圆环动画，运行任务时额度条显示轻量脉冲。",Theme.Muted);
+            Label(floating,"界面与光环动画");
+            var orbMotion=new ChoiceButton(new Dictionary<string,string>{{"auto","自动 · 按设备性能调节"},{"smooth","流畅 · 最高 60 帧"},{"eco","节能 · 最高 30 帧"},{"off","关闭动画"}},"界面与光环动画档位");orbMotion.Select(draft.OrbAnimation);orbMotion.Changed+=v=>draft.OrbAnimation=v;floating.Children.Add(orbMotion);
+            Note(floating,"统一控制窗口过渡、菜单、圆环、托盘呼吸和贴边脉冲；关闭后保留静态状态反馈。",Theme.Muted);
             var completion=new CheckBox{Content="任务完成后闪烁提示",IsChecked=draft.CompletionFlash,Foreground=Theme.Ink,Margin=new Thickness(0,16,0,5)};floating.Children.Add(completion);completion.Checked+=delegate{draft.CompletionFlash=true;};completion.Unchecked+=delegate{draft.CompletionFlash=false;};
             Note(floating,"明确完成后持续闪烁，鼠标移入悬浮窗或托盘确认。任务状态仍可能受日志落盘延迟影响。",Theme.Muted);
             AddPage("floating",floating);
@@ -125,12 +126,25 @@ namespace CodexUserData
             Note(behavior,"两种自动启动方式互斥。随 Codex 启动使用轻量后台检测器；移动程序文件夹后，启动一次软件以更新路径。",Theme.Muted);
             AddPage("behavior",behavior);
 
+            var about=Page("关于软件","版本、运行环境与数据说明");
+            var identity=new StackPanel();var identityCard=new Border{Background=Theme.Surface,BorderBrush=Theme.Line,BorderThickness=new Thickness(1),CornerRadius=new CornerRadius(12),Padding=new Thickness(16),Margin=new Thickness(0,12,0,4),Child=identity};about.Children.Add(identityCard);
+            var product=Theme.Text("CodexUserData",22,Theme.Ink);product.FontWeight=FontWeights.SemiBold;identity.Children.Add(product);
+            var description=Theme.Text("本地 Codex 使用量、模型构成与账号额度可视化工具",11,Theme.Muted);description.TextWrapping=TextWrapping.Wrap;description.Margin=new Thickness(0,6,0,2);identity.Children.Add(description);
+            // Read the assembly version so protected and development builds always report their real package version.
+            string version=System.Reflection.Assembly.GetExecutingAssembly().GetName().Version.ToString(3);
+            Info(about,"版本","v"+version,"AboutVersion");Info(about,"运行环境","Windows x64 · .NET Framework 4.8",null);Info(about,"开源许可","MIT License",null);Info(about,"用户数据",Program.DataFolder,null);
+            Note(about,"设置、价格、自定义形态和统计缓存保存在当前 Windows 用户目录。软件不会上传本地用量记录；在线额度由已登录的 Codex CLI 查询。",Theme.Muted);
+            var project=Theme.Button("打开 GitHub 项目主页","打开 CodexUserData GitHub 仓库",180);project.HorizontalAlignment=HorizontalAlignment.Left;project.Margin=new Thickness(0,14,0,0);about.Children.Add(project);
+            project.Click+=delegate{try{System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo{FileName="https://github.com/iPretenderrr/CodexUserData",UseShellExecute=true});}catch(Exception ex){error.Text="无法打开项目主页："+ex.Message;}};
+            AddPage("about",about);
+
             Closed+=delegate{Theme.Apply(Result??current);};
             var bottom=new StackPanel{Margin=new Thickness(0,12,0,0)};Grid.SetRow(bottom,1);outer.Children.Add(bottom);
             error=Theme.Text("",11,Theme.Warning);error.TextWrapping=TextWrapping.Wrap;bottom.Children.Add(error);
             var buttons=new StackPanel{Orientation=Orientation.Horizontal,HorizontalAlignment=HorizontalAlignment.Right,Margin=new Thickness(0,8,0,0)};bottom.Children.Add(buttons);
-            var cancel=Theme.Button("取消","取消设置",72);cancel.IsCancel=true;cancel.Click+=delegate{DialogResult=false;};buttons.Children.Add(cancel);
+            var cancel=Theme.Button("取消","取消设置",72);cancel.Click+=delegate{WindowInteraction.CompleteDialog(this,false);};buttons.Children.Add(cancel);
             var save=Theme.Button("保存设置","保存设置",98);save.Background=Theme.Hover;save.Foreground=Theme.Accent;save.Margin=new Thickness(8,0,0,0);save.IsDefault=true;save.Click+=Save;buttons.Children.Add(save);
+            PreviewKeyDown+=delegate(object sender,System.Windows.Input.KeyEventArgs args){if(args.Key==System.Windows.Input.Key.Escape){args.Handled=true;WindowInteraction.CompleteDialog(this,false);}};
             SelectPage("appearance");
         }
         private void AddNavigation(Panel menu,string key,string title)
@@ -155,6 +169,13 @@ namespace CodexUserData
             {
                 bool selected=item.Key==key;item.Value.Tag=selected?"selected":null;item.Value.Background=selected?Theme.Hover:Brushes.Transparent;item.Value.Foreground=selected?Theme.Accent:Theme.Muted;item.Value.BorderBrush=selected?Theme.Accent:Brushes.Transparent;
             }
+            if(IsLoaded&&Theme.MotionAllowed)
+            {
+                var page=pages[key];var shift=new TranslateTransform(7,0);page.RenderTransform=shift;page.Opacity=1;
+                var ease=new System.Windows.Media.Animation.CubicEase{EasingMode=System.Windows.Media.Animation.EasingMode.EaseOut};
+                var fade=new System.Windows.Media.Animation.DoubleAnimation(0,1,TimeSpan.FromMilliseconds(150)){EasingFunction=ease};var slide=new System.Windows.Media.Animation.DoubleAnimation(7,0,TimeSpan.FromMilliseconds(170)){EasingFunction=ease};
+                int fps=Theme.MotionFrameRate;System.Windows.Media.Animation.Timeline.SetDesiredFrameRate(fade,fps);System.Windows.Media.Animation.Timeline.SetDesiredFrameRate(slide,fps);page.BeginAnimation(OpacityProperty,fade);shift.BeginAnimation(TranslateTransform.XProperty,slide);
+            }
         }
         private static StackPanel Page(string title,string subtitle)
         {
@@ -162,6 +183,11 @@ namespace CodexUserData
             var note=Theme.Text(subtitle,11,Theme.Muted);note.Margin=new Thickness(0,6,0,3);note.TextWrapping=TextWrapping.Wrap;body.Children.Add(note);return body;
         }
         private static void Label(Panel panel,string label){var text=Theme.Text(label,12,Theme.Ink);text.Margin=new Thickness(0,20,0,8);panel.Children.Add(text);}
+        private static void Info(Panel panel,string label,string value,string id)
+        {
+            var row=new DockPanel{Margin=new Thickness(0,13,0,0)};var content=Theme.Text(value,11,Theme.Ink);content.MaxWidth=300;content.TextTrimming=TextTrimming.CharacterEllipsis;content.ToolTip=value;DockPanel.SetDock(content,Dock.Right);row.Children.Add(content);row.Children.Add(Theme.Text(label,11,Theme.Muted));
+            if(!String.IsNullOrEmpty(id))System.Windows.Automation.AutomationProperties.SetAutomationId(content,id);panel.Children.Add(row);
+        }
         private static void Note(Panel panel,string note,Brush color){var text=Theme.Text(note,11,color);text.TextWrapping=TextWrapping.Wrap;text.LineHeight=17;text.Margin=new Thickness(0,7,0,0);panel.Children.Add(text);}
         private static void PathRow(Panel parent,TextBox input,bool folder)
         {
@@ -186,7 +212,7 @@ namespace CodexUserData
             if(draft.BallStyle=="html")try{ShapeManifest.Read(ShapeManifest.Resolve(draft.CustomShape));}catch(Exception){SelectPage("floating");error.Text="请先导入有效的 HTML 形态，或选择内置形态。";return;}
             draft.RefreshSeconds=seconds;draft.Metrics=selected;draft.Validate();
             try{StartupRegistration.Configure(draft,Path.Combine(Program.Folder,"CodexUserData.exe"));}catch(Exception ex){SelectPage("behavior");error.Text="无法更新自启动设置："+ex.Message;return;}
-            Result=draft;DialogResult=true;
+            Result=draft;WindowInteraction.CompleteDialog(this,true);
         }
     }
 }

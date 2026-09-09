@@ -259,8 +259,6 @@ namespace CodexUserData
             if(!(bool)window.GetValue(AttachedProperty)){window.SetValue(AttachedProperty,true);window.IsVisibleChanged+=delegate{Render(window);};window.StateChanged+=delegate{Render(window);};}
             if((bool)window.GetValue(PendingProperty)==pending)return;window.SetValue(PendingProperty,pending);Render(window);
         }
-        internal static void Flash(System.Windows.Window window)
-        {Set(window,true);}
         private static void Render(System.Windows.Window window)
         {
             var content=window.Content as System.Windows.UIElement;

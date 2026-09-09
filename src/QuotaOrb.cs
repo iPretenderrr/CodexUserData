@@ -50,14 +50,8 @@ namespace CodexUserData
         private DrawingGroup shell;
         private Brush chassisFill;
         private FormattedText label;
-        private double? previewPhase,previewEnergy;
-        internal bool Animating {get{return subscribed;}}
-        internal bool ShortKnown {get{return rings[0].Known;}}
-        internal bool LongKnown {get{return rings[1].Known;}}
-        internal string ShortLabel {get{return rings[0].Label;}}
-        internal string LongLabel {get{return rings[1].Label;}}
-        internal double ShortRemaining {get{return rings[0].Target;}}
-        internal double LongRemaining {get{return rings[1].Target;}}
+        private bool ShortKnown {get{return rings[0].Known;}}
+        private bool LongKnown {get{return rings[1].Known;}}
         internal int VisibleRingCount {get;private set;}
 
         internal QuotaOrb()
@@ -120,22 +114,15 @@ namespace CodexUserData
             double burst=rateEnergy*Math.Max(0,1-(clock.Elapsed.TotalSeconds-lastBurst)/10);
             return Math.Max(running?.72:0,burst);
         }
-        private int FrameRate()
-        {
-            if(prefs==null||prefs.OrbAnimation=="off"||!SystemParameters.ClientAreaAnimation||SystemParameters.HighContrast)return 0;
-            if(prefs.OrbAnimation=="eco"||(RenderCapability.Tier>>16)==0)return 30;
-            if(prefs.OrbAnimation=="auto"&&System.Windows.Forms.SystemInformation.PowerStatus.PowerLineStatus==System.Windows.Forms.PowerLineStatus.Offline)return 30;
-            return 60;
-        }
+        private int FrameRate(){return prefs==null?0:Theme.ActivityFrameRate(prefs.OrbAnimation);}
         private void RefreshState()
         {
             if(disposed)return;long now=LocalCodexUsage.Unix(DateTime.Now);
-            bool fresh=bucket!=null&&bucket.ObservedAt>0&&now-bucket.ObservedAt>=-5&&now-bucket.ObservedAt<=300;
             for(int i=0;i<2;i++)
             {
                 var ring=rings[i];var w=SelectWindow(bucket,i==0?"short":"week");
-                bool known=fresh&&w!=null&&(w.ResetsAt<=0||now<w.ResetsAt)&&!Double.IsNaN(w.UsedPercent)&&!Double.IsInfinity(w.UsedPercent);
-                double value=known?Math.Max(0,Math.Min(1,1-w.UsedPercent/100)):0;
+                double? remaining=w==null?null:w.RemainingPercent(bucket,now);bool known=remaining.HasValue;
+                double value=known?remaining.Value/100:0;
                 // Unknown data clears immediately; a first valid sample never animates from fake zero.
                 if(!ring.Known||!known)ring.Remaining=value;ring.Known=known;ring.Target=value;
                 ring.Label=known?(value*100).ToString("0",CultureInfo.InvariantCulture)+"%":"—";
@@ -255,7 +242,7 @@ namespace CodexUserData
         }
         private void DrawRing(DrawingContext dc,Ring ring,double otherFocus,double time,double power)
         {
-            double fraction=previewPhase.HasValue?ring.Target:ring.Remaining;
+            double fraction=ring.Remaining;
             double radius=VisibleRingCount==1?52.5:ring.Radius,drawValue=Math.Round(fraction,5);
             bool warp=power>.003;
             if(warp||ring.Warped||ring.Drawn!=drawValue||ring.DrawnRadius!=radius)
@@ -326,11 +313,11 @@ namespace CodexUserData
             base.OnRender(dc);double diameter=Math.Min(ActualWidth,ActualHeight);if(diameter<=0)return;
             if(shell==null||paletteRevision!=Theme.Revision){CacheShell();textKey=null;RefreshState();}
             dc.PushTransform(new TranslateTransform((ActualWidth-diameter)/2,(ActualHeight-diameter)/2));dc.PushTransform(new ScaleTransform(diameter/128,diameter/128));
-            double time=previewPhase??phase,click=ClickStrength();
-            double power=previewEnergy??Math.Min(1,Math.Max(energy,Math.Max(hover*.88,Math.Max(press*.95,click))));
+            double time=phase,click=ClickStrength();
+            double power=Math.Min(1,Math.Max(energy,Math.Max(hover*.88,Math.Max(press*.95,click))));
             // Stronger elastic feedback affects the colored rings only. The native window and text
             // never rotate or resize, so dragging, edge contact and percentage reading stay stable.
-            double bounce=previewPhase.HasValue?0:Math.Sin((clock.Elapsed.TotalSeconds-pulseAt)*15)*click;
+            double bounce=Math.Sin((clock.Elapsed.TotalSeconds-pulseAt)*15)*click;
             dc.PushTransform(new TranslateTransform(offsetX*.7,offsetY*.7));
             dc.PushTransform(new ScaleTransform(1-.065*press+.012*bounce,1-.025*press-.012*bounce,64,64));
             dc.PushTransform(new RotateTransform(power*6*Math.Sin(time)+bounce*8,64,64));
@@ -375,8 +362,6 @@ namespace CodexUserData
             if(text==null)return;double scale=Math.Min(1,maxWidth/Math.Max(1,text.Width));
             dc.PushTransform(new ScaleTransform(scale,scale,64,y+text.Height/2));dc.DrawText(text,new Point(64-text.Width/2,y));dc.Pop();
         }
-        // Deterministic frames for synthetic previews without activating a real task.
-        internal void PreviewFrame(double time,double strength){previewPhase=time;previewEnergy=strength;InvalidateVisual();}
         public void Dispose(){disposed=true;Stop();}
     }
 }
