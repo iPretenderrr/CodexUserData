@@ -1,0 +1,56 @@
+# Reviewed open-source files only. New files require an explicit privacy review.
+*
+!/src/
+!/tools/
+!/docs/
+!/examples/
+!/examples/aurora/
+!/.gitignore
+!/.gitattributes
+!/README.md
+!/README-release.md
+!/LICENSE
+!/THIRD-PARTY-NOTICES.txt
+!/CodexUserData.exe.config
+!/启动.cmd
+!/restore-dependencies.ps1
+!/pack.ps1
+!/obfuscation.rules.xml
+!/docs/DEVELOPMENT.md
+!/docs/CodexUserData-使用说明书.html
+!/docs/CodexUserData-使用说明书.pdf
+!/docs/HTML形态接口.md
+!/examples/aurora/shape.json
+!/examples/aurora/index.html
+!/examples/aurora/codexuserdata.js
+!/tools/ReleaseProbe.cs
+!/tools/HtmlReleaseProbe.cs
+!/src/build.ps1
+!/src/widget.manifest
+!/src/ActivityJsonLine.cs
+!/src/CodexActivity.cs
+!/src/CustomShape.cs
+!/src/Dashboard.cs
+!/src/FloatingBall.cs
+!/src/LocalCodexUsage.cs
+!/src/OrbAppearance.cs
+!/src/PortableServices.cs
+!/src/PriceEditor.cs
+!/src/Program.cs
+!/src/QuotaOrb.cs
+!/src/QuotaReader.cs
+!/src/QuotaStatus.cs
+!/src/SettingsWindow.cs
+!/src/Theme.cs
+!/src/ThemeEditor.cs
+!/src/ThemePalette.cs
+!/src/TrayFlyout.cs
+!/src/UsageCharts.cs
+!/src/UsageDatabase.cs
+!/src/UsageDetails.cs
+!/src/Widget.cs
+!/src/WindowInteraction.cs
+
+# Excluded: data, .build, private-backups, dist, vendor, binaries, settings, logs,
+# databases, secrets, screenshots, generated icons, export folders and local review manifests.
+# Ignore rules do not remove tracked history or protect manual website uploads.

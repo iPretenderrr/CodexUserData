@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Obfuscator>
+  <Var name="InPath" value="@INPUT@" />
+  <Var name="OutPath" value="@OUTPUT@" />
+  <Var name="KeepPublicApi" value="false" />
+  <Var name="HidePrivateApi" value="true" />
+  <Var name="HideStrings" value="true" />
+  <Var name="RenameFields" value="true" />
+  <Var name="RenameProperties" value="true" />
+  <Var name="RenameEvents" value="true" />
+  <Var name="UseUnicodeNames" value="false" />
+  <Var name="SkipAnonymous" value="true" />
+  <Var name="SkipEnums" value="true" />
+  <AssemblySearchPath path="@FRAMEWORK@" />
+  <AssemblySearchPath path="@FRAMEWORK@\WPF" />
+  <Module file="@ASSEMBLY@">
+    <!-- JSON settings/cache use public field/property names as their persisted schema.
+         These exceptions protect compatibility while implementation names are obfuscated. -->
+    <SkipField type="*" attrib="public" rx=".*" />
+    <SkipProperty type="*" attrib="public" rx=".*" />
+  </Module>
+</Obfuscator>
