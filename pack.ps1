@@ -1,4 +1,4 @@
-﻿param([string]$Version='1.6.1')
+﻿param([string]$Version='1.6.2')
 $ErrorActionPreference='Stop'
 if($Version -notmatch '^\d+\.\d+\.\d+$'){throw 'Version must be major.minor.patch'}
 $root=[IO.Path]::GetFullPath($PSScriptRoot)

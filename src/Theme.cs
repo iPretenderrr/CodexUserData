@@ -24,7 +24,11 @@ namespace CodexUserData
             border.SetBinding(Border.BorderBrushProperty,new Binding("BorderBrush"){RelativeSource=new RelativeSource(RelativeSourceMode.TemplatedParent)});
             border.SetBinding(Border.BorderThicknessProperty,new Binding("BorderThickness"){RelativeSource=new RelativeSource(RelativeSourceMode.TemplatedParent)});
             border.SetBinding(Border.PaddingProperty,new Binding("Padding"){RelativeSource=new RelativeSource(RelativeSourceMode.TemplatedParent)});
-            var presenter=new FrameworkElementFactory(typeof(ContentPresenter));presenter.SetValue(FrameworkElement.HorizontalAlignmentProperty,HorizontalAlignment.Center);presenter.SetValue(FrameworkElement.VerticalAlignmentProperty,VerticalAlignment.Center);border.AppendChild(presenter);
+            // Keep centered buttons as the default, while allowing navigation and list-style
+            // buttons to request their own alignment without maintaining a second template.
+            var presenter=new FrameworkElementFactory(typeof(ContentPresenter));
+            presenter.SetBinding(FrameworkElement.HorizontalAlignmentProperty,new Binding("HorizontalContentAlignment"){RelativeSource=new RelativeSource(RelativeSourceMode.TemplatedParent)});
+            presenter.SetBinding(FrameworkElement.VerticalAlignmentProperty,new Binding("VerticalContentAlignment"){RelativeSource=new RelativeSource(RelativeSourceMode.TemplatedParent)});border.AppendChild(presenter);
             var template=new ControlTemplate(type){VisualTree=border};
             var hover=new Trigger{Property=UIElement.IsMouseOverProperty,Value=true};hover.Setters.Add(new Setter(Border.BackgroundProperty,new DynamicResourceExtension("ThemeHover"),"Shell"));template.Triggers.Add(hover);
             var focus=new Trigger{Property=UIElement.IsKeyboardFocusedProperty,Value=true};focus.Setters.Add(new Setter(Border.BorderBrushProperty,new DynamicResourceExtension("ThemeAccent"),"Shell"));focus.Setters.Add(new Setter(Border.BorderThicknessProperty,new Thickness(1),"Shell"));template.Triggers.Add(focus);

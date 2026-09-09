@@ -116,13 +116,22 @@ internal static class ReleaseProbe
    var bitmap=new RenderTargetBitmap(600,700,96,96,PixelFormats.Pbgra32);bitmap.Render(body);var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(bitmap));using(var f=File.Create(Path.Combine(dir,"obfuscated-ui.png")))encoder.Save(f);
    Check(body.ActualWidth==600&&body.ActualHeight==700,"actual obfuscated WPF view renders successfully");
    var settingsWindow=(Window)New("SettingsWindow",prefs,null);Check(settingsWindow.Content!=null,"settings UI opens with compatible cloned preferences");
+   var settingsFields=settingsWindow.GetType().GetFields(BindingFlags.Instance|BindingFlags.Public|BindingFlags.NonPublic);
+   IDictionary settingsPages=(IDictionary)settingsFields.Single(f=>f.FieldType==typeof(Dictionary<string,ScrollViewer>)).GetValue(settingsWindow),settingsNavigation=(IDictionary)settingsFields.Single(f=>f.FieldType==typeof(Dictionary<string,Button>)).GetValue(settingsWindow);
+   bool categories=settingsPages.Count==5&&settingsNavigation.Count==5;
+   foreach(string key in new[]{"appearance","floating","display","data","behavior"})
+   {
+    Call("SettingsWindow",settingsWindow,"SelectPage",key);
+    categories=categories&&settingsPages.Values.Cast<ScrollViewer>().Count(x=>x.Visibility==Visibility.Visible)==1&&settingsNavigation.Values.Cast<Button>().Count(x=>(string)x.Tag=="selected")==1;
+   }
+   Check(categories,"settings are split into five switchable categories");
    Set(prefs,"ThemeMode","custom");Set(prefs,"GradientColors",new[]{"#F7BBE3","#E6D7FA","#AAF1ED"});Set(prefs,"GradientStops",new[]{0d,48d,100d});Set(prefs,"GradientKind","radial");Set(prefs,"GradientSpan",65d);
    var themeClone=Call("Preferences",prefs,"Clone");Check((string)Get(themeClone,"ThemeMode")=="custom"&&((string[])Get(themeClone,"GradientColors")).Length==3&&(double)Get(themeClone,"GradientSpan")==65,"theme settings survive protected JSON roundtrip");
    Call("Theme",null,"Apply",prefs);body.UpdateLayout();bitmap.Render(body);Set(prefs,"ThemeMode","light");Call("Theme",null,"Apply",prefs);body.UpdateLayout();bitmap.Render(body);
-   var themeSettings=(Window)New("SettingsWindow",themeClone,null);var themeBody=(FrameworkElement)themeSettings.Content;themeBody.Measure(new Size(430,760));themeBody.Arrange(new Rect(0,0,430,760));themeBody.UpdateLayout();
-   Check(themeBody.ActualWidth==430,"protected theme editor renders and palettes switch after template sealing");
+   var themeSettings=(Window)New("SettingsWindow",themeClone,null);var themeBody=(FrameworkElement)themeSettings.Content;themeBody.Measure(new Size(760,720));themeBody.Arrange(new Rect(0,0,760,720));themeBody.UpdateLayout();
+   Check(themeBody.ActualWidth==760,"protected theme editor renders and palettes switch after template sealing");
    var flyout=(Window)New("TrayFlyout",new Action(()=>{}),new Action(()=>{}),new Action(()=>{}));Check(flyout.Content!=null,"tray flyout constructs after string hiding");
-   Check(ClearCorners(window,600,700)&&ClearCorners(settingsWindow,430,760)&&ClearCorners(flyout,370,610),"main and popup corners are fully transparent at 100/150/200 percent DPI");
+   Check(ClearCorners(window,600,700)&&ClearCorners(settingsWindow,760,720)&&ClearCorners(flyout,370,610),"main and popup corners are fully transparent at 100/150/200 percent DPI");
    Set(prefs,"BallDock","");Set(prefs,"BallStyle","capsule");var getPrefs=System.Linq.Expressions.Expression.Lambda(typeof(Func<>).MakeGenericType(TypeFor("Preferences")),System.Linq.Expressions.Expression.Constant(prefs)).Compile();
    foreach(bool expanded in new[]{false,true}){Set(prefs,"BallExpanded",expanded);var ball=(Window)New("FloatingBall",getPrefs,new Action(()=>{}),new Action(()=>{}),new Action(()=>{}));Check(ClearCorners(ball,(int)ball.Width,(int)ball.Height),"floating ball corners are fully transparent: "+(expanded?"large":"small"));}
    Set(prefs,"BallStyle","orb");Set(prefs,"OrbQuotaWindow","short");Set(prefs,"OrbSize",100d);Set(prefs,"OrbAnimation","eco");var orbPrefs=Call("Preferences",prefs,"Clone");
