@@ -30,7 +30,7 @@ document.querySelector('#handle').addEventListener('pointerdown', e => {
 </script>
 ```
 
-数据按设置的用量刷新间隔推送；任务状态更新时也推送。页面不要再扫描日志或自行查询账户。隐藏形态时停止界面工作，恢复后读取最新快照。数据不是计费凭证。
+宿主按设置的用量刷新间隔检查数据，内容变化或任务状态变化时推送；页面发出 `ready` 或恢复显示时会收到最新快照。相同数据可能不再重复推送，因此不要把推送间隔当作页面计时器。页面不要再扫描日志或自行查询账户。隐藏形态时停止界面工作，恢复后读取最新快照。数据不是计费凭证。
 
 | 字段 | 含义 |
 | --- | --- |
@@ -44,6 +44,7 @@ document.querySelector('#handle').addEventListener('pointerdown', e => {
 | `quota[]` | minutes、remainingPercent、resetsAt、observedAt |
 | `quota[].remainingPercent` | 剩余额度 0–100；未知、过期或快照超过 5 分钟为 null，不能当作 0% 或 100% |
 | `activity.activeTasks` / `uncertainTasks` | 检测到活跃/待确认的任务数；日志有延迟，不是服务器运行状态保证 |
+| `activity.monitoringAvailable` | 可选布尔值；当前任务监测可用且报告不超过 5 秒时为 true。false 表示目录缺失、读取受限、报告过期或尚未读取，不能把任务数为 0 当成“空闲”或“全部完成”；旧版没有此字段时也不要推定监测可用 |
 | `activity.completedTasks` / `completionSerial` | 本轮检测到的明确完成数 / 本次运行内递增的完成序号。页面按序号去重；首次接收只记录基线，不播放历史完成效果。启动、后台审查、中断和超时不触发完成 |
 | `motion` | smooth / eco / off；尊重此设置与 prefers-reduced-motion |
 
@@ -51,7 +52,9 @@ document.querySelector('#handle').addEventListener('pointerdown', e => {
 
 ## 资源与性能
 
-背景可透明；使用 CSS 圆角、SVG、Canvas 制作任意视觉形态。窗口命中区域仍是矩形。尺寸按 DPI 自动缩放；运行时 resize 不改写配置，下次载入恢复 shape.json 尺寸。
+背景可透明；使用 CSS 圆角、SVG、Canvas 制作任意视觉形态。窗口命中区域仍是矩形。尺寸按 DPI 自动缩放；运行时 `resize` 会合并应用最新尺寸，保存到当前用户设置，吸附恢复和重新启动软件后继续使用。最多记住 32 个形态的尺寸；没有已保存尺寸的新形态使用 `shape.json` 中的初始尺寸。屏幕空间不足时，宿主暂时约束实际窗口，保留原始尺寸请求。
+
+吸附时宿主保留现有页面并尝试挂起浏览器，恢复时先更新数据，再等待页面绘制后播放展开动画。首次加载有原生加载提示，加载失败仍可通过原生右键菜单返回；无需修改 API v1 页面来接入这套流程。宿主等待绘制有时间上限，页面应避免长时间同步脚本，不能依靠展开动画掩盖阻塞。页面有自己的动画循环时，还应监听 `visibilitychange` 暂停和恢复工作。
 
 资源仅来自该形态目录，支持 HTML、JS、CSS、JSON、SVG、PNG、JPG、WebP、GIF、WOFF2；单个响应最多 8 MB，导入最多 256 个文件、25 MB、12 层目录，不接受符号链接。将依赖打包到本地，不能使用 CDN、远程请求、iframe、弹窗或下载。不会向页面暴露账号标识、凭据、数据库路径、日志内容或文件读写 API。
 

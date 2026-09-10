@@ -1,4 +1,5 @@
-param([string]$Version='1.6.10')
+﻿param([string]$Version='1.7.0')
+# Keep this script UTF-8 with BOM: Windows PowerShell 5.1 must decode the Chinese allowlist paths correctly.
 $ErrorActionPreference='Stop'
 if($Version -notmatch '^\d+\.\d+\.\d+$'){throw 'Version must be major.minor.patch'}
 $root=[IO.Path]::GetFullPath($PSScriptRoot)
@@ -18,6 +19,8 @@ New-Item -ItemType Directory -Path $inputDir,$protected -Force | Out-Null
 [IO.Compression.ZipFile]::ExtractToDirectory($package,$toolDir)
 & (Join-Path $root 'src\build.ps1') -OutputPath (Join-Path $inputDir 'CodexUserData.exe')
 if(-not(Test-Path -LiteralPath (Join-Path $inputDir 'CodexUserData.exe'))){throw 'Compilation failed'}
+$assemblyVersion=[Reflection.AssemblyName]::GetAssemblyName((Join-Path $inputDir 'CodexUserData.exe')).Version.ToString(3)
+if($assemblyVersion -ne $Version){throw "Package version $Version does not match compiled application $assemblyVersion. Update the assembly version before packaging."}
 $config=[IO.File]::ReadAllText((Join-Path $root 'obfuscation.rules.xml'))
 foreach($pair in @(@('@INPUT@',$inputDir),@('@OUTPUT@',$protected),@('@FRAMEWORK@',$framework),@('@ASSEMBLY@',(Join-Path $inputDir 'CodexUserData.exe')))){$config=$config.Replace($pair[0],[Security.SecurityElement]::Escape($pair[1]))}
 $configPath=Join-Path $run 'obfuscar.xml';[IO.File]::WriteAllText($configPath,$config)

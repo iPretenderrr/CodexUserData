@@ -1,6 +1,6 @@
 ﻿using System;
-using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Runtime.CompilerServices;
 using System.Windows;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
@@ -24,8 +24,50 @@ namespace CodexUserData
             internal double NextRevealScale=.94;
             internal bool Prepared;
             internal bool Dismissing;
+            internal bool NativeFade;
+            internal double NativeOpacity;
+            internal bool Closed;
+            internal bool CompletingDialog,DialogWasEnabled;
         }
-        private static readonly Dictionary<Window,MotionState> motions=new Dictionary<Window,MotionState>();
+        // Keep closed-state guards without retaining disposed windows or their visual trees.
+        private static readonly ConditionalWeakTable<Window,MotionState> motions=new ConditionalWeakTable<Window,MotionState>();
+        private static readonly DependencyProperty NativeProgressProperty=DependencyProperty.RegisterAttached("NativeProgress",typeof(double),typeof(WindowInteraction),new PropertyMetadata(1.0,NativeProgressChanged));
+        private static void NativeProgressChanged(DependencyObject sender,DependencyPropertyChangedEventArgs args)
+        {
+            var window=sender as Window;MotionState state;
+            if(window!=null&&motions.TryGetValue(window,out state)&&!state.Closed)window.Opacity=state.NativeOpacity*(double)args.NewValue;
+        }
+        private static bool IsClosed(Window window){MotionState state;return window==null||motions.TryGetValue(window,out state)&&state.Closed;}
+        // Work areas and requested bounds are physical pixels. Keep this pure so mixed-DPI
+        // and small-screen constraints can be verified without moving desktop windows.
+        internal static Rect FitBounds(Rect requested,Rect work,double margin)
+        {
+            double xInset=Math.Min(Math.Max(0,margin),Math.Max(0,(work.Width-1)/2));
+            double yInset=Math.Min(Math.Max(0,margin),Math.Max(0,(work.Height-1)/2));
+            double width=Math.Min(Math.Max(1,Math.Ceiling(requested.Width)),Math.Max(1,Math.Floor(work.Width-2*xInset)));
+            double height=Math.Min(Math.Max(1,Math.Ceiling(requested.Height)),Math.Max(1,Math.Floor(work.Height-2*yInset)));
+            return new Rect(Math.Max(work.Left+xInset,Math.Min(work.Right-xInset-width,requested.Left)),Math.Max(work.Top+yInset,Math.Min(work.Bottom-yInset-height,requested.Top)),width,height);
+        }
+        internal static void SetOpacity(Window window,double opacity)
+        {
+            if(IsClosed(window))return;var state=Visual(window);state.NativeOpacity=Theme.Bound(opacity,0,1,1);
+            // User opacity is a base value; refreshes must never overwrite an entrance gate.
+            window.Opacity=state.NativeOpacity*(state.NativeFade?(double)window.GetValue(NativeProgressProperty):1);
+        }
+        internal static void FadeNative(Window window,double target,int milliseconds,Action completed=null)
+        {
+            if(IsClosed(window))return;var state=Visual(window);
+            if(!state.NativeFade){state.NativeOpacity=window.Opacity;state.NativeFade=true;}
+            double from=(double)window.GetValue(NativeProgressProperty);
+            var fade=Animate(from,target,milliseconds,target==0?EasingMode.EaseIn:EasingMode.EaseOut);
+            if(completed!=null)fade.Completed+=delegate{if(!state.Closed)completed();};
+            window.BeginAnimation(NativeProgressProperty,fade);
+        }
+        internal static void CompleteNativeFade(Window window)
+        {
+            MotionState state;if(IsClosed(window)||!motions.TryGetValue(window,out state)||!state.NativeFade)return;
+            window.BeginAnimation(NativeProgressProperty,null);window.SetValue(NativeProgressProperty,1.0);window.Opacity=state.NativeOpacity;state.NativeFade=false;
+        }
         [StructLayout(LayoutKind.Sequential)] private struct Bounds { public int Left,Top,Right,Bottom; }
         [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr hwnd,out Bounds rect);
         internal static void Attach(Window window,Action finished=null,Action starting=null)
@@ -60,22 +102,20 @@ namespace CodexUserData
         internal static void EnableMotion(Window window){EnableMotion(window,true);}
         internal static void EnableMotion(Window window,bool automatic)
         {
-            MotionState state;
-            if(!motions.TryGetValue(window,out state)){state=new MotionState();motions[window]=state;}
+            if(IsClosed(window))return;var state=Visual(window);
             if(state.Attached)return;state.Attached=true;
             if(automatic)window.IsVisibleChanged+=delegate
             {
                 if(window.IsVisible){if(!state.Prepared)PrepareReveal(window);QueueReveal(window);}
-                else{state.Revision++;state.Prepared=false;}
+                else{state.Revision++;state.Prepared=false;if(state.CompletingDialog){state.CompletingDialog=false;window.IsEnabled=state.DialogWasEnabled;}Reset(window,state);}
             };
-            window.Closed+=delegate{state.Revision++;motions.Remove(window);};
+            window.Closed+=delegate{state.Revision++;state.Prepared=false;Reset(window,state);state.Closed=true;};
         }
         private static bool CanAnimate {get{return Theme.MotionAllowed;}}
         private static int FramesPerSecond {get{return Theme.MotionFrameRate;}}
         private static MotionState Visual(Window window)
         {
-            MotionState state;
-            if(!motions.TryGetValue(window,out state)){state=new MotionState();motions[window]=state;}
+            var state=motions.GetValue(window,w=>new MotionState{NativeOpacity=w.Opacity});
             var view=window.Content as FrameworkElement;
             if(view==null)return state;
             if(Object.ReferenceEquals(view,state.View))return state;
@@ -83,9 +123,10 @@ namespace CodexUserData
             var group=new TransformGroup();group.Children.Add(state.Scale);group.Children.Add(state.Shift);
             view.RenderTransformOrigin=new Point(.5,.5);view.RenderTransform=group;return state;
         }
-        private static void Reset(MotionState state)
+        private static void Reset(Window window,MotionState state)
         {
             state.Dismissing=false;
+            CompleteNativeFade(window);
             if(state.View!=null){state.View.BeginAnimation(UIElement.OpacityProperty,null);state.View.Opacity=1;}
             if(state.Scale!=null){state.Scale.BeginAnimation(ScaleTransform.ScaleXProperty,null);state.Scale.BeginAnimation(ScaleTransform.ScaleYProperty,null);state.Scale.ScaleX=state.Scale.ScaleY=1;}
             if(state.Shift!=null){state.Shift.BeginAnimation(TranslateTransform.YProperty,null);state.Shift.Y=0;}
@@ -95,46 +136,59 @@ namespace CodexUserData
             var animation=new DoubleAnimation(from,to,Theme.MotionTime(milliseconds)){EasingFunction=new CubicEase{EasingMode=easing}};
             Timeline.SetDesiredFrameRate(animation,FramesPerSecond);return animation;
         }
+        private static void PrepareNativeReveal(Window window,MotionState state)
+        {
+            if(!CanAnimate||!IsBrowser(window)||state.NativeFade)return;
+            state.NativeOpacity=window.Opacity;state.NativeFade=true;
+            window.BeginAnimation(NativeProgressProperty,null);window.SetValue(NativeProgressProperty,0.0);
+        }
         internal static void PrepareReveal(Window window)
         {
-            if(window==null)return;var state=Visual(window);state.Revision++;state.Prepared=true;Reset(state);if(!CanAnimate||state.View==null)return;
+            if(IsClosed(window))return;var state=Visual(window);if(state.CompletingDialog)return;state.Revision++;state.Prepared=true;Reset(window,state);if(!CanAnimate||state.View==null)return;
             // Hide the content before the first compositor frame. This prevents a full-size frame
             // appearing briefly before the opening animation starts.
-            state.View.Opacity=0;state.Scale.ScaleX=state.Scale.ScaleY=state.NextRevealScale;state.NextRevealScale=.94;state.Shift.Y=7;
+            PrepareNativeReveal(window,state);state.View.Opacity=0;state.Scale.ScaleX=state.Scale.ScaleY=state.NextRevealScale;state.NextRevealScale=.94;state.Shift.Y=7;
         }
         internal static void CompleteReveal(Window window)
         {
-            var state=Visual(window);state.Revision++;state.Prepared=false;Reset(state);
+            if(IsClosed(window))return;var state=Visual(window);if(state.CompletingDialog)return;state.Revision++;state.Prepared=false;Reset(window,state);
         }
         internal static void ResumeReveal(Window window)
         {
             // Repeated activation must not jump an in-progress entrance to full opacity.
             // Only reverse an outgoing transition when the user asks to bring it back.
-            var state=Visual(window);if(state.Dismissing)Reveal(window);
+            if(IsClosed(window))return;var state=Visual(window);if(!state.CompletingDialog&&state.Dismissing)Reveal(window);
         }
         private static void QueueReveal(Window window)
         {
             var state=Visual(window);int revision=state.Revision;
             // Loaded runs after pending layout/render work. Prepare before Show, then wait for
             // the final native size before growing the view; no full-opacity first frame.
-            window.Dispatcher.BeginInvoke(DispatcherPriority.Loaded,new Action(()=>{if(state.Revision==revision&&window.IsVisible){window.UpdateLayout();Reveal(window);}}));
+            window.Dispatcher.BeginInvoke(DispatcherPriority.Loaded,new Action(async delegate
+            {
+                if(state.Closed||state.Revision!=revision||!window.IsVisible)return;
+                window.UpdateLayout();var ball=window as FloatingBall;
+                if(ball!=null&&ball.IsCustom)await ball.WaitForPresentationAsync();
+                if(!state.Closed&&state.Revision==revision&&window.IsVisible)Reveal(window);
+            }));
         }
         internal static void ChangeShape(Window window,Action change)
         {
-            if(window==null)return;var state=Visual(window);int revision=++state.Revision;
-            if(!CanAnimate||!window.IsVisible||state.View==null){Reset(state);change();return;}
+            if(IsClosed(window))return;var state=Visual(window);if(state.CompletingDialog)return;int revision=++state.Revision;
+            if(!CanAnimate||!window.IsVisible||state.View==null){Reset(window,state);change();return;}
             // Change native dimensions only at the transparent midpoint. This avoids clipping
             // a large source to the new smaller window, and avoids native resize work per frame.
-            var fade=Animate(state.View.Opacity,0,105,EasingMode.EaseIn);
+            state.Dismissing=true;var fade=Animate(state.View.Opacity,0,105,EasingMode.EaseIn);
             var shrink=Animate(state.Scale.ScaleX,.86,105,EasingMode.EaseIn);
             fade.Completed+=delegate
             {
-                if(state.Revision!=revision||!window.IsVisible)return;
-                try{change();}catch{Reset(state);throw;}state=Visual(window);state.Revision++;
+                if(state.Closed||state.Revision!=revision||!window.IsVisible)return;
+                try{change();}catch{Reset(window,state);throw;}state=Visual(window);state.Revision++;PrepareNativeReveal(window,state);
                 state.View.BeginAnimation(UIElement.OpacityProperty,null);state.Scale.BeginAnimation(ScaleTransform.ScaleXProperty,null);state.Scale.BeginAnimation(ScaleTransform.ScaleYProperty,null);state.Shift.BeginAnimation(TranslateTransform.YProperty,null);
                 state.View.Opacity=0;state.Scale.ScaleX=state.Scale.ScaleY=.86;state.Shift.Y=0;
-                window.UpdateLayout();Reveal(window);
+                window.UpdateLayout();if(IsBrowser(window))QueueReveal(window);else Reveal(window);
             };
+            if(IsBrowser(window)||state.NativeFade)FadeNative(window,0,105);
             state.View.BeginAnimation(UIElement.OpacityProperty,fade);state.Scale.BeginAnimation(ScaleTransform.ScaleXProperty,shrink);state.Scale.BeginAnimation(ScaleTransform.ScaleYProperty,shrink);
         }
         internal static void ToggleMaximize(Window window)
@@ -144,12 +198,13 @@ namespace CodexUserData
         }
         internal static void ShowFrom(Window target,Window source,Action prepare,Action shown)
         {
-            var state=Visual(target);int revision=++state.Revision;
+            if(IsClosed(target))return;
+            var state=Visual(target);if(state.CompletingDialog||!IsClosed(source)&&Visual(source).CompletingDialog)return;int revision=++state.Revision;
             Action show=delegate
             {
-                MotionState current;if(!motions.TryGetValue(target,out current)||current!=state||state.Revision!=revision)return;
+                MotionState current;if(state.Closed||!motions.TryGetValue(target,out current)||current!=state||state.Revision!=revision)return;
                 state.NextRevealScale=.86;PrepareReveal(target);
-                prepare();target.UpdateLayout();
+                if(prepare!=null)prepare();if(state.Closed)return;target.UpdateLayout();
                 bool visible=target.IsVisible;target.Show();
                 if(visible)QueueReveal(target);
                 if(shown!=null)shown();
@@ -160,35 +215,58 @@ namespace CodexUserData
         }
         internal static void Reveal(Window window)
         {
-            if(window==null||!window.IsVisible)return;var state=Visual(window);state.Prepared=false;state.Dismissing=false;int revision=++state.Revision;
-            if(!CanAnimate||state.View==null){Reset(state);return;}
+            if(IsClosed(window)||!window.IsVisible)return;var state=Visual(window);if(state.CompletingDialog)return;state.Prepared=false;state.Dismissing=false;int revision=++state.Revision;
+            bool native=state.NativeFade;
+            if(!CanAnimate||state.View==null){Reset(window,state);return;}
             double opacity=state.View.Opacity,scale=state.Scale.ScaleX,shift=state.Shift.Y;
             state.View.BeginAnimation(UIElement.OpacityProperty,null);state.Scale.BeginAnimation(ScaleTransform.ScaleXProperty,null);state.Scale.BeginAnimation(ScaleTransform.ScaleYProperty,null);state.Shift.BeginAnimation(TranslateTransform.YProperty,null);
             state.View.Opacity=opacity;state.Scale.ScaleX=state.Scale.ScaleY=scale;state.Shift.Y=shift;
             // Animate only the existing root visual, keeping native bounds and resize hit testing stable.
             var fade=Animate(opacity,1,190,EasingMode.EaseOut);var grow=Animate(scale,1,210,EasingMode.EaseOut);var rise=Animate(shift,0,210,EasingMode.EaseOut);
-            grow.Completed+=delegate{if(state.Revision==revision){state.Revision++;Reset(state);}};
+            grow.Completed+=delegate{if(!state.Closed&&state.Revision==revision){state.Revision++;Reset(window,state);}};
             state.View.BeginAnimation(UIElement.OpacityProperty,fade);state.Scale.BeginAnimation(ScaleTransform.ScaleXProperty,grow);state.Scale.BeginAnimation(ScaleTransform.ScaleYProperty,grow);state.Shift.BeginAnimation(TranslateTransform.YProperty,rise);
+            if(native)FadeNative(window,1,190);
         }
         private static void Dismiss(Window window,bool hide,Action after)
         {
-            if(window==null){if(after!=null)after();return;}var state=Visual(window);int revision=++state.Revision;
-            if(!window.IsVisible){Reset(state);if(after!=null)after();return;}
-            if(!CanAnimate||state.View==null){if(hide)window.Hide();Reset(state);if(after!=null)after();return;}
+            if(IsClosed(window)){if(after!=null)after();return;}var state=Visual(window);int revision=++state.Revision;
+            if(!window.IsVisible){Reset(window,state);if(after!=null)after();return;}
+            if(!CanAnimate||state.View==null){if(hide)window.Hide();Reset(window,state);if(after!=null)after();return;}
             state.Dismissing=true;
             double opacity=state.View.Opacity,scale=state.Scale==null?1:state.Scale.ScaleX,shift=state.Shift==null?0:state.Shift.Y;
             var fade=Animate(opacity,0,135,EasingMode.EaseIn);var shrink=Animate(scale,.90,145,EasingMode.EaseIn);var drop=Animate(shift,5,145,EasingMode.EaseIn);
-            shrink.Completed+=delegate{if(state.Revision!=revision)return;state.Revision++;state.Prepared=false;if(hide)window.Hide();Reset(state);if(after!=null)after();};
-            state.View.BeginAnimation(UIElement.OpacityProperty,fade);state.Scale.BeginAnimation(ScaleTransform.ScaleXProperty,shrink);state.Scale.BeginAnimation(ScaleTransform.ScaleYProperty,shrink);state.Shift.BeginAnimation(TranslateTransform.YProperty,drop);
+            bool browser=IsBrowser(window);
+            shrink.Completed+=delegate{if(state.Closed||state.Revision!=revision)return;state.Revision++;state.Prepared=false;if(hide)window.Hide();Reset(window,state);if(after!=null)after();};
+            if(browser||state.NativeFade)FadeNative(window,0,135);
+            else state.View.BeginAnimation(UIElement.OpacityProperty,fade);
+            state.Scale.BeginAnimation(ScaleTransform.ScaleXProperty,shrink);state.Scale.BeginAnimation(ScaleTransform.ScaleYProperty,shrink);state.Shift.BeginAnimation(TranslateTransform.YProperty,drop);
         }
-        internal static void Hide(Window window,Action after=null){Dismiss(window,true,after);}
+        private static bool IsBrowser(Window window){var ball=window as FloatingBall;return ball!=null&&ball.IsCustom;}
+        internal static void Hide(Window window,Action after=null){if(!IsClosed(window)&&Visual(window).CompletingDialog)return;Dismiss(window,true,after);}
         internal static void Close(Window window)
         {
-            Dismiss(window,false,()=>{if(window!=null)window.Close();});
+            if(IsClosed(window)||Visual(window).CompletingDialog)return;Dismiss(window,false,()=>{if(!IsClosed(window))window.Close();});
         }
         internal static void CompleteDialog(Window window,bool result)
+        {CompleteDialog(window,result,null);}
+        internal static void CompleteDialog(Window window,bool result,Func<bool> beforeClose)
         {
-            Dismiss(window,false,()=>{try{window.DialogResult=result;}catch(InvalidOperationException){window.Close();}});
+            if(IsClosed(window))return;var state=Visual(window);if(state.CompletingDialog)return;
+            // Commit exactly once after the exit animation. A second click, Escape or title
+            // close must not cancel a save after its persistent side effects have begun.
+            state.CompletingDialog=true;state.DialogWasEnabled=window.IsEnabled;window.IsEnabled=false;
+            Action reopen=delegate{if(state.Closed)return;state.CompletingDialog=false;window.IsEnabled=state.DialogWasEnabled;Reveal(window);};
+            Dismiss(window,false,delegate
+            {
+                if(state.Closed)return;
+                try{if(beforeClose!=null&&!beforeClose()){reopen();return;}}
+                catch{reopen();throw;}
+                if(state.Closed)return;
+                try{window.DialogResult=result;}catch(InvalidOperationException){window.Close();}
+                // An application Closing handler may reject closing. Restore interaction
+                // rather than leaving a live dialog permanently disabled.
+                if(!state.Closed&&window.IsVisible)reopen();
+            });
         }
         internal static void Header(Window window,FrameworkElement header,Action doubleClick,Action finished=null)
         {

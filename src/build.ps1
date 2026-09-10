@@ -42,6 +42,7 @@ $compilerArgs = @(
   (Join-Path $PSScriptRoot 'CodexActivity.cs'), (Join-Path $PSScriptRoot 'ActivityJsonLine.cs'), (Join-Path $PSScriptRoot 'OrbAppearance.cs'),
   (Join-Path $PSScriptRoot 'ThemePalette.cs'), (Join-Path $PSScriptRoot 'ThemeEditor.cs'),
   (Join-Path $PSScriptRoot 'Widget.cs'), (Join-Path $PSScriptRoot 'SettingsWindow.cs'),
+  (Join-Path $PSScriptRoot 'ReleaseUpdate.cs'), (Join-Path $PSScriptRoot 'Diagnostics.cs'),
   (Join-Path $PSScriptRoot 'LocalCodexUsage.cs'), (Join-Path $PSScriptRoot 'UsageDatabase.cs')
   (Join-Path $PSScriptRoot 'UsageCharts.cs')
   (Join-Path $PSScriptRoot 'Dashboard.cs'), (Join-Path $PSScriptRoot 'QuotaReader.cs'), (Join-Path $PSScriptRoot 'QuotaStatus.cs')

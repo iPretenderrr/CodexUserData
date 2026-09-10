@@ -1,5 +1,7 @@
 using System;
 using System.Globalization;
+using System.Collections.Generic;
+using System.Threading.Tasks;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Windows;
@@ -39,6 +41,14 @@ namespace CodexUserData
         private bool dragging,disposing;
         private DockTransition dockMotion;
         private string builtShape;
+        private string customManifest;
+        private bool customResizeQueued;
+        private double customResizeWidth,customResizeHeight;
+        private int customGeneration;
+        private string customSizeKey;
+        private readonly DispatcherTimer customSizeSaveClock=new DispatcherTimer{Interval=TimeSpan.FromMilliseconds(750)};
+        private bool customSizeDirty;
+        private bool placementRepairPending,placementRepairQueued;
         private double dockAnchor;
         internal bool Expanded {get{return preferences().BallStyle=="capsule"&&preferences().BallExpanded;}}
         internal bool IsOrb {get{return !IsPillar&&preferences().BallStyle=="orb";}}
@@ -60,8 +70,11 @@ namespace CodexUserData
             var menu=Theme.Menu();
             AddMenu(menu,"光环 · 圆形额度球",SetOrb);
             AddMenu(menu,"小形态 · 仅今日 Tokens",()=>SetExpanded(false));AddMenu(menu,"大形态 · 额度与今日 Tokens",()=>SetExpanded(true));
-            AddMenu(menu,"自定义 HTML 形态",SetCustom);AddMenu(menu,"重新载入自定义形态",()=>{if(IsCustom)WindowInteraction.ChangeShape(this,()=>{builtShape=null;Build();});});
+            AddMenu(menu,"自定义 HTML 形态",SetCustom);AddMenu(menu,"重新载入自定义形态",()=>{if(IsCustom)WindowInteraction.ChangeShape(this,ReloadCustom);});
             AddMenu(menu,"形态设置",()=>{if(SettingsRequested!=null)SettingsRequested();});
+            var positionLock=new MenuItem{Header="锁定位置",IsCheckable=true};menu.Items.Add(positionLock);
+            menu.Opened+=delegate{positionLock.IsChecked=preferences().BallPositionLocked;};
+            positionLock.Click+=delegate{preferences().BallPositionLocked=positionLock.IsChecked;save();};
             AddMenu(menu,"返回完整窗口",restore);AddMenu(menu,"退出软件",exit);shell.ContextMenu=menu;
             shell.MouseLeftButtonDown+=Drag;
             PreviewMouseDown+=delegate(object sender,MouseButtonEventArgs e)
@@ -78,10 +91,20 @@ namespace CodexUserData
             {
                 var p=preferences();if(Finite(p.BallLeft)&&Finite(p.BallTop))Place((int)p.BallLeft,(int)p.BallTop);
                 NativeRect r;GetWindowRect(Handle,out r);dockAnchor=dock=="top"||dock=="bottom"?r.Left+Width*Scale/2:r.Top+Height*Scale/2;
-                if(dock.Length>0)PositionDock();else Clamp();SavePosition();
+                var preferred=PreferredScreen();
+                if(preferred!=null)RestorePlacement(preferred);else if(dock.Length>0)PositionDock();else Clamp();
+                // A disconnected preferred monitor remains remembered; fallback placement is temporary.
+                SavePositionCore(String.IsNullOrEmpty(p.BallMonitor));
+                HwndSource.FromHwnd(Handle).AddHook(delegate(IntPtr hwnd,int message,IntPtr wp,IntPtr lp,ref bool handled)
+                {
+                    // Display, work-area and DPI changes can invalidate previously saved pixels.
+                    if(message==0x7e||message==0x1a||message==0x2e0){placementRepairPending=true;QueuePlacementRepair();}
+                    return IntPtr.Zero;
+                });
             };
             Closing+=delegate(object sender,System.ComponentModel.CancelEventArgs e){if(!disposing){e.Cancel=true;restore();}};
-            IsVisibleChanged+=delegate{if(!IsVisible)CancelDockMotion();UpdateActivityMotion();};activityMotionClock.Tick+=delegate{UpdateActivityMotion();};
+            IsVisibleChanged+=delegate{if(!IsVisible)CancelDockMotion();else if(placementRepairPending)QueuePlacementRepair();UpdateActivityMotion();};activityMotionClock.Tick+=delegate{UpdateActivityMotion();};
+            customSizeSaveClock.Tick+=delegate{FlushCustomSize();};
             Build();
         }
         private IntPtr Handle {get{return new WindowInteropHelper(this).Handle;}}
@@ -89,8 +112,9 @@ namespace CodexUserData
         private static void AddMenu(ContextMenu menu,string name,Action action){var item=new MenuItem{Header=name};item.Click+=delegate{action();};menu.Items.Add(item);}
         internal void Apply(UsageSnapshot snapshot,QuotaBucket quota,string scope,string status)
         {
-            Opacity=preferences().BallOpacity;usage=snapshot;bucket=quota;source=scope;quotaStamp=status;Build();
+            if(disposing)return;WindowInteraction.SetOpacity(this,preferences().BallOpacity);usage=snapshot;bucket=quota;source=scope;quotaStamp=status;Build();
         }
+        internal Task WaitForPresentationAsync(){return !disposing&&IsCustom&&custom!=null?custom.WaitForPresentationAsync():Task.FromResult(true);}
         internal void ApplyActivity(ActivityReport report){activity=report;if(orb!=null)orb.ApplyActivity(report);if(custom!=null)custom.Apply(usage,bucket,activity,preferences());UpdateActivityMotion();}
         private void StopActivityMotion()
         {
@@ -134,18 +158,42 @@ namespace CodexUserData
         }
         internal void SetOrb(){if(disposing||dragging)return;CancelDockMotion();WindowInteraction.ChangeShape(this,delegate{preferences().BallStyle="orb";preferences().BallExpanded=false;dock="";Build();Clamp();SavePosition();});}
         internal void SetCustom(){if(disposing||dragging)return;CancelDockMotion();WindowInteraction.ChangeShape(this,delegate{preferences().BallStyle="html";preferences().BallExpanded=false;dock="";builtShape=null;Build();Clamp();SavePosition();});}
-        private void DragCustom(){if(disposing||dragging||Mouse.LeftButton!=MouseButtonState.Pressed)return;CancelTransition();dragging=true;try{DragMove();}catch(InvalidOperationException){}finally{dragging=false;SnapToEdge();SavePosition();}}
-        private void ResizeCustom(double width,double height){if(!IsCustom||dragging)return;Width=Theme.Bound(width,64,800,240);Height=Theme.Bound(height,40,600,90);Clamp();}
+        private void DragCustom(){if(disposing||dragging||preferences().BallPositionLocked||Mouse.LeftButton!=MouseButtonState.Pressed)return;CancelTransition();RememberBeforeDrag();dragging=true;try{DragMove();}catch(InvalidOperationException){}finally{dragging=false;SnapToEdge();SavePosition();}}
+        private void ReloadCustom()
+        {
+            if(disposing)return;customGeneration++;customResizeQueued=false;
+            if(custom!=null){custom.Dispose();custom=null;}customManifest=null;builtShape=null;Build();
+        }
+        private void ResizeCustom(double width,double height)
+        {
+            if(disposing||!IsCustom||dragging)return;customResizeWidth=Theme.Bound(width,64,800,240);customResizeHeight=Theme.Bound(height,40,600,90);
+            if(customSizeKey!=null&&preferences().RememberShapeSize(customSizeKey,customResizeWidth,customResizeHeight))
+            {customSizeDirty=true;customSizeSaveClock.Stop();customSizeSaveClock.Start();}
+            if(customResizeQueued)return;customResizeQueued=true;
+            int generation=customGeneration;
+            // A page may emit several resize messages during one JavaScript layout. Commit only
+            // the newest dimensions on the render queue to avoid repeated native window work.
+            Dispatcher.BeginInvoke(DispatcherPriority.Render,new Action(delegate
+            {
+                if(disposing||generation!=customGeneration)return;customResizeQueued=false;if(!IsCustom||dragging||dockMotion!=null)return;
+                if(Math.Abs(Width-customResizeWidth)<.5&&Math.Abs(Height-customResizeHeight)<.5)return;
+                Clamp();
+            }));
+        }
         private void Build()
         {
-            if(dockMotion!=null)return; // Usage refreshes must not replace a shape during its transition.
+            if(disposing||dockMotion!=null)return; // Usage refreshes must not replace a shape during its transition.
             string valid=NormalizeDock(dock);if(valid!=dock){dock=valid;preferences().BallExpanded=false;}
             bool pillar=IsPillar,large=!pillar&&Expanded,circle=IsOrb,horizontal=dock=="top"||dock=="bottom";
+            if(pillar&&preferences().BallStyle=="html")CustomShapeView.WarmEnvironment();
             double size=Theme.Bound(preferences().OrbSize,56,128,84);
             string shape=pillar?dock:IsCustom?"html:"+preferences().CustomShape:circle?"orb:"+size:large?"large":"small";
             // Repeated drops/data refreshes keep the same visual tree, avoiding needless layout and flashing.
             if(builtShape==shape){UpdateValues();UpdateActivityMotion();return;}StopActivityMotion();dockFlow=null;builtShape=shape;
-            if(orb!=null){orb.Dispose();orb=null;}if(custom!=null){custom.Dispose();custom=null;}
+            if(orb!=null){orb.Dispose();orb=null;}
+            // Keep the browser controller alive while its HTML form is represented by an edge
+            // strip. It is detached and suspended there, then reused immediately when undocked.
+            if(custom!=null&&preferences().BallStyle!="html"){customGeneration++;customResizeQueued=false;custom.Dispose();custom=null;customManifest=null;}
             Width=pillar?(horizontal?80:16):circle?size:(large?340:174);Height=pillar?(horizontal?16:80):circle?size:(large?54:48);
             // Only the dock strip needs an extended grab area. Free-floating forms leave the
             // pixels outside their rounded border fully transparent, avoiding a rectangular halo.
@@ -158,8 +206,21 @@ namespace CodexUserData
             if(IsCustom)
             {
                 shell.Padding=new Thickness(0);shell.BorderThickness=new Thickness(0);shell.Background=Brushes.Transparent;shell.ToolTip=null;ToolTipService.SetIsEnabled(shell,false);
-                try{string path=ShapeManifest.Resolve(preferences().CustomShape);var manifest=ShapeManifest.Read(path);Width=manifest.width;Height=manifest.height;custom=new CustomShapeView(path,restore,DragCustom,ResizeCustom);shell.Child=custom;}
-                catch(Exception){Width=260;Height=86;var text=Theme.Text("尚未选择可用的 HTML 形态。\n右键 → 形态设置，导入 shape.json；\n随时可右键返回完整窗口。",11,Theme.Ink);text.Margin=new Thickness(12);shell.Child=new Border{Background=Theme.Surface,CornerRadius=new CornerRadius(14),Child=text};}
+                try
+                {
+                    string path=ShapeManifest.Resolve(preferences().CustomShape);customSizeKey=Preferences.ShapeSizeKey(preferences().CustomShape);Size dimensions;
+                    if(!RememberedCustomSize(out dimensions)){var manifest=ShapeManifest.Read(path);dimensions=new Size(manifest.width,manifest.height);}
+                    Width=dimensions.Width;Height=dimensions.Height;
+                    if(custom==null||!String.Equals(customManifest,path,StringComparison.OrdinalIgnoreCase))
+                    {
+                        customGeneration++;customResizeQueued=false;int generation=customGeneration;
+                        if(custom!=null)custom.Dispose();customManifest=path;
+                        // Ignore messages queued by a browser instance that has been replaced.
+                        custom=new CustomShapeView(path,restore,DragCustom,(w,h)=>{if(generation==customGeneration)ResizeCustom(w,h);});
+                    }
+                    shell.Child=custom;
+                }
+                catch(Exception){if(custom!=null){custom.Dispose();custom=null;customManifest=null;}Width=260;Height=86;var text=Theme.Text("尚未选择可用的 HTML 形态。\n右键 → 形态设置，导入 shape.json；\n随时可右键返回完整窗口。",11,Theme.Ink);text.Margin=new Thickness(12);shell.Child=new Border{Background=Theme.Surface,CornerRadius=new CornerRadius(14),Child=text};}
             }
             else if(circle){ToolTipService.SetIsEnabled(shell,false);orb=new QuotaOrb();shell.Child=orb;}
             else if(pillar)
@@ -209,6 +270,8 @@ namespace CodexUserData
                 var main=preferences().BallStyle=="orb"?QuotaOrb.SelectWindow(bucket,preferences().OrbQuotaWindow):windows.LastOrDefault();double fraction=RemainingFraction(bucket,main,now);bool horizontal=dock=="top"||dock=="bottom";
                 if(horizontal)dockFill.Width=80*fraction;else dockFill.Height=80*fraction;
                 var visibility=fraction>0?Visibility.Visible:Visibility.Collapsed;if(dockFill.Visibility!=visibility)StopActivityMotion();dockFill.Visibility=visibility;
+                // Provenance belongs to the track, leaving the fill's task pulse independent.
+                dockTrack.Opacity=bucket!=null&&bucket.IsOnline?1:.72;
                 dockFill.Background=OrbPalette.ForBar(preferences(),main!=null&&main.Minutes>=1440,!horizontal);
                 AutomationProperties.SetName(dockTrack,main==null?"额度暂不可用":main.Label+" 剩余 "+main.Remaining(bucket,now));
             }
@@ -224,7 +287,7 @@ namespace CodexUserData
                     double fraction=RemainingFraction(bucket,w,now);
                     var bar=new Grid{Height=5,VerticalAlignment=VerticalAlignment.Center};line.Children.Add(bar);
                     bar.Children.Add(new Border{Background=Theme.Line,CornerRadius=new CornerRadius(3)});
-                    var fillGrid=new Grid();bar.Children.Add(fillGrid);fillGrid.ColumnDefinitions.Add(new ColumnDefinition{Width=new GridLength(fraction,GridUnitType.Star)});fillGrid.ColumnDefinitions.Add(new ColumnDefinition{Width=new GridLength(1-fraction,GridUnitType.Star)});
+                    var fillGrid=new Grid{Opacity=bucket!=null&&bucket.IsOnline?1:.72};bar.Children.Add(fillGrid);fillGrid.ColumnDefinitions.Add(new ColumnDefinition{Width=new GridLength(fraction,GridUnitType.Star)});fillGrid.ColumnDefinitions.Add(new ColumnDefinition{Width=new GridLength(1-fraction,GridUnitType.Star)});
                     fillGrid.Children.Add(new Border{CornerRadius=new CornerRadius(3),Background=OrbPalette.ForBar(preferences(),w.Minutes>=1440)});
                 }
             }
@@ -233,11 +296,13 @@ namespace CodexUserData
         }
         private void Drag(object sender,MouseButtonEventArgs e)
         {
-            if(IsCustom)return;
+            if(disposing||IsCustom)return;
             DependencyObject node=e.OriginalSource as DependencyObject;while(node!=null&&node!=shell){if(node is ButtonBase)return;var text=node as FrameworkContentElement;node=text!=null?text.Parent:VisualTreeHelper.GetParent(node);}
             if(e.ChangedButton!=MouseButton.Left)return;e.Handled=true;
             if(e.ClickCount==2){if(IsOrb)restore();else if(!IsPillar)SetExpanded(!Expanded);return;}
-            WindowInteraction.CompleteReveal(this);
+            if(preferences().BallPositionLocked)return;
+            CancelTransition();
+            RememberBeforeDrag();
             NativeRect before;GetWindowRect(Handle,out before);bool circleClick=IsOrb;
             dragging=true;if(orb!=null)orb.SetPressed(true);
             // Keep the current shape throughout the native drag. Only settle once on release,
@@ -253,12 +318,43 @@ namespace CodexUserData
         }
         private NativeRect WorkArea()
         {
-            var monitor=new Monitor{Size=Marshal.SizeOf(typeof(Monitor))};GetMonitorInfo(MonitorFromWindow(Handle,2),ref monitor);return monitor.Work;
+            var monitor=new Monitor{Size=Marshal.SizeOf(typeof(Monitor))};
+            if(GetMonitorInfo(MonitorFromWindow(Handle,2),ref monitor))return monitor.Work;
+            var fallback=System.Windows.Forms.Screen.PrimaryScreen.WorkingArea;return new NativeRect{Left=fallback.Left,Top=fallback.Top,Right=fallback.Right,Bottom=fallback.Bottom};
+        }
+        private System.Windows.Forms.Screen PreferredScreen()
+        {string key=preferences().BallMonitor;return System.Windows.Forms.Screen.AllScreens.FirstOrDefault(s=>String.Equals(s.DeviceName,key,StringComparison.OrdinalIgnoreCase));}
+        private void RestorePlacement(System.Windows.Forms.Screen screen)
+        {
+            BallPlacement stored;var p=preferences();
+            if(p.BallPlacements==null||!p.BallPlacements.TryGetValue(screen.DeviceName,out stored))
+            {if(IsPillar)PositionDock();else Clamp();return;}
+            string side=NormalizeDock(stored.Dock);if(dock!=side){dock=side;if(IsPillar)p.BallExpanded=false;Build();}
+            var area=screen.WorkingArea;var work=new Rect(area.Left,area.Top,area.Width,area.Height);
+            // The first placement selects the monitor; the second uses its resulting DPI.
+            for(int pass=0;pass<2;pass++)
+            {
+                double scale=Scale;Size requested=new Size(Width,Height),remembered;if(IsCustom&&RememberedCustomSize(out remembered))requested=remembered;
+                var bounds=stored.Restore(new Size(requested.Width*scale,requested.Height*scale),work);
+                Width=bounds.Width/scale;Height=bounds.Height/scale;Place((int)bounds.Left,(int)bounds.Top);
+            }
+            NativeRect r;if(GetWindowRect(Handle,out r))dockAnchor=dock=="top"||dock=="bottom"?(r.Left+r.Right)/2.0:(r.Top+r.Bottom)/2.0;
+            if(IsPillar)PositionDock();else Clamp();
+        }
+        private void QueuePlacementRepair()
+        {
+            if(disposing||placementRepairQueued||!IsVisible)return;placementRepairQueued=true;
+            Dispatcher.BeginInvoke(DispatcherPriority.Render,new Action(delegate
+            {
+                placementRepairQueued=false;if(disposing||!IsVisible||dragging)return;
+                placementRepairPending=false;CancelDockMotion();UpdateLayout();
+                var preferred=PreferredScreen();if(preferred!=null)RestorePlacement(preferred);else if(IsPillar)PositionDock();else Clamp();SavePositionCore(false);
+            }));
         }
         internal void SnapToEdge()
         {
             if(Handle==IntPtr.Zero||disposing)return;CancelDockMotion();WindowInteraction.CompleteReveal(this);NativeRect r;GetWindowRect(Handle,out r);var area=WorkArea();
-            int side=DockEdge(new Rect(r.Left,r.Top,r.Right-r.Left,r.Bottom-r.Top),new Rect(area.Left,area.Top,area.Right-area.Left,area.Bottom-area.Top),Scale);
+            int side=DockEdge(new Rect(r.Left,r.Top,r.Right-r.Left,r.Bottom-r.Top),new Rect(area.Left,area.Top,area.Right-area.Left,area.Bottom-area.Top),Scale,Array.IndexOf(new[]{"left","right","top","bottom"},dock));
             bool wasDocked=IsPillar;
             double anchor=side<2?(r.Top+r.Bottom)/2.0:(r.Left+r.Right)/2.0;
             Action settle=delegate
@@ -289,16 +385,22 @@ namespace CodexUserData
             double fraction=RemainingFraction(bucket,selected,now),width=horizontal?80:6,height=horizontal?6:80;
             var visual=new DrawingVisual();using(var dc=visual.RenderOpen())
             {
+                dc.PushOpacity(bucket!=null&&bucket.IsOnline?1:.72);
                 dc.DrawRoundedRectangle(Theme.B("#50828F9E"),null,new Rect(0,0,width,height),4,4);
                 if(fraction>0)dc.DrawRoundedRectangle(OrbPalette.ForBar(preferences(),selected!=null&&selected.Minutes>=1440,!horizontal),null,horizontal?new Rect(0,0,width*fraction,height):new Rect(0,height*(1-fraction),width,height*fraction),4,4);
+                dc.Pop();
             }
             var image=new RenderTargetBitmap((int)Math.Ceiling(width*scale),(int)Math.Ceiling(height*scale),96*scale,96*scale,PixelFormats.Pbgra32);image.Render(visual);image.Freeze();return image;
         }
         internal static int DockEdge(Rect window,Rect work,double scale)
+        {return DockEdge(window,work,scale,-1);}
+        internal static int DockEdge(Rect window,Rect work,double scale,int previousSide)
         {
             // Overshooting a screen edge is still contact, not distance away from it.
             // Previously Abs() rejected these drops, then Clamp() left an undocked window flush with the edge.
             double[] distances={Math.Max(0,window.Left-work.Left),Math.Max(0,work.Right-window.Right),Math.Max(0,window.Top-work.Top),Math.Max(0,work.Bottom-window.Bottom)};
+            // A docked bar needs a deliberate drag farther inward before it changes form.
+            if(previousSide>=0&&previousSide<4&&distances[previousSide]<=48*scale)return previousSide;
             int side=Array.IndexOf(distances,distances.Min());return distances[side]<=32*scale?side:-1;
         }
         private void PositionDock()
@@ -315,15 +417,42 @@ namespace CodexUserData
         }
         private void Clamp()
         {
-            if(Handle==IntPtr.Zero)return;NativeRect r;GetWindowRect(Handle,out r);var area=WorkArea();int w=(int)Math.Round(Width*Scale),h=(int)Math.Round(Height*Scale);
-            Place(Math.Max(area.Left,Math.Min(area.Right-w,r.Left)),Math.Max(area.Top,Math.Min(area.Bottom-h,r.Top)));
+            if(Handle==IntPtr.Zero)return;NativeRect r;if(!GetWindowRect(Handle,out r))return;var area=WorkArea();double scale=Scale;
+            Size requested=new Size(Width,Height),remembered;
+            // Constrain the outer window, not the page's remembered request. Moving back to
+            // a larger monitor restores its requested viewport without reloading the browser.
+            if(IsCustom&&RememberedCustomSize(out remembered))requested=remembered;
+            var bounds=WindowInteraction.FitBounds(new Rect(r.Left,r.Top,requested.Width*scale,requested.Height*scale),new Rect(area.Left,area.Top,area.Right-area.Left,area.Bottom-area.Top),0);
+            if(Math.Abs(Width-bounds.Width/scale)>.01)Width=bounds.Width/scale;
+            if(Math.Abs(Height-bounds.Height/scale)>.01)Height=bounds.Height/scale;
+            Place((int)bounds.X,(int)bounds.Y);
         }
         private void Place(int x,int y){if(Handle!=IntPtr.Zero)SetWindowPos(Handle,IntPtr.Zero,x,y,(int)Math.Round(Width*Scale),(int)Math.Round(Height*Scale),0x14);}
-        private void SavePosition()
+        private bool RememberedCustomSize(out Size size)
         {
-            NativeRect r;if(Handle!=IntPtr.Zero&&GetWindowRect(Handle,out r)){var p=preferences();p.BallLeft=r.Left;p.BallTop=r.Top;p.BallDock=dock;save();}
+            size=new Size();double[] saved;var sizes=preferences().CustomShapeSizes;
+            if(customSizeKey==null||sizes==null||!sizes.TryGetValue(customSizeKey,out saved)||saved==null||saved.Length!=2)return false;
+            size=new Size(Theme.Bound(saved[0],64,800,240),Theme.Bound(saved[1],40,600,90));return true;
         }
-        public void Dispose(){disposing=true;CancelDockMotion();StopActivityMotion();if(orb!=null)orb.Dispose();if(custom!=null)custom.Dispose();Close();}
+        private void FlushCustomSize(){customSizeSaveClock.Stop();if(!customSizeDirty)return;customSizeDirty=false;save();}
+        private void RememberBeforeDrag()
+        {NativeRect r;if(Handle!=IntPtr.Zero&&GetWindowRect(Handle,out r))RememberMonitor(preferences(),r);}
+        private void RememberMonitor(Preferences p,NativeRect r)
+        {
+            var screen=System.Windows.Forms.Screen.FromHandle(Handle);var work=screen.WorkingArea;
+            if(p.BallPlacements==null)p.BallPlacements=new Dictionary<string,BallPlacement>(StringComparer.OrdinalIgnoreCase);
+            if(!p.BallPlacements.ContainsKey(screen.DeviceName)&&p.BallPlacements.Count>=8)p.BallPlacements.Remove(p.BallPlacements.Keys.First());
+            p.BallPlacements[screen.DeviceName]=BallPlacement.Capture(new Rect(r.Left,r.Top,r.Right-r.Left,r.Bottom-r.Top),new Rect(work.Left,work.Top,work.Width,work.Height),dock);p.BallMonitor=screen.DeviceName;
+        }
+        private void SavePosition(){SavePositionCore(true);}
+        private void SavePositionCore(bool remember)
+        {
+            NativeRect r;if(Handle==IntPtr.Zero||!GetWindowRect(Handle,out r))return;
+            var p=preferences();p.BallLeft=r.Left;p.BallTop=r.Top;p.BallDock=dock;
+            if(remember)RememberMonitor(p,r);
+            customSizeSaveClock.Stop();customSizeDirty=false;save();
+        }
+        public void Dispose(){if(disposing)return;disposing=true;FlushCustomSize();customGeneration++;customResizeQueued=false;CancelDockMotion();WindowInteraction.CompleteReveal(this);StopActivityMotion();if(orb!=null)orb.Dispose();if(custom!=null)custom.Dispose();Close();}
     }
 
     // A single paint layer for both capsule sizes. Cached pens and perimeter samples avoid
@@ -333,6 +462,10 @@ namespace CodexUserData
         internal static readonly DependencyProperty PhaseProperty=DependencyProperty.Register("Phase",typeof(double),typeof(CapsuleActivityChrome),new FrameworkPropertyMetadata(0.0,FrameworkPropertyMetadataOptions.AffectsRender));
         internal static readonly DependencyProperty BreathProperty=DependencyProperty.Register("Breath",typeof(double),typeof(CapsuleActivityChrome),new FrameworkPropertyMetadata(0.0,FrameworkPropertyMetadataOptions.AffectsRender));
         private const int Samples=512,TailSteps=72;
+        private int perimeterSamples=Samples,trailSteps=TailSteps;
+        private bool lightweight;
+        internal static int PerimeterSamplesFor(int fps){return fps<=30?128:Samples;}
+        internal static int TrailStepsFor(int fps){return fps<=30?24:TailSteps;}
         private readonly Point[] perimeter=new Point[Samples+1];
         private readonly Pen[] trail=new Pen[TailSteps],halo=new Pen[TailSteps];
         private readonly TranslateTransform sweepPosition=new TranslateTransform();
@@ -370,6 +503,8 @@ namespace CodexUserData
         }
         internal void Start(int fps)
         {
+            lightweight=fps<=30;trailSteps=TrailStepsFor(fps);int samples=PerimeterSamplesFor(fps);
+            if(perimeterSamples!=samples){perimeterSamples=samples;CachePerimeter();}
             active=true;
             var phase=new DoubleAnimation(0,1,TimeSpan.FromSeconds(3.2)){RepeatBehavior=RepeatBehavior.Forever};Timeline.SetDesiredFrameRate(phase,fps);
             var breath=new DoubleAnimation(0,1,TimeSpan.FromSeconds(1.35)){AutoReverse=true,RepeatBehavior=RepeatBehavior.Forever,EasingFunction=new SineEase{EasingMode=EasingMode.EaseInOut}};Timeline.SetDesiredFrameRate(breath,fps);
@@ -381,14 +516,19 @@ namespace CodexUserData
             base.OnRenderSizeChanged(info);if(ActualWidth<4||ActualHeight<4)return;
             bounds=new Rect(1.05,1.05,ActualWidth-2.1,ActualHeight-2.1);
             clip=new RectangleGeometry(new Rect(0,0,ActualWidth,ActualHeight),16,16);clip.Freeze();
-            var path=new RectangleGeometry(bounds,14.95,14.95).GetFlattenedPathGeometry(.05,ToleranceType.Absolute);
-            for(int i=0;i<=Samples;i++){Point tangent;path.GetPointAtFractionLength(i/(double)Samples,out perimeter[i],out tangent);}
+            CachePerimeter();
+        }
+        private void CachePerimeter()
+        {
+            if(bounds.Width<=0||bounds.Height<=0)return;
+            var path=new RectangleGeometry(bounds,14.95,14.95).GetFlattenedPathGeometry(lightweight?.18:.05,ToleranceType.Absolute);
+            for(int i=0;i<=perimeterSamples;i++){Point tangent;path.GetPointAtFractionLength(i/(double)perimeterSamples,out perimeter[i],out tangent);}
             double length=2*(bounds.Width+bounds.Height-4*14.95)+2*Math.PI*14.95;
             tailFraction=Math.Min(150,Math.Max(85,length*.24))/length;
         }
         private Point At(double fraction)
         {
-            fraction-=Math.Floor(fraction);double index=fraction*Samples;int a=(int)index;double t=index-a;
+            fraction-=Math.Floor(fraction);double index=fraction*perimeterSamples;int a=(int)index;double t=index-a;
             return new Point(perimeter[a].X+(perimeter[a+1].X-perimeter[a].X)*t,perimeter[a].Y+(perimeter[a+1].Y-perimeter[a].Y)*t);
         }
         protected override void OnRender(DrawingContext dc)
@@ -406,10 +546,14 @@ namespace CodexUserData
             dc.PushOpacity(.28+.40*breath);dc.DrawRoundedRectangle(null,rim,bounds,14.95,14.95);dc.Pop();
             dc.PushOpacity(.72+.28*breath);
             Point previous=At(phase-tailFraction);
-            for(int i=0;i<TailSteps;i++)
+            for(int i=0;i<trailSteps;i++)
             {
-                Point next=At(phase-tailFraction+tailFraction*(i+1)/TailSteps);
-                dc.DrawLine(halo[i],previous,next);dc.DrawLine(trail[i],previous,next);previous=next;
+                Point next=At(phase-tailFraction+tailFraction*(i+1)/trailSteps);
+                int pen=(i+1)*TailSteps/trailSteps-1;
+                // Fewer connected segments preserve the continuous rim; eco removes the
+                // extra halo pass rather than turning the perimeter into a dotted stroke.
+                if(!lightweight)dc.DrawLine(halo[pen],previous,next);
+                dc.DrawLine(trail[pen],previous,next);previous=next;
             }
             dc.Pop();dc.Pop();
         }

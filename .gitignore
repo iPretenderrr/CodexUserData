@@ -25,6 +25,18 @@
 !/examples/aurora/codexuserdata.js
 !/tools/ReleaseProbe.cs
 !/tools/HtmlReleaseProbe.cs
+!/tools/verify-source.ps1
+!/tools/StabilityProbe.cs
+!/tools/HtmlStabilityProbe.cs
+!/tools/DataStabilityProbe.cs
+!/tools/PerformanceStabilityProbe.cs
+!/tools/FakeQuotaHelper.cs
+!/tools/GuideStabilityProbe.cs
+!/tools/PlacementStabilityProbe.cs
+!/tools/StatusStabilityProbe.cs
+!/tools/ChartStabilityProbe.cs
+!/tools/DiagnosticStabilityProbe.cs
+!/tools/UpdateStabilityProbe.cs
 !/src/build.ps1
 !/src/widget.manifest
 !/src/ActivityJsonLine.cs
@@ -42,6 +54,8 @@
 !/src/QuotaReader.cs
 !/src/QuotaStatus.cs
 !/src/SettingsWindow.cs
+!/src/ReleaseUpdate.cs
+!/src/Diagnostics.cs
 !/src/Theme.cs
 !/src/ThemeEditor.cs
 !/src/ThemePalette.cs

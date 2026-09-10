@@ -21,6 +21,7 @@ namespace CodexUserData
         private DockMorph view;
         private bool finished;
         private readonly double originalOpacity;
+        private bool fadesWindow;
         [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr hwnd,IntPtr after,int x,int y,int width,int height,uint flags);
         [DllImport("user32.dll")] private static extern int GetWindowLong(IntPtr hwnd,int index);
         [DllImport("user32.dll")] private static extern int SetWindowLong(IntPtr hwnd,int index,int value);
@@ -32,8 +33,9 @@ namespace CodexUserData
             if(browser)
             {
                 // WebView2 owns a separate compositor; a WPF bitmap cannot reliably capture it.
-                var fade=new DoubleAnimation(originalOpacity,0,Theme.MotionTime(170));Timeline.SetDesiredFrameRate(fade,fps);
-                fade.Completed+=delegate{Finish();};content.BeginAnimation(UIElement.OpacityProperty,fade);return;
+                // WebView2 is independently composed. Fade its whole HWND so the browser frame
+                // cannot remain visible after the surrounding WPF tree has disappeared.
+                fadesWindow=true;WindowInteraction.FadeNative(owner,0,170,Finish);return;
             }
             try
             {
@@ -69,6 +71,8 @@ namespace CodexUserData
             try{completed();}finally
             {
                 content.Visibility=Visibility.Visible;content.UpdateLayout();
+                // Swap the HTML renderer for its edge strip while the HWND is still transparent.
+                if(fadesWindow){WindowInteraction.CompleteNativeFade(owner);fadesWindow=false;}
                 // Let the settled strip reach the render queue before removing the snapshot.
                 owner.Dispatcher.BeginInvoke(DispatcherPriority.ContextIdle,new Action(CloseOverlay));
             }
@@ -76,7 +80,7 @@ namespace CodexUserData
         private void CloseOverlay(){if(view!=null){view.BeginAnimation(DockMorph.ProgressProperty,null);view=null;}if(overlay!=null){overlay.Close();overlay=null;}}
         public void Dispose()
         {
-            finished=true;content.BeginAnimation(UIElement.OpacityProperty,null);content.Opacity=originalOpacity;content.Visibility=Visibility.Visible;CloseOverlay();
+            finished=true;content.BeginAnimation(UIElement.OpacityProperty,null);content.Opacity=originalOpacity;if(fadesWindow){WindowInteraction.CompleteNativeFade(owner);fadesWindow=false;}content.Visibility=Visibility.Visible;CloseOverlay();
         }
     }
 

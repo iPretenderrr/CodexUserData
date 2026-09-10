@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 
@@ -14,7 +15,7 @@ namespace CodexUserData
         public double UsedPercent {get;set;} public long Minutes {get;set;} public long ResetsAt {get;set;}
         internal double? RemainingPercent(QuotaBucket bucket,long now)
         {
-            if(bucket==null||!bucket.IsFresh(now)||(ResetsAt>0&&now>=ResetsAt)||Double.IsNaN(UsedPercent)||Double.IsInfinity(UsedPercent))return null;
+            if(bucket==null||!bucket.IsFresh(now)||ResetsAt<0||ResetsAt>253402300799||(ResetsAt>0&&now>=ResetsAt)||Double.IsNaN(UsedPercent)||Double.IsInfinity(UsedPercent)||UsedPercent<0||UsedPercent>100)return null;
             return Math.Max(0,Math.Min(100,100-UsedPercent));
         }
         internal string Remaining(QuotaBucket bucket,long now){double? value=RemainingPercent(bucket,now);return value.HasValue?value.Value.ToString("0.#",CultureInfo.InvariantCulture)+"%":"待更新";}
@@ -25,6 +26,28 @@ namespace CodexUserData
         public string Id {get;set;} public string Name {get;set;} public string Origin {get;set;}
         public long ObservedAt {get;set;} public QuotaWindow Primary {get;set;} public QuotaWindow Secondary {get;set;}
         internal bool IsFresh(long now){return ObservedAt>0&&ObservedAt<=now+5&&now-ObservedAt<=300;}
+        internal bool IsOnline {get{return String.Equals(Origin,"在线查询",StringComparison.Ordinal);}}
+        internal string SourceLabel {get{return IsOnline?"在线额度":String.IsNullOrWhiteSpace(Origin)?"来源未知":"历史快照";}}
+        internal string DescribeSource(long now)
+        {
+            string state=ObservedAt<=0||ObservedAt>now+5?"时间异常":!IsFresh(now)?"已过期":"";
+            return SourceLabel+" · "+(IsOnline?"更新于 ":"记录于 ")+Timestamp(ObservedAt)+(state.Length==0?"":" · "+state);
+        }
+        internal static string Timestamp(long value)
+        {
+            if(value<=0)return "时间未知";
+            try{return DateTimeOffset.FromUnixTimeSeconds(value).ToLocalTime().ToString("MM-dd HH:mm",CultureInfo.InvariantCulture);}
+            catch(ArgumentOutOfRangeException){return "时间未知";}
+        }
+        internal static bool Prefer(QuotaBucket previous,QuotaBucket next)
+        {
+            long now=LocalCodexUsage.Unix(DateTime.UtcNow);
+            if(next==null||String.IsNullOrWhiteSpace(next.Id)||next.ObservedAt<=0||next.ObservedAt>now+5)return false;
+            // Logs use second-resolution timestamps. At a tie, a log replay must not replace
+            // a direct account response; a genuinely newer log snapshot is still accepted.
+            // An invalid future timestamp in a legacy cache must not block every later response.
+            return previous==null||previous.ObservedAt<=0||previous.ObservedAt>now+5||next.ObservedAt>previous.ObservedAt||next.ObservedAt==previous.ObservedAt&&(!previous.IsOnline||next.IsOnline);
+        }
     }
     internal static class QuotaReader
     {
@@ -69,8 +92,8 @@ namespace CodexUserData
         private static QuotaWindow Window(object value)
         {
             var d=value as Dictionary<string,object>;double used;object raw=Get(d,"usedPercent","used_percent");
-            if(raw==null||!Double.TryParse(Convert.ToString(raw,CultureInfo.InvariantCulture),NumberStyles.Float,CultureInfo.InvariantCulture,out used)||Double.IsNaN(used)||Double.IsInfinity(used))return null;
-            return new QuotaWindow{UsedPercent=Math.Max(0,Math.Min(100,used)),Minutes=Number(d,"windowDurationMins","window_minutes"),ResetsAt=Number(d,"resetsAt","resets_at")};
+            if(raw==null||!Double.TryParse(Convert.ToString(raw,CultureInfo.InvariantCulture),NumberStyles.Float,CultureInfo.InvariantCulture,out used)||Double.IsNaN(used)||Double.IsInfinity(used)||used<0||used>100)return null;
+            return new QuotaWindow{UsedPercent=used,Minutes=Number(d,"windowDurationMins","window_minutes"),ResetsAt=Number(d,"resetsAt","resets_at")};
         }
         internal static QuotaBucket Parse(object value,long time,string origin)
         {
@@ -85,8 +108,10 @@ namespace CodexUserData
             if(many!=null)foreach(var pair in many){var b=Parse(pair.Value,time,"在线查询");if(b!=null){b.Id=pair.Key;list.Add(b);}}
             if(list.Count==0){var b=Parse(Get(d,"rateLimits"),time,"在线查询");if(b!=null)list.Add(b);}return list;
         }
-        internal static async Task<List<QuotaBucket>> Query(string executable,string home)
+        internal static Task<List<QuotaBucket>> Query(string executable,string home){return Query(executable,home,CancellationToken.None);}
+        internal static async Task<List<QuotaBucket>> Query(string executable,string home,CancellationToken cancel)
         {
+            cancel.ThrowIfCancellationRequested();
             if(!File.Exists(executable))throw new FileNotFoundException("未找到 Codex CLI，当前显示最近日志中的额度快照。");
             var json=new JavaScriptSerializer{MaxJsonLength=1024*1024};
             var start=new ProcessStartInfo(executable,"app-server --stdio"){UseShellExecute=false,CreateNoWindow=true,WindowStyle=ProcessWindowStyle.Hidden,RedirectStandardInput=true,RedirectStandardOutput=true,RedirectStandardError=true,WorkingDirectory=Path.GetDirectoryName(executable)};
@@ -95,14 +120,21 @@ namespace CodexUserData
             using(var process=new Process{StartInfo=start})
             {
                 process.Start();process.ErrorDataReceived+=delegate{};process.BeginErrorReadLine();
+                // Only this read-only helper belongs to the request. Closing the app or changing
+                // accounts cancels it immediately instead of retaining an obsolete 15-second read.
+                using(var registration=cancel.Register(delegate{try{if(!process.HasExited)process.Kill();}catch(InvalidOperationException){}catch(System.ComponentModel.Win32Exception){}}))
+                using(var delays=CancellationTokenSource.CreateLinkedTokenSource(cancel))
+                {
                 try
                 {
+                    cancel.ThrowIfCancellationRequested();
                     await process.StandardInput.WriteLineAsync("{\"id\":1,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"ccswitch_usage_widget\",\"version\":\"4.0\"}}}");
                     DateTime deadline=DateTime.UtcNow.AddSeconds(15);bool requested=false;
                     while(DateTime.UtcNow<deadline)
                     {
-                        var read=process.StandardOutput.ReadLineAsync();var timeout=Task.Delay(Math.Max(1,(int)(deadline-DateTime.UtcNow).TotalMilliseconds));
-                        if(await Task.WhenAny(read,timeout)!=read)break;string line=await read;if(line==null)break;if(line.Length>1024*1024)continue;
+                        var read=process.StandardOutput.ReadLineAsync();var timeout=Task.Delay(Math.Max(1,(int)(deadline-DateTime.UtcNow).TotalMilliseconds),delays.Token);
+                        var winner=await Task.WhenAny(read,timeout);cancel.ThrowIfCancellationRequested();
+                        if(winner!=read)break;string line=await read;if(line==null)break;if(line.Length>1024*1024)continue;
                         Dictionary<string,object> reply;try{reply=json.DeserializeObject(line) as Dictionary<string,object>;}catch(ArgumentException){continue;}
                         object id=Get(reply,"id");if(id==null)continue;
                         if(Convert.ToString(id)=="1"&&!requested)
@@ -120,9 +152,11 @@ namespace CodexUserData
                 }
                 finally
                 {
+                    delays.Cancel();
                     try{process.StandardInput.Close();}catch(IOException){}
                     // This is only the short-lived helper we started, never another Codex process.
-                    if(!process.WaitForExit(500)){try{process.Kill();process.WaitForExit(500);}catch(InvalidOperationException){}}
+                    if(!process.WaitForExit(500)){try{process.Kill();process.WaitForExit(500);}catch(InvalidOperationException){}catch(System.ComponentModel.Win32Exception){}}
+                }
                 }
             }
         }

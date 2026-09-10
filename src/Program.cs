@@ -10,11 +10,19 @@ using System.Windows;
 
 [assembly: System.Reflection.AssemblyTitle("CodexUserData")]
 [assembly: System.Reflection.AssemblyProduct("CodexUserData")]
-[assembly: System.Reflection.AssemblyVersion("1.6.10.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.6.10.0")]
+[assembly: System.Reflection.AssemblyVersion("1.7.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.7.0.0")]
 
 namespace CodexUserData
 {
+    internal sealed class BallPlacement
+    {
+        public double X {get;set;} public double Y {get;set;} public string Dock {get;set;}
+        internal static BallPlacement Capture(Rect bounds,Rect work,string dock)
+        {return new BallPlacement{X=Theme.Bound((bounds.Left-work.Left)/Math.Max(1,work.Width-bounds.Width),0,1,0),Y=Theme.Bound((bounds.Top-work.Top)/Math.Max(1,work.Height-bounds.Height),0,1,0),Dock=dock};}
+        internal Rect Restore(Size pixels,Rect work)
+        {return WindowInteraction.FitBounds(new Rect(work.Left+X*Math.Max(0,work.Width-pixels.Width),work.Top+Y*Math.Max(0,work.Height-pixels.Height),pixels.Width,pixels.Height),work,0);}
+    }
     internal sealed class Preferences
     {
         public string App {get;set;} public string Range {get;set;} public string Database {get;set;}
@@ -39,6 +47,10 @@ namespace CodexUserData
         public bool CliNoticeShown {get;set;}
         public bool MinimizeToTray {get;set;} // Missing in older settings defaults to taskbar (false).
         public double BallLeft {get;set;} public double BallTop {get;set;} public string BallDock {get;set;}
+        public bool BallPositionLocked {get;set;}
+        public string BallMonitor {get;set;}
+        public Dictionary<string,BallPlacement> BallPlacements {get;set;}
+        public Dictionary<string,double[]> CustomShapeSizes {get;set;}
         public string ThemeMode {get;set;} public string ThemeBase {get;set;} public string GradientKind {get;set;} public string GradientSpread {get;set;}
         public double GradientSpan {get;set;}
         public string[] GradientColors {get;set;} public double[] GradientStops {get;set;}
@@ -48,6 +60,7 @@ namespace CodexUserData
         {
             string user=Environment.GetEnvironmentVariable("USERPROFILE") ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
             BallLeft=Double.NaN;BallTop=Double.NaN;BallDock="";
+            BallMonitor="";BallPlacements=new Dictionary<string,BallPlacement>(StringComparer.OrdinalIgnoreCase);CustomShapeSizes=new Dictionary<string,double[]>(StringComparer.OrdinalIgnoreCase);
             BallOpacity=1;OrbFollowTheme=true;CompletionFlash=true;BallStyle="orb";OrbQuotaWindow="auto";OrbAnimation="auto";OrbSize=84;AnimationSpeed=1;
             OrbShortColors=new[]{"#316BF1","#5F97FF","#89CDEC"};OrbLongColors=new[]{"#7965EA","#AB8DF0","#E2B0ED"};OrbShortAngle=OrbLongAngle=45;
             ThemeMode="dark";ThemeBase="auto";GradientKind="linear";GradientSpread="pad";GradientColors=new[]{"#F7BBE3","#E6D7FA","#AAF1ED"};GradientStops=new[]{0d,48d,100d};GradientAngle=120;GradientSpan=100;GradientCenterX=50;GradientCenterY=35;GradientRadius=80;GradientStrength=85;ThemeCardOpacity=82;
@@ -64,6 +77,7 @@ namespace CodexUserData
         internal void Validate()
         {
             Theme.Normalize(this);BallOpacity=Clamp(BallOpacity,.2,1,1);
+            NormalizePlacement();
             OrbPalette.Normalize(this);
             if(BallStyle!="capsule"&&BallStyle!="html")BallStyle="orb";
             if(!new[]{"auto","short","week"}.Contains(OrbQuotaWindow))OrbQuotaWindow="auto";
@@ -84,6 +98,42 @@ namespace CodexUserData
             if(!new[]{1,7,14,30,60,90,180}.Contains(TrendDays))TrendDays=30;
         }
         private static double Clamp(double v,double min,double max,double fallback){return Double.IsNaN(v)||Double.IsInfinity(v)?fallback:Math.Max(min,Math.Min(max,v));}
+        internal static string ShapeSizeKey(string relative)
+        {
+            if(String.IsNullOrWhiteSpace(relative)||relative.Length>240||Path.IsPathRooted(relative))return null;
+            var parts=relative.Replace('\\','/').Split('/');
+            if(parts.Any(p=>p.Length==0||p=="."||p==".."||p.IndexOfAny(Path.GetInvalidFileNameChars())>=0))return null;
+            return String.Join("/",parts);
+        }
+        internal void NormalizePlacement()
+        {
+            if(String.IsNullOrEmpty(BallMonitor)||BallMonitor.Length>128||BallMonitor.Any(Char.IsControl))BallMonitor="";
+            var monitors=new Dictionary<string,BallPlacement>(StringComparer.OrdinalIgnoreCase);
+            foreach(var pair in BallPlacements??new Dictionary<string,BallPlacement>())
+            {
+                if(monitors.Count>=8)break;
+                if(String.IsNullOrWhiteSpace(pair.Key)||pair.Key.Length>128||pair.Key.Any(Char.IsControl)||pair.Value==null)continue;
+                monitors[pair.Key]=new BallPlacement{X=Clamp(pair.Value.X,0,1,0),Y=Clamp(pair.Value.Y,0,1,0),Dock=new[]{"left","right","top","bottom"}.Contains(pair.Value.Dock)?pair.Value.Dock:""};
+            }
+            BallPlacements=monitors;
+            var sizes=new Dictionary<string,double[]>(StringComparer.OrdinalIgnoreCase);
+            foreach(var pair in CustomShapeSizes??new Dictionary<string,double[]>())
+            {
+                if(sizes.Count>=32)break;string key=ShapeSizeKey(pair.Key);
+                if(key==null||pair.Value==null||pair.Value.Length!=2)continue;
+                sizes[key]=new[]{Clamp(pair.Value[0],64,800,240),Clamp(pair.Value[1],40,600,90)};
+            }
+            CustomShapeSizes=sizes;
+        }
+        internal bool RememberShapeSize(string relative,double width,double height)
+        {
+            string key=ShapeSizeKey(relative);if(key==null)return false;
+            if(CustomShapeSizes==null)CustomShapeSizes=new Dictionary<string,double[]>(StringComparer.OrdinalIgnoreCase);
+            width=Clamp(width,64,800,240);height=Clamp(height,40,600,90);double[] previous;
+            if(CustomShapeSizes.TryGetValue(key,out previous)&&previous!=null&&previous.Length==2&&Math.Abs(previous[0]-width)<.5&&Math.Abs(previous[1]-height)<.5)return false;
+            if(!CustomShapeSizes.ContainsKey(key)&&CustomShapeSizes.Count>=32)CustomShapeSizes.Remove(CustomShapeSizes.Keys.First());
+            CustomShapeSizes[key]=new[]{width,height};return true;
+        }
     }
     internal static class Program
     {
@@ -100,7 +150,8 @@ namespace CodexUserData
         internal static readonly JavaScriptSerializer Json=new JavaScriptSerializer {MaxJsonLength=64*1024*1024};
         internal const string WindowTitle="CodexUserData";
         internal static readonly int ShowMainMessage=(int)RegisterWindowMessage("CodexUserData.ShowMain.v1");
-        private static bool saveWarningShown;
+        private static bool saveWarningShown,recoveredSettings;
+        private static readonly object settingsGate=new object();
         [DllImport("user32.dll",CharSet=CharSet.Unicode)] private static extern IntPtr FindWindow(string cls,string name);
         [DllImport("user32.dll",CharSet=CharSet.Unicode)] private static extern uint RegisterWindowMessage(string name);
         [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr h,int message,IntPtr wParam,IntPtr lParam);
@@ -162,13 +213,49 @@ namespace CodexUserData
         }
         internal static Preferences ReadPreferences()
         {
-            try{if(File.Exists(SettingsPath)){var p=Json.Deserialize<Preferences>(File.ReadAllText(SettingsPath,Encoding.UTF8));if(p==null)throw new IOException("Empty settings");p.Validate();return p;}}catch(Exception ex){throw new IOException("设置文件无法读取，已保留原文件。请先备份用户数据目录，并检查 widget-settings.json 或其 .bak 备份。",ex);}
-            return new Preferences();
+            lock(settingsGate)
+            {
+                recoveredSettings=false;Exception error=null;Preferences result;
+                if(TryPreferences(SettingsPath,out result,out error))return result;
+                Exception backupError;
+                if(TryPreferences(SettingsPath+".bak",out result,out backupError))
+                {
+                    // Do not replace files merely by reading settings. The next successful save
+                    // preserves the damaged primary separately instead of overwriting the good backup.
+                    recoveredSettings=true;return result;
+                }
+                if(error!=null||backupError!=null)throw new IOException("设置及备份均无法读取，已保留原文件。请检查用户数据目录中的 widget-settings.json 和 .bak 备份。",error??backupError);
+                return new Preferences();
+            }
+        }
+        private static bool TryPreferences(string path,out Preferences value,out Exception error)
+        {
+            value=null;error=null;
+            try
+            {
+                if(!File.Exists(path))return false;
+                value=Json.Deserialize<Preferences>(File.ReadAllText(path,Encoding.UTF8));
+                if(value==null)throw new IOException("Empty settings");value.Validate();return true;
+            }
+            catch(IOException ex){error=ex;}catch(UnauthorizedAccessException ex){error=ex;}
+            catch(ArgumentException ex){error=ex;}catch(InvalidOperationException ex){error=ex;}
+            return false;
         }
         internal static void Save(Preferences p)
         {
-            string temp=SettingsPath+".tmp";
-            try{Directory.CreateDirectory(DataFolder);File.WriteAllText(temp,Json.Serialize(p),new UTF8Encoding(false));if(File.Exists(SettingsPath))File.Replace(temp,SettingsPath,SettingsPath+".bak");else File.Move(temp,SettingsPath);saveWarningShown=false;}catch(IOException){SaveWarning();}catch(UnauthorizedAccessException){SaveWarning();}
+            lock(settingsGate)
+            {
+                string temp=SettingsPath+"."+Guid.NewGuid().ToString("N")+".tmp";
+                try
+                {
+                    Directory.CreateDirectory(DataFolder);byte[] bytes=new UTF8Encoding(false).GetBytes(Json.Serialize(p));
+                    using(var file=new FileStream(temp,FileMode.CreateNew,FileAccess.Write,FileShare.None)){file.Write(bytes,0,bytes.Length);file.Flush(true);}
+                    if(File.Exists(SettingsPath))File.Replace(temp,SettingsPath,SettingsPath+(recoveredSettings?".corrupt":".bak"));else File.Move(temp,SettingsPath);
+                    recoveredSettings=false;saveWarningShown=false;
+                }
+                catch(IOException){SaveWarning();}catch(UnauthorizedAccessException){SaveWarning();}
+                finally{try{if(File.Exists(temp))File.Delete(temp);}catch(IOException){}catch(UnauthorizedAccessException){}}
+            }
         }
         private static void SaveWarning(){if(saveWarningShown)return;saveWarningShown=true;MessageBox.Show("设置暂未保存成功。请检查用户数据目录的写入权限和可用空间；已有设置文件会保留。",WindowTitle,MessageBoxButton.OK,MessageBoxImage.Warning);}
     }

@@ -15,7 +15,7 @@ namespace CodexUserData
     {
         private sealed class Row
         {
-            internal string Model;internal Border Card;internal TextBox[] Inputs;internal TextBlock State;
+            internal string Model;internal Border Card;internal TextBox[] Inputs;internal TextBlock State;internal UniformGrid Fields;
             internal bool Custom;
         }
         private readonly Dictionary<string,Row> rows=new Dictionary<string,Row>(StringComparer.OrdinalIgnoreCase);
@@ -43,7 +43,7 @@ namespace CodexUserData
             var scroll=new ScrollViewer{Content=list,VerticalScrollBarVisibility=ScrollBarVisibility.Auto,HorizontalScrollBarVisibility=ScrollBarVisibility.Disabled};root.Children.Add(scroll);
             PreviewKeyDown+=delegate(object sender,System.Windows.Input.KeyEventArgs args){if(args.Key==System.Windows.Input.Key.Escape){args.Handled=true;WindowInteraction.CompleteDialog(this,false);}};
             AddModels(draft.KnownModels.Concat(draft.PriceOverrides.Keys).Concat(ApiPrices.DefaultModels));
-            Loaded+=delegate{LoadModels();};Closed+=delegate{closed=true;};
+            SizeChanged+=delegate{Reflow();};Loaded+=delegate{LoadModels();};Closed+=delegate{closed=true;};
         }
         private async void LoadModels()
         {
@@ -76,20 +76,31 @@ namespace CodexUserData
                 var panel=new StackPanel();row.Card=new Border{Background=Theme.Surface,CornerRadius=new CornerRadius(9),Padding=new Thickness(12,9,12,10),Margin=new Thickness(0,0,6,7),Child=panel};
                 var header=new DockPanel();panel.Children.Add(header);
                 var reset=Theme.Button("恢复默认","恢复 "+model+" 默认价格",68);reset.FontSize=10;reset.Height=25;reset.Padding=new Thickness(5,2,5,2);DockPanel.SetDock(reset,Dock.Right);header.Children.Add(reset);
-                row.State=Theme.Text(custom?"自定义":rate.All(v=>v<0)?"按 0 估算":"内置",10,Theme.Muted);row.State.Margin=new Thickness(8,0,6,0);DockPanel.SetDock(row.State,Dock.Right);header.Children.Add(row.State);
+                row.State=Theme.Text(DescribeRate(custom,rate),10,Theme.Muted);AutomationProperties.SetAutomationId(row.State,"PriceState_"+model);row.State.Margin=new Thickness(8,0,6,0);DockPanel.SetDock(row.State,Dock.Right);header.Children.Add(row.State);
                 var title=Theme.Text("● "+model,12,ModelColors.For(model));title.TextTrimming=TextTrimming.CharacterEllipsis;title.ToolTip=model;header.Children.Add(title);
-                var fields=new UniformGrid{Columns=4,Margin=new Thickness(-3,7,-3,0)};panel.Children.Add(fields);
+                var fields=new UniformGrid{Columns=4,Margin=new Thickness(-3,7,-3,0)};row.Fields=fields;panel.Children.Add(fields);
                 string[] labels={"未缓存输入","缓存读取","缓存创建","输出"};
                 for(int i=0;i<4;i++)
                 {
-                    var cell=new StackPanel{Margin=new Thickness(3,0,3,0)};fields.Children.Add(cell);cell.Children.Add(Theme.Text(labels[i],10,Theme.Muted));
+                    var cell=new StackPanel{Margin=new Thickness(3,0,3,5)};fields.Children.Add(cell);cell.Children.Add(Theme.Text(labels[i],10,Theme.Muted));
                     var input=Theme.Input(RateText(rate[i]));input.Padding=new Thickness(5);input.Margin=new Thickness(0,5,0,0);input.ToolTip=labels[i]+" · USD / 1M Tokens · 留空按 0 估算";AutomationProperties.SetName(input,model+" "+labels[i]+"价格");row.Inputs[i]=input;cell.Children.Add(input);
-                    input.TextChanged+=delegate{row.Custom=true;row.State.Text="自定义";};
+                    input.TextChanged+=delegate{row.Custom=true;UpdateState(row);};
                 }
-                reset.Click+=delegate{var defaults=ApiPrices.Default(model);for(int i=0;i<4;i++)row.Inputs[i].Text=RateText(defaults[i]);row.Custom=false;row.State.Text=defaults.All(v=>v<0)?"按 0 估算":"内置";};
+                reset.Click+=delegate{var defaults=ApiPrices.Default(model);for(int i=0;i<4;i++)row.Inputs[i].Text=RateText(defaults[i]);row.Custom=false;UpdateState(row);};
             }
             // Only sort when the async catalog adds names; existing TextBoxes and edits stay intact.
-            int index=0;foreach(var row in rows.Values.OrderBy(r=>r.Model)){if(!list.Children.Contains(row.Card))list.Children.Insert(index,row.Card);index++;}Filter();
+            int index=0;foreach(var row in rows.Values.OrderBy(r=>r.Model)){if(!list.Children.Contains(row.Card))list.Children.Insert(index,row.Card);index++;}Filter();Reflow();
+        }
+        private void Reflow(){foreach(var row in rows.Values)row.Fields.Columns=(ActualWidth>0?ActualWidth:Width)<520?2:4;}
+        internal static string DescribeRate(bool custom,decimal[] rates)
+        {
+            if(rates.All(v=>v<=0))return custom?"自定义 · 按 0":"按 0 估算";
+            return (custom?"自定义":"内置")+(rates.Any(v=>v<0)?" · 缺项按 0":"");
+        }
+        private static void UpdateState(Row row)
+        {
+            var rates=new decimal[4];for(int i=0;i<rates.Length;i++)if(!Parse(row.Inputs[i].Text,out rates[i])){row.State.Text="价格待修正";row.State.Foreground=Theme.Warning;return;}
+            row.State.Text=DescribeRate(row.Custom,rates);row.State.Foreground=Theme.Muted;
         }
         private void Filter(){foreach(var row in rows.Values)row.Card.Visibility=row.Model.IndexOf(search.Text.Trim(),StringComparison.OrdinalIgnoreCase)>=0?Visibility.Visible:Visibility.Collapsed;}
         private static string RateText(decimal value){return value<0?"":value.ToString("0.########",CultureInfo.InvariantCulture);}

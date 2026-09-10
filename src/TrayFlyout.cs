@@ -22,11 +22,12 @@ namespace CodexUserData
         private bool dismissReversible;
         private int revealRevision;
         private bool hasAnchor;
+        private bool closed;
         private System.Drawing.Point lastAnchor;
         internal bool Dismissing {get;private set;}
         internal void Reveal(System.Drawing.Point anchor)
         {
-            if(Dismissing&&!dismissReversible)return;
+            if(closed||Dismissing&&!dismissReversible)return;
             // A second hover/click can arrive before the first render. Keep that pending
             // position/reveal callback alive instead of leaving native Opacity at zero.
             if(IsVisible&&!Dismissing){PositionAt(anchor);return;}
@@ -35,25 +36,29 @@ namespace CodexUserData
             // Keep the native popup transparent until SizeToContent has produced its real first size.
             // Positioning it again at render priority avoids the initial wrong-monitor/wrong-edge jump.
             Opacity=0;WindowInteraction.PrepareReveal(this);Show();PositionAt(anchor);
-            Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Render,new Action(()=>{if(revision!=revealRevision||!IsVisible)return;UpdateLayout();PositionAt(anchor);Opacity=1;WindowInteraction.Reveal(this);}));
+            Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Render,new Action(()=>{if(closed||revision!=revealRevision||!IsVisible)return;UpdateLayout();PositionAt(lastAnchor);Opacity=1;WindowInteraction.Reveal(this);}));
         }
         internal void Dismiss(Action after=null,bool reversible=false)
         {
-            revealRevision++;if(!IsVisible){Dismissing=false;if(after!=null)after();return;}Dismissing=true;dismissReversible=reversible;
+            revealRevision++;if(closed||!IsVisible){Dismissing=false;if(after!=null)after();return;}Dismissing=true;dismissReversible=reversible;
             WindowInteraction.Hide(this,()=>{Dismissing=false;dismissReversible=false;if(after!=null)after();});
         }
         internal TrayFlyout(Action show,Action charts,Action refresh)
         {
             Title="Codex 额度速览";Width=370;SizeToContent=SizeToContent.Height;MaxHeight=720;WindowStyle=WindowStyle.None;AllowsTransparency=true;Background=Brushes.Transparent;ShowInTaskbar=false;ShowActivated=false;Topmost=true;ResizeMode=ResizeMode.NoResize;UseLayoutRounding=true;
             FontFamily=new FontFamily("Segoe UI, Microsoft YaHei UI");Theme.InstallStyles(this);WindowInteraction.EnableMotion(this,false);
-            Closed+=delegate{Dismissing=false;dismissReversible=false;Opacity=1;};
+            Closed+=delegate{closed=true;revealRevision++;Dismissing=false;dismissReversible=false;};
             var shell=new Border{Background=Theme.WindowBackground,BorderBrush=Theme.Frame,BorderThickness=new Thickness(1),CornerRadius=new CornerRadius(14),Padding=new Thickness(16)};Content=shell;
-            var layout=new StackPanel();shell.Child=layout;
+            // Only the data region yields height on short/high-DPI screens; the close button
+            // and footer remain reachable instead of being clipped below a fixed scroll area.
+            var layout=new Grid();shell.Child=layout;
+            layout.RowDefinitions.Add(new RowDefinition{Height=GridLength.Auto});layout.RowDefinitions.Add(new RowDefinition{Height=GridLength.Auto});
+            layout.RowDefinitions.Add(new RowDefinition{Height=new GridLength(1,GridUnitType.Star)});layout.RowDefinitions.Add(new RowDefinition{Height=GridLength.Auto});
             var header=new DockPanel{Margin=new Thickness(0,0,0,12)};layout.Children.Add(header);var close=Theme.ToolbarButton("expand","收起额度速览");close.Click+=delegate{Dismiss();};DockPanel.SetDock(close,Dock.Right);header.Children.Add(close);
             var heading=new StackPanel();heading.Children.Add(Theme.Text("CODEX",9,Theme.Muted));var caption=Theme.Text("额度与今日用量",18,Theme.Ink);caption.FontWeight=FontWeights.SemiBold;caption.Margin=new Thickness(0,3,0,0);heading.Children.Add(caption);header.Children.Add(heading);
-            activityText.Margin=new Thickness(0,0,0,10);layout.Children.Add(activityText);
-            var scroll=new ScrollViewer{Content=body,VerticalScrollBarVisibility=ScrollBarVisibility.Auto,MaxHeight=555};layout.Children.Add(scroll);
-            var actions=new UniformGrid{Columns=3,Margin=new Thickness(-3,12,-3,0)};layout.Children.Add(actions);
+            activityText.Margin=new Thickness(0,0,0,10);Grid.SetRow(activityText,1);layout.Children.Add(activityText);
+            var scroll=new ScrollViewer{Content=body,VerticalScrollBarVisibility=ScrollBarVisibility.Auto,MaxHeight=555};Grid.SetRow(scroll,2);layout.Children.Add(scroll);
+            var actions=new UniformGrid{Columns=3,Margin=new Thickness(-3,12,-3,0)};Grid.SetRow(actions,3);layout.Children.Add(actions);
             Action<string,Action> button=(label,action)=>{var b=Theme.Button(label,label,45);b.Margin=new Thickness(3,0,3,0);b.Background=Theme.Surface;b.Click+=delegate{if(action!=null)action();};actions.Children.Add(b);};
             button("打开悬浮窗",()=>Dismiss(show));button("用量图表",()=>Dismiss(charts));button("刷新额度",refresh);
         }
@@ -61,8 +66,10 @@ namespace CodexUserData
         {
             long now=LocalCodexUsage.Unix(DateTime.Now);var all=(quotas??new QuotaBucket[0]).OrderBy(q=>q.Id).ToArray();var general=all.FirstOrDefault(q=>q.Id=="codex");
             DailyUsage today=snapshot==null?null:snapshot.Daily.LastOrDefault(d=>d.Date==DateTime.Today.ToString("yyyy-MM-dd"));
-            Func<QuotaWindow,string> windowKey=w=>w==null?"":w.Label+":"+w.Minutes+":"+w.UsedPercent+":"+w.ResetsAt;
-            string nextKey=(scope??"")+"/"+(status??"")+"/"+(snapshot==null?"":snapshot.Warning)+"/"+String.Join("|",all.Select(q=>q.Id+":"+q.ObservedAt+":"+windowKey(q.Primary)+":"+windowKey(q.Secondary)))+"/"+(today==null?"none":today.Date+":"+today.Tokens+":"+today.Input+":"+today.CacheRead+":"+today.CacheWrite+":"+today.Output+":"+String.Join(",",today.Models.Select(m=>m.Model+":"+m.Effort+":"+m.Tokens+":"+m.EquivalentUsd+":"+m.UnpricedTokens)));
+            Func<QuotaBucket,QuotaWindow,string> windowKey=(q,w)=>w==null?"":w.Label+":"+w.Minutes+":"+w.UsedPercent+":"+w.ResetsAt+":"+w.RemainingPercent(q,now).HasValue;
+            // Reset/expiry can change presentation without a new account response. Include
+            // availability and provenance so an unchanged numeric snapshot cannot stay stale.
+            string nextKey=(scope??"")+"/"+(status??"")+"/"+(snapshot==null?"":snapshot.Warning)+"/"+String.Join("|",all.Select(q=>q.Id+":"+q.ObservedAt+":"+q.Origin+":"+windowKey(q,q.Primary)+":"+windowKey(q,q.Secondary)))+"/"+(today==null?"none":today.Date+":"+today.Tokens+":"+today.Input+":"+today.CacheRead+":"+today.CacheWrite+":"+today.Output+":"+String.Join(",",today.Models.Select(m=>m.Model+":"+m.Effort+":"+m.Tokens+":"+m.EquivalentUsd+":"+m.UnpricedTokens)));
             // Quota and usage clocks often deliver identical snapshots; keep the existing visual tree
             // to avoid repeated layout, allocation and a visible twitch while the flyout is open.
             if(nextKey==contentKey)return;contentKey=nextKey;body.Children.Clear();
@@ -94,7 +101,7 @@ namespace CodexUserData
                     {
                         var line=new DockPanel{Margin=new Thickness(3,6,3,0)};double? remaining=Remaining(bucket,window,now);
                         var value=Theme.Text(remaining.HasValue?remaining.Value.ToString("0.#")+"%":"待更新",11,remaining.HasValue?Theme.Ink:Theme.Muted);DockPanel.SetDock(value,Dock.Right);line.Children.Add(value);
-                        var label=Theme.Text((bucket.Name??bucket.Id)+" · "+window.Label,10,Theme.Muted);label.TextTrimming=TextTrimming.CharacterEllipsis;line.Children.Add(label);line.ToolTip=Reset(window);extra.Children.Add(line);
+                        var label=Theme.Text((bucket.Name??bucket.Id)+" · "+window.Label,10,Theme.Muted);label.TextTrimming=TextTrimming.CharacterEllipsis;line.Children.Add(label);line.ToolTip=bucket.DescribeSource(now)+"\n"+Reset(window);extra.Children.Add(line);
                     }
                 }
             }
@@ -113,7 +120,7 @@ namespace CodexUserData
         }
         internal void ApplyActivity(ActivityReport report,bool completed)
         {
-            string text=completed?"✓  任务已完成":report==null?"等待任务状态":report.ActiveTasks>0?"●  正在运行 · "+report.ActiveTasks+" 项任务":report.UncertainTasks>0?"○  任务状态待确认":"○  当前空闲";
+            string text=QuotaStatus.ActivityLabel(report,completed,LocalCodexUsage.Unix(DateTime.Now));
             if(activityText.Text==text)return;activityText.Text=text;activityText.Foreground=completed?Theme.B(Theme.IsLight?"#237D69":"#82D6BE"):report!=null&&report.UncertainTasks>0?Theme.Warning:Theme.Muted;
         }
         internal static double? Remaining(QuotaBucket bucket,QuotaWindow window,long now)
@@ -125,17 +132,18 @@ namespace CodexUserData
             double? remaining=Remaining(bucket,window,now);bool week=window!=null&&window.Minutes>=1440;
             var gradient=new LinearGradientBrush((Color)ColorConverter.ConvertFromString(week?"#548CD1":"#438FEB"),(Color)ColorConverter.ConvertFromString(week?"#7DC9B9":"#75D1DE"),0);gradient.Freeze();
             var panel=new StackPanel();panel.Children.Add(Theme.Text(window==null?"账号额度":window.Label+"窗口",11,Theme.Muted));
+            var provenance=Theme.Text(bucket==null?"等待额度数据":bucket.SourceLabel,9,Theme.Muted);provenance.Margin=new Thickness(0,3,0,0);panel.Children.Add(provenance);
             var number=new StackPanel{Orientation=Orientation.Horizontal,Margin=new Thickness(0,6,0,0)};panel.Children.Add(number);
-            var amount=Theme.Text(remaining.HasValue?remaining.Value.ToString("0",CultureInfo.InvariantCulture)+"%":"—",32,Theme.Ink);amount.FontWeight=FontWeights.SemiBold;AutomationProperties.SetAutomationId(amount,"TrayQuotaRemaining");number.Children.Add(amount);
+            var amount=Theme.Text(remaining.HasValue?remaining.Value.ToString("0",CultureInfo.InvariantCulture)+"%":"—",32,remaining.HasValue?Theme.Ink:Theme.Muted);amount.FontWeight=FontWeights.SemiBold;AutomationProperties.SetAutomationId(amount,"TrayQuotaRemaining");number.Children.Add(amount);
             var suffix=Theme.Text(remaining.HasValue?"剩余":"待更新",10,Theme.Muted);suffix.Margin=new Thickness(7,10,0,0);number.Children.Add(suffix);
             var track=new Grid{Height=6,Margin=new Thickness(0,9,0,10)};panel.Children.Add(track);track.Children.Add(new Border{Background=Theme.Line,CornerRadius=new CornerRadius(3)});
-            var fill=new Grid();double fraction=(remaining??0)/100;fill.ColumnDefinitions.Add(new ColumnDefinition{Width=new GridLength(fraction,GridUnitType.Star)});fill.ColumnDefinitions.Add(new ColumnDefinition{Width=new GridLength(1-fraction,GridUnitType.Star)});fill.Children.Add(new Border{Background=remaining<15?(Brush)Theme.Warning:gradient,CornerRadius=new CornerRadius(3)});track.Children.Add(fill);
+            var fill=new Grid{Opacity=bucket!=null&&bucket.IsOnline?1:.72};double fraction=(remaining??0)/100;fill.ColumnDefinitions.Add(new ColumnDefinition{Width=new GridLength(fraction,GridUnitType.Star)});fill.ColumnDefinitions.Add(new ColumnDefinition{Width=new GridLength(1-fraction,GridUnitType.Star)});fill.Children.Add(new Border{Background=!remaining.HasValue?(Brush)Theme.Line:remaining<15?(Brush)Theme.Warning:gradient,CornerRadius=new CornerRadius(3)});track.Children.Add(fill);
             var reset=Theme.Text(window==null?"等待在线查询":Reset(window),9,Theme.Muted);reset.TextTrimming=TextTrimming.CharacterEllipsis;panel.Children.Add(reset);
             return new Border{Background=Theme.Surface,BorderBrush=Theme.Line,BorderThickness=new Thickness(.7),CornerRadius=new CornerRadius(13),Padding=new Thickness(12),Margin=new Thickness(3),Child=panel};
         }
         private static string Reset(QuotaWindow window)
         {
-            return window.ResetsAt<=0?"重置时间未提供":"重置 "+new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc).AddSeconds(window.ResetsAt).ToLocalTime().ToString("MM-dd HH:mm");
+            return window.ResetsAt<=0?"重置时间未提供":"重置 "+QuotaBucket.Timestamp(window.ResetsAt);
         }
         private static void Stat(Panel parent,string label,string value,string id)
         {
@@ -146,14 +154,28 @@ namespace CodexUserData
         [StructLayout(LayoutKind.Sequential)] internal struct NativeRect{public int Left,Top,Right,Bottom;}
         [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr h,out NativeRect rect);
         [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr h,IntPtr after,int x,int y,int width,int height,uint flags);
+        [DllImport("user32.dll")] private static extern uint GetDpiForWindow(IntPtr h);
         internal bool Contains(System.Drawing.Point point){NativeRect rect;return IsVisible&&GetWindowRect(new WindowInteropHelper(this).Handle,out rect)&&point.X>=rect.Left&&point.X<rect.Right&&point.Y>=rect.Top&&point.Y<rect.Bottom;}
         internal void PositionAt(System.Drawing.Point anchor)
         {
+            if(closed)return;
             lastAnchor=anchor;hasAnchor=true;
             // Place in physical pixels after layout. This avoids mixing logical coordinates between monitors with different DPI.
             UpdateLayout();var handle=new WindowInteropHelper(this).Handle;NativeRect rect;if(!GetWindowRect(handle,out rect))return;
-            var work=Forms.Screen.FromPoint(anchor).WorkingArea;int width=rect.Right-rect.Left,height=rect.Bottom-rect.Top;
-            int x=Math.Max(work.Left+8,Math.Min(work.Right-width-8,anchor.X-width+28)),y=Math.Max(work.Top+8,Math.Min(work.Bottom-height-8,anchor.Y-height-12));SetWindowPos(handle,IntPtr.Zero,x,y,0,0,0x15);
+            var work=Forms.Screen.FromPoint(anchor).WorkingArea;var area=new Rect(work.Left,work.Top,work.Width,work.Height);
+            int width=rect.Right-rect.Left,height=rect.Bottom-rect.Top;
+            var first=WindowInteraction.FitBounds(new Rect(anchor.X-width+28,anchor.Y-height-12,width,height),area,8);
+            SetWindowPos(handle,IntPtr.Zero,(int)first.X,(int)first.Y,0,0,0x15);
+            // Moving to the target monitor updates its DPI. Limit logical dimensions only
+            // after that move; using the previous monitor's scale can still crop the footer.
+            uint dpi=GetDpiForWindow(handle);double scale=dpi>0?dpi/96.0:VisualTreeHelper.GetDpi(this).DpiScaleX;
+            var maximum=WindowInteraction.FitBounds(new Rect(0,0,370*scale,720*scale),area,8);
+            double targetWidth=maximum.Width/scale,targetHeight=maximum.Height/scale;
+            if(Math.Abs(Width-targetWidth)>.01)Width=targetWidth;
+            if(Math.Abs(MaxHeight-targetHeight)>.01)MaxHeight=targetHeight;
+            UpdateLayout();if(!GetWindowRect(handle,out rect))return;width=rect.Right-rect.Left;height=rect.Bottom-rect.Top;
+            var final=WindowInteraction.FitBounds(new Rect(anchor.X-width+28,anchor.Y-height-12,width,height),area,8);
+            SetWindowPos(handle,IntPtr.Zero,(int)final.X,(int)final.Y,0,0,0x15);
         }
     }
 }

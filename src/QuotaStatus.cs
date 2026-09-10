@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -29,6 +30,8 @@ namespace CodexUserData
         private Drawing.Point anchor;
         private DateTime hoverStarted,lastInside;
         private bool busy,disposed,refreshPending;
+        private CancellationTokenSource queryCancellation;
+        private int accountRevision;
         private readonly bool preview;
         private string failure="",iconKey="";
         private string balanceIcon="?";
@@ -71,7 +74,7 @@ namespace CodexUserData
                 tray.MouseClick+=delegate(object sender,Forms.MouseEventArgs e){if(e.Button==Forms.MouseButtons.Left&&e.Clicks==1)Dispatcher.BeginInvoke(new Action(()=>ShowFlyout()));};
             }
             trayPulseTimer.Interval=TimeSpan.FromMilliseconds(90);trayPulseTimer.Tick+=delegate{if(!TrayPulseAllowed()){trayPulseTimer.Stop();pulseFrame=0;UpdateTrayIcon();return;}pulseFrame=(pulseFrame+1)%16;UpdateTrayIcon();};
-            completionTimer.Tick+=delegate{completionStep++;if(!CompletionVisible)completionTimer.Stop();UpdateTrayIcon();UpdateActivityText();};
+            completionTimer.Tick+=delegate{if(!CompletionAnimationAllowed()){completionTimer.Stop();completionStep=0;}else completionStep++;UpdateTrayIcon();UpdateActivityText();};
             hoverTimer.Tick+=HoverTick;clock.Tick+=delegate{Render();Refresh();};Render();
         }
         private static Border Bar(Grid row,int column,TextBlock label)
@@ -84,29 +87,50 @@ namespace CodexUserData
         internal void Start(){clock.Start();Refresh();}
         internal void Configure(bool newAccount)
         {
-            if(newAccount){latest.Clear();SetCompletion(false);}Render();Refresh();
+            if(newAccount){accountRevision++;latest.Clear();failure="";SetCompletion(false);}
+            if((newAccount||!preferences().LiveQuota)&&queryCancellation!=null)queryCancellation.Cancel();
+            Render();Refresh();
         }
-        internal void ApplyTheme(){iconKey="";pulseIconKey="";UpdateTrayPulse();UpdateTrayIcon();}
+        internal void ApplyTheme(){iconKey="";pulseIconKey="";UpdateTrayPulse();UpdateCompletionAnimation();UpdateTrayIcon();}
         internal void Accept(IEnumerable<QuotaBucket> buckets)
         {
-            foreach(var b in buckets??new QuotaBucket[0]){QuotaBucket old;if(!latest.TryGetValue(b.Id,out old)||b.ObservedAt>=old.ObservedAt)latest[b.Id]=b;}Render();
+            foreach(var b in buckets??new QuotaBucket[0]){if(b==null||String.IsNullOrWhiteSpace(b.Id))continue;QuotaBucket old;latest.TryGetValue(b.Id,out old);if(QuotaBucket.Prefer(old,b))latest[b.Id]=b;}Render();
         }
         internal void AcceptUsage(UsageSnapshot snapshot,string scope){usage=snapshot;usageScope=scope;if(flyout!=null&&flyout.IsVisible)UpdateFlyout();}
         private void UpdateFlyout(){flyout.Apply(latest.Values,usage,usageScope,note.Text);UpdateActivityText();if(flyout.IsVisible)flyout.PositionAt(anchor);}
         private bool CompletionVisible {get{return preferences().CompletionFlash&&completionPending;}}
         internal void ApplyActivity(ActivityReport report)
         {
-            activity=report;bool next=preferences().CompletionFlash&&report!=null&&report.ActiveTasks==0&&(completionPending||report.CompletedTasks>0);SetCompletion(next);
+            activity=report;bool next=preferences().CompletionFlash&&report!=null&&report.ActiveTasks==0&&(completionPending||report.CompletedTasks>0&&report.UncertainTasks==0&&!report.MonitoringUnavailable);SetCompletion(next);
             // The activity poll only updates a label and a cached icon, never rebuilds the flyout.
-            UpdateTrayPulse();UpdateTrayIcon();UpdateActivityText();
+            UpdateTrayPulse();UpdateCompletionAnimation();UpdateTrayIcon();UpdateActivityText();
         }
         internal void AcknowledgeCompletion(){SetCompletion(false);}
         private void SetCompletion(bool pending)
         {
             if(pending==completionPending)return;completionPending=pending;completionStep=0;
-            if(pending)completionTimer.Start();else completionTimer.Stop();UpdateTrayIcon();UpdateActivityText();if(CompletionChanged!=null)CompletionChanged();
+            UpdateCompletionAnimation();UpdateTrayIcon();UpdateActivityText();if(CompletionChanged!=null)CompletionChanged();
         }
+        private bool CompletionAnimationAllowed(){return CompletionVisible&&!disposed&&tray!=null&&Theme.MotionAllowed;}
+        private void UpdateCompletionAnimation()
+        {
+            // The same motion policy controls running and finished indicators. Reduced motion
+            // keeps a static acknowledgement mark without an idle animation timer.
+            if(CompletionAnimationAllowed()){if(!completionTimer.IsEnabled)completionTimer.Start();}
+            else{completionTimer.Stop();completionStep=0;}
+        }
+        internal static bool ShowCompletionMark(bool pending,int step,bool motionAllowed){return pending&&(!motionAllowed||step%2==0);}
         private void UpdateActivityText(){if(flyout!=null)flyout.ApplyActivity(activity,CompletionVisible);}
+        internal static string ActivityLabel(ActivityReport report,bool completed,long now)
+        {
+            bool fresh=report!=null&&report.ObservedAt>0&&report.ObservedAt<=now+5&&now-report.ObservedAt<=5;
+            if(fresh&&report.ActiveTasks>0&&report.Until>now)return "正在运行 · "+report.ActiveTasks+" 项任务";
+            // Acknowledgement is independent of telemetry freshness. Only acknowledgement or
+            // a newly observed task clears the persisted-in-session completion indicator.
+            if(completed)return "任务已完成 · 待确认";
+            if(!fresh||report.MonitoringUnavailable)return "任务状态未知";
+            return report.ActiveTasks>0||report.UncertainTasks>0?"任务状态待确认":"当前空闲";
+        }
         private bool TrayTaskRunning()
         {
             return activity!=null&&activity.ActiveTasks>0&&activity.Until>LocalCodexUsage.Unix(DateTime.Now);
@@ -132,7 +156,7 @@ namespace CodexUserData
         private void UpdateTrayIcon()
         {
             if(tray==null||disposed)return;
-            bool check=CompletionVisible&&(!SystemParameters.ClientAreaAnimation||completionStep%2==0);
+            bool check=ShowCompletionMark(CompletionVisible,completionStep,Theme.MotionAllowed);
             string value=check?"✓":balanceIcon;
             if(TrayPulseAllowed())SetPulseIcon(value);else SetIcon(value);
         }
@@ -153,21 +177,31 @@ namespace CodexUserData
         internal async void Refresh()
         {
             if(disposed||preview)return;if(busy){refreshPending=true;return;}var p=preferences();if(!p.LiveQuota){failure="在线查询已关闭";Render();return;}busy=true;
-            string home=p.CodexHome,cli=p.QuotaCli;
+            string home=p.CodexHome,cli=p.QuotaCli;int revision=accountRevision;
+            var cancellation=new CancellationTokenSource();queryCancellation=cancellation;
             try
             {
-                var result=await Task.Run(()=>QuotaReader.Query(cli,home));
-                if(!disposed&&preferences().LiveQuota&&home==preferences().CodexHome&&cli==preferences().QuotaCli){failure="";Accept(result);}
+                var result=await Task.Run(()=>QuotaReader.Query(cli,home,cancellation.Token));
+                if(CurrentQuery(revision,home,cli)&&!cancellation.IsCancellationRequested){failure="";Accept(result);}
             }
-            catch(Exception){if(!disposed){failure="在线额度暂不可用";Render();}}
-            finally{busy=false;if(refreshPending&&!disposed){refreshPending=false;var dispatch=Dispatcher.BeginInvoke(new Action(Refresh));}}
+            catch(OperationCanceledException){}
+            catch(Exception){if(CurrentQuery(revision,home,cli)&&!cancellation.IsCancellationRequested){failure="在线额度暂不可用";Render();}}
+            finally
+            {
+                if(Object.ReferenceEquals(queryCancellation,cancellation))queryCancellation=null;cancellation.Dispose();busy=false;
+                // Intentionally queue one coalesced refresh after this request unwinds.
+                if(refreshPending&&!disposed){refreshPending=false;var queued=Dispatcher.BeginInvoke(new Action(Refresh));}
+            }
         }
+        private bool CurrentQuery(int revision,string home,string cli){return !disposed&&revision==accountRevision&&preferences().LiveQuota&&home==preferences().CodexHome&&cli==preferences().QuotaCli;}
         private static void Window(QuotaBucket bucket,QuotaWindow window,TextBlock label,Border bar,long now)
         {
             double? remaining=window==null?null:window.RemainingPercent(bucket,now);
             label.Text=window==null?"未返回额度":window.Label+" · "+window.Remaining(bucket,now);
             double fraction=remaining.HasValue?remaining.Value/100:0;
-            bar.Tag=fraction;bar.Width=Math.Max(0,((FrameworkElement)bar.Parent).ActualWidth*fraction);bar.Background=fraction<.15?Theme.Warning:Theme.Accent;
+            label.Foreground=remaining.HasValue?Theme.Ink:Theme.Muted;
+            bar.Tag=fraction;bar.Width=Math.Max(0,((FrameworkElement)bar.Parent).ActualWidth*fraction);bar.Background=!remaining.HasValue?Theme.Line:fraction<.15?Theme.Warning:Theme.Accent;
+            bar.Opacity=bucket!=null&&bucket.IsOnline?1:.72;
         }
         private void Render()
         {
@@ -182,9 +216,8 @@ namespace CodexUserData
             if(bucket==null){note.Text=String.IsNullOrEmpty(failure)?"等待账号额度 · 每分钟更新":failure;title.Text="CODEX · 额度未知";}
             else
             {
-                title.Text="CODEX · 剩余额度";
-                string stamp=new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc).AddSeconds(bucket.ObservedAt).ToLocalTime().ToString("MM-dd HH:mm");
-                note.Text=bucket.Origin+" "+stamp+(now-bucket.ObservedAt>300?" · 较旧快照":"")+(String.IsNullOrEmpty(failure)?"":" · "+failure);
+                title.Text="CODEX · "+bucket.SourceLabel;
+                note.Text=bucket.DescribeSource(now)+(String.IsNullOrEmpty(failure)?"":" · "+failure);
             }
             var details=new List<string>{note.Text};
             foreach(var b in latest.Values.OrderBy(b=>b.Id))
@@ -205,7 +238,7 @@ namespace CodexUserData
         }
         private static string Describe(QuotaBucket bucket,QuotaWindow w,long now)
         {
-            if(w==null)return "未返回";string reset=w.ResetsAt>0?new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc).AddSeconds(w.ResetsAt).ToLocalTime().ToString("MM-dd HH:mm"):"未提供";
+            if(w==null)return "未返回";string reset=w.ResetsAt>0?QuotaBucket.Timestamp(w.ResetsAt):"未提供";
             return w.Label+"剩余 "+w.Remaining(bucket,now)+"，重置 "+reset;
         }
         internal static Drawing.Bitmap CreateBadge(string value)
@@ -296,7 +329,7 @@ namespace CodexUserData
         }
         public void Dispose()
         {
-            disposed=true;clock.Stop();hoverTimer.Stop();completionTimer.Stop();trayPulseTimer.Stop();
+            disposed=true;if(queryCancellation!=null)queryCancellation.Cancel();clock.Stop();hoverTimer.Stop();completionTimer.Stop();trayPulseTimer.Stop();
             if(flyout!=null){flyout.Close();flyout=null;}if(tray!=null){tray.Visible=false;tray.ContextMenuStrip.Dispose();tray.Dispose();tray=null;}
             DisposePulseIcons();if(staticTrayIcon!=null){staticTrayIcon.Dispose();staticTrayIcon=null;}
         }

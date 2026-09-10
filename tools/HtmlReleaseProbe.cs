@@ -21,8 +21,15 @@ internal static class HtmlReleaseProbe
     static object Call(string type,object instance,string method,params object[] args)
     {
         var m=Regex.Match(map,@"CodexUserData\."+Regex.Escape(type)+"::"+Regex.Escape(method)+@"\["+args.Length+@"\][^\r\n]*? -> ([^\r\n]+)");string renamed=m.Success?m.Groups[1].Value.Trim():method;
-        var matches=T(type).GetMethods(BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance|BindingFlags.Static).Where(x=>!x.ContainsGenericParameters&&x.IsStatic==(instance==null)&&x.Name==renamed&&x.GetParameters().Length==args.Length&&x.GetParameters().Select((p,i)=>args[i]==null?!p.ParameterType.IsValueType:p.ParameterType.IsInstanceOfType(args[i])).All(b=>b)).ToArray();
-        return matches.Single().Invoke(instance,args);
+        var matches=T(type).GetMethods(BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance|BindingFlags.Static).Where(x=>!x.ContainsGenericParameters&&x.IsStatic==(instance==null)&&x.Name==renamed&&x.GetParameters().Length==args.Length&&x.GetParameters().Select((p,i)=>args[i]==null?!p.ParameterType.IsValueType:p.ParameterType.IsInstanceOfType(args[i])).All(b=>b)).Select(x=>new{Method=x,Exact=x.GetParameters().Select((p,i)=>args[i]!=null&&p.ParameterType==args[i].GetType()?1:0).Sum()}).ToArray();
+        if(matches.Length==0)throw new MissingMethodException(type,method);
+        return matches.Where(x=>x.Exact==matches.Max(y=>y.Exact)).Single().Method.Invoke(instance,args);
+    }
+    static object CallAs(string type,object instance,string method,Type[] signature,params object[] args)
+    {
+        var m=Regex.Match(map,@"CodexUserData\."+Regex.Escape(type)+"::"+Regex.Escape(method)+@"\["+args.Length+@"\][^\r\n]*? -> ([^\r\n]+)");string renamed=m.Success?m.Groups[1].Value.Trim():method;
+        var selected=T(type).GetMethods(BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance|BindingFlags.Static).Single(x=>x.IsStatic==(instance==null)&&x.Name==renamed&&x.GetParameters().Select(p=>p.ParameterType).SequenceEqual(signature));
+        return selected.Invoke(instance,args);
     }
     static object Field(string type,object instance,string name)
     {
@@ -41,7 +48,8 @@ internal static class HtmlReleaseProbe
         File.WriteAllText(Path.Combine(folder,"index.html"),"<!doctype html><html><meta charset='utf-8'><style>html,body{margin:0;color:#def;background:transparent;font:24px sans-serif}main{background:#203247;border-radius:20px;padding:24px}</style><main id='value'>waiting</main><script>chrome.webview.addEventListener('message',e=>{if(e.data.type==='snapshot')value.textContent=e.data.data.today?.tokenText??'unknown'});document.addEventListener('contextmenu',e=>e.preventDefault());</script></html>");
         var prefs=New("Preferences");Set(prefs,"BallStyle","html");Set(prefs,"CustomShape",Path.Combine(relative,"shape.json"));Set(prefs,"BallDock","");Set(prefs,"BallLeft",420d);Set(prefs,"BallTop",360d);
         var get=System.Linq.Expressions.Expression.Lambda(typeof(Func<>).MakeGenericType(T("Preferences")),System.Linq.Expressions.Expression.Constant(prefs)).Compile();
-        bool restored=false;ball=(Window)New("FloatingBall",get,new Action(()=>{}),new Action(()=>restored=true),new Action(()=>{}));
+        bool restored=false;var main=new Window{Width=420,Height=360,ShowActivated=false,ShowInTaskbar=false,Content=new Border{Background=Brushes.SlateBlue}};Call("WindowInteraction",null,"EnableMotion",main);
+        ball=(Window)New("FloatingBall",get,new Action(()=>{}),new Action(()=>CallAs("WindowInteraction",null,"ShowFrom",new[]{typeof(Window),typeof(Window),typeof(Action),typeof(Action)},main,ball,new Action(()=>{}),new Action(()=>restored=true))),new Action(()=>{}));
         var daily=New("DailyUsage");Set(daily,"Date",DateTime.Today.ToString("yyyy-MM-dd"));Set(daily,"Tokens",2468000L);var days=Array.CreateInstance(T("DailyUsage"),1);days.SetValue(daily,0);var snapshot=New("UsageSnapshot");Set(snapshot,"Daily",days);
         Call("FloatingBall",ball,"Apply",snapshot,null,"fixture","fixture");ball.ShowActivated=false;ball.Show();
         var until=DateTime.UtcNow.AddSeconds(18);WebView2CompositionControl web=null;
@@ -57,13 +65,31 @@ internal static class HtmlReleaseProbe
         var menu=((Border)Field("FloatingBall",ball,"shell")).ContextMenu;
         var right=new MouseButtonEventArgs(Mouse.PrimaryDevice,0,MouseButton.Right){RoutedEvent=Mouse.PreviewMouseDownEvent,Source=web};web.RaiseEvent(right);
         Check(right.Handled&&menu.IsOpen,"protected host retains native right-click routing");
-        menu.Items.OfType<MenuItem>().Single(m=>Convert.ToString(m.Header)=="返回完整窗口").RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));Check(restored,"protected native menu returns to the main UI");menu.IsOpen=false;
-        await web.ExecuteScriptAsync("chrome.webview.postMessage({type:'resize',width:312,height:96})");await Task.Delay(120);Check(ball.Width==312&&ball.Height==96,"protected page-to-host commands survive string hiding");
+        menu.IsOpen=false;
+        int sizeChanges=0;ball.SizeChanged+=delegate{sizeChanges++;};double initialWidth=ball.Width;
+        for(int i=0;i<20;i++)Call("FloatingBall",ball,"ResizeCustom",280d+i,90d+i);
+        Check(ball.Width==initialWidth,"HTML resize requests wait for the render queue");await Task.Delay(120);
+        Check(ball.Width==299&&ball.Height==109&&sizeChanges<=2,"HTML resize bursts commit only their newest dimensions");
+        var originalCustom=Field("FloatingBall",ball,"custom");var work=SystemParameters.WorkArea;
+        ball.Left=work.Left+4;ball.Top=work.Top+work.Height/2;Call("FloatingBall",ball,"SnapToEdge");await Task.Delay(55);
+        Check(ball.IsVisible&&ball.Opacity>0&&ball.Opacity<1,"HTML docking fades the complete browser window");
+        var dockDeadline=DateTime.UtcNow.AddSeconds(3);while(!(bool)Call("FloatingBall",ball,"get_IsPillar")&&DateTime.UtcNow<dockDeadline)await Task.Delay(30);
+        Check((bool)Call("FloatingBall",ball,"get_IsPillar")&&Object.ReferenceEquals(originalCustom,Field("FloatingBall",ball,"custom"))&&!((FrameworkElement)originalCustom).IsVisible,"docked HTML keeps one suspended browser controller");
+        ball.Left=work.Left+work.Width/2;ball.Top=work.Top+work.Height/2;var undockClock=System.Diagnostics.Stopwatch.StartNew();Call("FloatingBall",ball,"SnapToEdge");
+        bool sawUndockFade=false;var undockDeadline=DateTime.UtcNow.AddSeconds(3);while(((bool)Call("FloatingBall",ball,"get_IsPillar")||!Object.ReferenceEquals(web,Find<WebView2CompositionControl>(ball)))&&DateTime.UtcNow<undockDeadline){if(ball.Opacity>0&&ball.Opacity<1)sawUndockFade=true;await Task.Delay(30);}while(ball.Opacity<.999&&DateTime.UtcNow<undockDeadline){if(ball.Opacity>0&&ball.Opacity<1)sawUndockFade=true;await Task.Delay(30);}
+        Check(sawUndockFade&&!(bool)Call("FloatingBall",ball,"get_IsPillar")&&Object.ReferenceEquals(originalCustom,Field("FloatingBall",ball,"custom"))&&Object.ReferenceEquals(web,Find<WebView2CompositionControl>(ball))&&undockClock.ElapsedMilliseconds<1600,"edge strip fades into the existing HTML renderer without reinitialization");
         Call("FloatingBall",ball,"SetOrb");
         // Shape changes now commit at the fade midpoint; wait for that lifecycle boundary.
         var switchDeadline=DateTime.UtcNow.AddSeconds(2);while(Find<WebView2CompositionControl>(ball)!=null&&DateTime.UtcNow<switchDeadline)await Task.Delay(30);
         Check(Find<WebView2CompositionControl>(ball)==null,"protected form switch removes its browser renderer");
-        ((IDisposable)ball).Dispose();ball=null;File.WriteAllText(Path.Combine(output,"html-verification.json"),"{\"passed\":true,\"checks\":"+checks+"}");
+        Call("FloatingBall",ball,"SetCustom");var htmlDeadline=DateTime.UtcNow.AddSeconds(8);while((web=Find<WebView2CompositionControl>(ball))==null&&DateTime.UtcNow<htmlDeadline)await Task.Delay(40);
+        while(web!=null&&web.CoreWebView2==null&&DateTime.UtcNow<htmlDeadline)await Task.Delay(40);
+        Check(web!=null&&web.CoreWebView2!=null,"shared browser environment accelerates a later HTML form");
+        menu.Items.OfType<MenuItem>().Single(m=>Convert.ToString(m.Header)=="返回完整窗口").RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+        await Task.Delay(55);Check(ball.IsVisible&&ball.Opacity>0&&ball.Opacity<1,"HTML-to-main transition fades the complete browser window");
+        var restoreDeadline=DateTime.UtcNow.AddSeconds(3);while((ball.IsVisible||!main.IsVisible||((FrameworkElement)main.Content).Opacity<.999)&&DateTime.UtcNow<restoreDeadline)await Task.Delay(30);
+        Check(restored&&!ball.IsVisible&&main.IsVisible&&((FrameworkElement)main.Content).Opacity>=.999,"protected native menu returns to the main UI without a browser-frame flash");
+        main.Close();((IDisposable)ball).Dispose();ball=null;File.WriteAllText(Path.Combine(output,"html-verification.json"),"{\"passed\":true,\"checks\":"+checks+"}");
     }
     [STAThread]static int Main(string[] args)
     {

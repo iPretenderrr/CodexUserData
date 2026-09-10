@@ -28,6 +28,12 @@ internal static class ReleaseProbe
   // Obfuscation reuses names: prefer Scan(DateTime) to a timer callback accepting object.
   return found.Where(x=>x.Exact==found.Max(y=>y.Exact)).Single().Method.Invoke(instance,args);
  }
+ static object CallAs(string type,object instance,string method,Type[] signature,params object[] args)
+ {
+  var m=Regex.Match(map,@"CodexUserData\."+Regex.Escape(type)+"::"+Regex.Escape(method)+@"\["+args.Length+@"\][^\r\n]*? -> ([^\r\n]+)");string renamed=m.Success?m.Groups[1].Value.Trim():method;
+  var selected=TypeFor(type).GetMethods(BindingFlags.Public|BindingFlags.NonPublic|BindingFlags.Instance|BindingFlags.Static).Single(x=>x.IsStatic==(instance==null)&&x.Name==renamed&&x.GetParameters().Select(p=>p.ParameterType).SequenceEqual(signature));
+  return selected.Invoke(instance,args);
+ }
  static object Get(object o,string key){return o.GetType().GetProperty(key).GetValue(o,null);}
  static T InternalField<T>(string type,object instance,string key)
  {
@@ -110,6 +116,14 @@ internal static class ReleaseProbe
  {
   var clock=System.Diagnostics.Stopwatch.StartNew();while(!ready()&&clock.ElapsedMilliseconds<2500)Pump(40);return ready();
  }
+ static void ResetBallPlacement(object prefs,string dock)
+ {
+  // Every case declares its own initial form. A prior case's SourceInitialized/drag
+  // saves per-monitor placement even when its persistence callback is a no-op.
+  // Clear only fixture state; production restoration remains exercised separately.
+  ((IDictionary)Get(prefs,"BallPlacements")).Clear();Set(prefs,"BallMonitor","");
+  Set(prefs,"BallLeft",Double.NaN);Set(prefs,"BallTop",Double.NaN);Set(prefs,"BallDock",dock);
+ }
  static void DockRegression(object prefs,Delegate getPrefs,string dir)
  {
   var area=SystemParameters.WorkArea;Set(prefs,"BallStyle","capsule");Set(prefs,"BallDock","");Set(prefs,"BallExpanded",true);Set(prefs,"OrbAnimation","smooth");
@@ -120,17 +134,18 @@ internal static class ReleaseProbe
     var work=new Rect(-1920,0,1920,1080);var dock=(Rect)Call("FloatingBall",null,"DockBounds",side,500d,work,scale);
     Check(work.Contains(dock)&&(side==0?dock.Left==work.Left:side==1?dock.Right==work.Right:side==2?dock.Top==work.Top:dock.Bottom==work.Bottom),"dock endpoint is flush on edge "+side+" at scale "+scale);
    }
-   Set(prefs,"BallDock","");var ball=(Window)New("FloatingBall",getPrefs,new Action(()=>{}),new Action(()=>{}),new Action(()=>{}));ball.Show();
+   ResetBallPlacement(prefs,"");Set(prefs,"BallExpanded",true);var ball=(Window)New("FloatingBall",getPrefs,new Action(()=>{}),new Action(()=>{}),new Action(()=>{}));ball.Show();
    ball.Left=side==0?area.Left+8:side==1?area.Right-ball.Width-8:area.Left+area.Width/2;
    ball.Top=side==2?area.Top+8:side==3?area.Bottom-ball.Height-8:area.Top+area.Height/2;
-   Pump(240);Call("FloatingBall",ball,"SnapToEdge");
+   Pump(240);Console.WriteLine("DOCK FIXTURE edge="+side+", pillar="+Call("FloatingBall",ball,"get_IsPillar")+", dock="+Get(prefs,"BallDock")+", remembered="+((IDictionary)Get(prefs,"BallPlacements")).Count+", monitorSet="+!String.IsNullOrEmpty((string)Get(prefs,"BallMonitor"))+", size="+ball.Width+"x"+ball.Height);
+   Check(!(bool)Call("FloatingBall",ball,"get_IsPillar")&&ball.Width==340,"edge "+side+" fixture begins as an undocked large capsule");Call("FloatingBall",ball,"SnapToEdge");
    Check(((FrameworkElement)ball.Content).Visibility==Visibility.Hidden,"edge "+side+" morph hides the live source while retaining its snapshot");
    Pump(650);
    Check((bool)Call("FloatingBall",ball,"get_IsPillar")&&((FrameworkElement)ball.Content).Visibility==Visibility.Visible,"edge "+side+" morph settles to a visible dock strip");
    Check(!Application.Current.Windows.Cast<Window>().Any(w=>w.Title=="CodexUserData 吸附过渡"),"edge "+side+" morph releases its overlay");
    ((IDisposable)ball).Dispose();
   }
-  Set(prefs,"BallDock","");var interrupted=(Window)New("FloatingBall",getPrefs,new Action(()=>{}),new Action(()=>{}),new Action(()=>{}));interrupted.Show();interrupted.Left=area.Left+8;interrupted.Top=area.Top+area.Height/2;Pump(240);
+  ResetBallPlacement(prefs,"");Set(prefs,"BallExpanded",true);var interrupted=(Window)New("FloatingBall",getPrefs,new Action(()=>{}),new Action(()=>{}),new Action(()=>{}));interrupted.Show();interrupted.Left=area.Left+8;interrupted.Top=area.Top+area.Height/2;Pump(240);
   Call("FloatingBall",interrupted,"SnapToEdge");Call("FloatingBall",interrupted,"SetExpanded",false);Pump(600);
   Check(!(bool)Call("FloatingBall",interrupted,"get_IsPillar")&&((FrameworkElement)interrupted.Content).Visibility==Visibility.Visible,"changing form cancels docking without a late callback or hidden content");
   Call("FloatingBall",interrupted,"SnapToEdge");interrupted.Hide();Pump(600);
@@ -166,7 +181,7 @@ internal static class ReleaseProbe
   Check(WaitForUi(()=>changes==1&&a.Width==174&&((FrameworkElement)a.Content).Opacity==1),"shrink-to-small finishes once and restores visible content");
   Call("WindowInteraction",null,"ChangeShape",a,new Action(()=>{changes++;a.Width=340;}));Pump(450);Check(a.Width==340,"small-to-large expansion reaches the requested size");
   Call("WindowInteraction",null,"ChangeShape",a,new Action(()=>{a.Width=200;}));Call("WindowInteraction",null,"ChangeShape",a,new Action(()=>{a.Width=280;}));Pump(450);Check(a.Width==280,"rapid shape changes honor only the last request");
-  Call("WindowInteraction",null,"ChangeShape",a,new Action(()=>{a.Width=400;}));Call("WindowInteraction",null,"Hide",a,null);Pump(450);Check(!a.IsVisible&&a.Width==280,"hiding cancels a pending shape mutation");
+  Call("WindowInteraction",null,"ChangeShape",a,new Action(()=>{a.Width=400;}));CallAs("WindowInteraction",null,"Hide",new[]{typeof(Window),typeof(Action)},a,null);Pump(450);Check(!a.IsVisible&&a.Width==280,"hiding cancels a pending shape mutation");
   a.Show();Pump(240);int prepared=0;Call("WindowInteraction",null,"ShowFrom",b,a,new Action(()=>{prepared++;}),new Action(()=>{}));
   bool transferred=WaitForUi(()=>!a.IsVisible&&b.IsVisible&&prepared==1&&((FrameworkElement)b.Content).Opacity==1);
   Check(transferred,"floating-to-main transfer leaves only a visible destination (source="+a.IsVisible+", destination="+b.IsVisible+", prepared="+prepared+", opacity="+((FrameworkElement)b.Content).Opacity+")");
@@ -179,10 +194,10 @@ internal static class ReleaseProbe
   Check(WaitForUi(()=>b.WindowState==WindowState.Normal&&((FrameworkElement)b.Content).Opacity==1),"restore transition returns to normal bounds");
   Call("WindowInteraction",null,"ToggleMaximize",b);Call("WindowInteraction",null,"CompleteReveal",b);Pump(400);
   Check(b.WindowState==WindowState.Normal&&((FrameworkElement)b.Content).Opacity==1,"starting native interaction cancels a pending maximize");
-  Call("WindowInteraction",null,"ShowFrom",a,b,new Action(()=>{}),new Action(()=>{}));Call("WindowInteraction",null,"Hide",a,null);Pump(500);
+  Call("WindowInteraction",null,"ShowFrom",a,b,new Action(()=>{}),new Action(()=>{}));CallAs("WindowInteraction",null,"Hide",new[]{typeof(Window),typeof(Action)},a,null);Pump(500);
   Check(!a.IsVisible,"hiding an incoming destination prevents its delayed reappearance");
   Set(prefs,"OrbAnimation","off");Call("Theme",null,"Apply",prefs);b.Show();Call("WindowInteraction",null,"ChangeShape",b,new Action(()=>{b.Width=360;}));Check(b.Width==360&&((FrameworkElement)b.Content).Opacity==1,"disabled animations apply shape changes immediately");a.Close();b.Close();
-  Set(prefs,"OrbAnimation","smooth");Set(prefs,"BallDock","left");Set(prefs,"BallStyle","capsule");Call("Theme",null,"Apply",prefs);
+  Set(prefs,"OrbAnimation","smooth");ResetBallPlacement(prefs,"left");Set(prefs,"BallStyle","capsule");Call("Theme",null,"Apply",prefs);
   var ball=(Window)New("FloatingBall",getPrefs,new Action(()=>{}),new Action(()=>{}),new Action(()=>{}));ball.Show();Pump(240);Call("FloatingBall",ball,"SetExpanded",true);Pump(500);
   Check(!(bool)Call("FloatingBall",ball,"get_IsPillar")&&ball.Width==340&&((FrameworkElement)ball.Content).Opacity==1,"docked strip expands to the large capsule");
   Call("FloatingBall",ball,"SetExpanded",false);Pump(450);Check(ball.Width==174,"large capsule animates back to small");Call("FloatingBall",ball,"SetOrb");Pump(450);Check((bool)Call("FloatingBall",ball,"get_IsOrb"),"capsule expands into the circular form");((IDisposable)ball).Dispose();
@@ -194,7 +209,7 @@ internal static class ReleaseProbe
  }
  static void StabilityRegression(object original)
  {
-  var prefs=Call("Preferences",original,"Clone");Set(prefs,"BallMode",false);Set(prefs,"BallDock","");Set(prefs,"BallStyle","capsule");Set(prefs,"OrbAnimation","smooth");Set(prefs,"AnimationSpeed",.5d);Set(prefs,"Opacity",.73d);Set(prefs,"Height",480d);
+  var prefs=Call("Preferences",original,"Clone");Set(prefs,"BallMode",false);ResetBallPlacement(prefs,"");Set(prefs,"BallStyle","capsule");Set(prefs,"OrbAnimation","smooth");Set(prefs,"AnimationSpeed",.5d);Set(prefs,"Opacity",.73d);Set(prefs,"Height",480d);
   var main=(Window)New("WidgetWindow",prefs,true);main.Show();Pump(500);main.Hide();
   var getter=System.Linq.Expressions.Expression.Lambda(typeof(Func<>).MakeGenericType(TypeFor("Preferences")),System.Linq.Expressions.Expression.Constant(prefs)).Compile();
   var ball=(Window)New("FloatingBall",getter,new Action(()=>{}),new Action(()=>Call("WidgetWindow",main,"RestoreWindow")),new Action(()=>{}));
@@ -293,6 +308,14 @@ internal static class ReleaseProbe
    speedControl.BringIntoView();settingsBody.UpdateLayout();
    var motionSettings=new RenderTargetBitmap(760,720,96,96,PixelFormats.Pbgra32);motionSettings.Render(settingsBody);var motionPng=new PngBitmapEncoder();motionPng.Frames.Add(BitmapFrame.Create(motionSettings));using(var file=File.Create(Path.Combine(dir,"animation-settings.png")))motionPng.Save(file);
    var aboutVersion=FindAutomation((DependencyObject)settingsWindow.Content,"AboutVersion") as TextBlock;Check(aboutVersion!=null&&aboutVersion.Text=="v"+assembly.GetName().Version.ToString(3),"about page reports the protected assembly version");
+   string diagnostic=(string)Call("Diagnostics",null,"Create",prefs,snapshot,null,quotas[0]);
+   Check(diagnostic.Contains("程序版本:")&&!diagnostic.Contains(home)&&!diagnostic.Contains(dir),"protected diagnostics use the reviewed allowlist without local paths");
+   var diagnosticWindow=(Window)New("DiagnosticPreviewWindow",diagnostic);string diagnosticFile=Path.Combine(dir,"diagnostic-preview.txt");Call("DiagnosticPreviewWindow",diagnosticWindow,"SavePreview",diagnosticFile);
+   Check(File.ReadAllText(diagnosticFile)==diagnostic,"protected diagnostics save the exact reviewed preview");diagnosticWindow.Close();
+   string publicTag="v"+assembly.GetName().Version.ToString(3);var release=Call("ReleaseUpdate",null,"Parse",json.Serialize(new{tag_name=publicTag,html_url="https://github.com/iPretenderrr/CodexUserData/releases/tag/"+publicTag,body="<b>Fixture notes</b>",draft=false,prerelease=false}));
+   Check(((string)Call("ReleaseInfo",release,"Describe",assembly.GetName().Version)).Contains("已是最新")&&InternalField<string>("ReleaseInfo",release,"Notes")=="<b>Fixture notes</b>","protected update metadata parses numeric versions and preserves plain text notes");
+   bool rejectedUpdate=false;try{Call("ReleaseUpdate",null,"Parse",json.Serialize(new{tag_name=publicTag,html_url="https://example.com/"+publicTag}));}catch(TargetInvocationException ex){rejectedUpdate=ex.InnerException is InvalidDataException;}
+   Check(rejectedUpdate,"protected update metadata rejects links outside the project");
    Set(prefs,"ThemeMode","custom");Set(prefs,"GradientColors",new[]{"#F7BBE3","#E6D7FA","#AAF1ED"});Set(prefs,"GradientStops",new[]{0d,48d,100d});Set(prefs,"GradientKind","radial");Set(prefs,"GradientSpan",65d);
    var themeClone=Call("Preferences",prefs,"Clone");Check((string)Get(themeClone,"ThemeMode")=="custom"&&((string[])Get(themeClone,"GradientColors")).Length==3&&(double)Get(themeClone,"GradientSpan")==65,"theme settings survive protected JSON roundtrip");
    Call("Theme",null,"Apply",prefs);body.UpdateLayout();bitmap.Render(body);Set(prefs,"ThemeMode","light");Call("Theme",null,"Apply",prefs);body.UpdateLayout();bitmap.Render(body);
@@ -326,7 +349,7 @@ internal static class ReleaseProbe
    var capsuleActivity=New("ActivityReport");SetInternal("ActivityReport",capsuleActivity,"ActiveTasks",1);SetInternal("ActivityReport",capsuleActivity,"Until",DateTimeOffset.Now.ToUnixTimeSeconds()+60);
    foreach(bool expanded in new[]{false,true})
    {
-    Set(prefs,"BallExpanded",expanded);var ball=(Window)New("FloatingBall",getPrefs,new Action(()=>{}),new Action(()=>{}),new Action(()=>{}));Check(ClearCorners(ball,(int)ball.Width,(int)ball.Height),"floating ball corners are fully transparent: "+(expanded?"large":"small"));
+    ResetBallPlacement(prefs,"");Set(prefs,"BallExpanded",expanded);var ball=(Window)New("FloatingBall",getPrefs,new Action(()=>{}),new Action(()=>{}),new Action(()=>{}));Check(ClearCorners(ball,(int)ball.Width,(int)ball.Height),"floating ball corners are fully transparent: "+(expanded?"large":"small"));
     string form=expanded?"large":"small";var chrome=FindAutomation((DependencyObject)ball.Content,"CapsuleActivityChrome");Check(chrome!=null,"full-window activity chrome is shared by "+form+" form");
     ball.Show();Call("FloatingBall",ball,"ApplyActivity",capsuleActivity);Check(chrome.HasAnimatedProperties,"running task animates the full capsule and continuous perimeter: "+form);
     foreach(string theme in new[]{"dark","light"})
@@ -342,7 +365,7 @@ internal static class ReleaseProbe
     Call("FloatingBall",ball,"ApplyActivity",New("ActivityReport"));Check(!chrome.HasAnimatedProperties,"idle capsule stops animation: "+form);((IDisposable)ball).Dispose();
    }
    DockRegression(prefs,getPrefs,dir);TransitionRegression(prefs,getPrefs);StabilityRegression(prefs);
-   Set(prefs,"BallDock","");Set(prefs,"BallStyle","orb");Set(prefs,"OrbQuotaWindow","short");Set(prefs,"OrbSize",100d);Set(prefs,"OrbAnimation","eco");var orbPrefs=Call("Preferences",prefs,"Clone");
+   ResetBallPlacement(prefs,"");Set(prefs,"BallStyle","orb");Set(prefs,"OrbQuotaWindow","short");Set(prefs,"OrbSize",100d);Set(prefs,"OrbAnimation","eco");var orbPrefs=Call("Preferences",prefs,"Clone");
    Check((string)Get(orbPrefs,"BallStyle")=="orb"&&(string)Get(orbPrefs,"OrbAnimation")=="eco"&&(double)Get(orbPrefs,"OrbSize")==100,"orb settings survive protected JSON roundtrip");
    Set(prefs,"OrbShortColors",new[]{"#20BBAA","#73DBAD","#AADDEE"});Set(prefs,"OrbLongColors",new[]{"#FA9566","#EFC578"});Set(prefs,"OrbShortAngle",125d);Set(prefs,"OrbLongAngle",70d);var colorClone=Call("Preferences",prefs,"Clone");
    Check(((string[])Get(colorClone,"OrbShortColors")).Length==3&&((string[])Get(colorClone,"OrbLongColors"))[0]=="#FA9566"&&(double)Get(colorClone,"OrbShortAngle")==125,"independent ring gradients survive protected JSON roundtrip");
@@ -367,9 +390,10 @@ internal static class ReleaseProbe
    File.AppendAllText(fixtureLog,json.Serialize(new{type="event_msg",timestamp=latestTask,payload=new{type="task_started"}})+"\n");var active=Call("LocalCodexUsage",reader,"Read","today",DateTime.Now,null,null);
    Check((int)Get(active,"ActiveTasks")==1&&(long)Get(active,"TotalTokens")==110,"protected activity parser preserves token accounting");
    var liveActivity=New("CodexActivity",home,false);var liveReport=Call("CodexActivity",liveActivity,"Scan",DateTime.Now);var liveOrb=InternalField<Border>("FloatingBall",orbWindow,"shell").Child;Call("QuotaOrb",liveOrb,"ApplyActivity",liveReport);
-   Check(System.Windows.Automation.AutomationProperties.GetItemStatus(liveOrb)=="任务活动中","protected independent event monitor drives activity without a usage refresh");
+   string runningLabel=System.Windows.Automation.AutomationProperties.GetItemStatus(liveOrb);
+   Check(InternalField<int>("ActivityReport",liveReport,"ActiveTasks")==1&&runningLabel=="正在运行 · 1 项任务","protected independent event monitor drives activity without a usage refresh (status="+runningLabel+")");
    File.AppendAllText(fixtureLog,json.Serialize(new{type="event_msg",timestamp=latestTask,payload=new{type="task_complete"}})+"\n");active=Call("LocalCodexUsage",reader,"Read","today",DateTime.Now,null,null);Check((int)Get(active,"ActiveTasks")==0,"protected activity parser handles completion");
-   liveReport=Call("CodexActivity",liveActivity,"Scan",DateTime.Now.AddSeconds(6));Call("QuotaOrb",liveOrb,"ApplyActivity",liveReport);Check(System.Windows.Automation.AutomationProperties.GetItemStatus(liveOrb)=="空闲","protected independent monitor clears a completed task");Call("CodexActivity",liveActivity,"Dispose");
+   Call("CodexActivity",liveActivity,"Queue",fixtureLog);liveReport=Call("CodexActivity",liveActivity,"Scan",DateTime.Now);Call("QuotaOrb",liveOrb,"ApplyActivity",liveReport);Check(InternalField<int>("ActivityReport",liveReport,"ActiveTasks")==0&&System.Windows.Automation.AutomationProperties.GetItemStatus(liveOrb)=="当前空闲","protected independent monitor clears a completed task with a current report");Call("CodexActivity",liveActivity,"Dispose");
    ActivityRegression(dir,json);Check((bool)Get(clone,"CompletionFlash"),"protected completion setting defaults on and survives cloning");
    Set(prefs,"BallOpacity",.45);Set(prefs,"OrbFollowTheme",true);Set(prefs,"StartWithCodex",true);var settings160=Call("Preferences",prefs,"Clone");Check((double)Get(settings160,"BallOpacity")==.45&&(bool)Get(settings160,"OrbFollowTheme")&&(bool)Get(settings160,"StartWithCodex"),"protected whole-form opacity, theme-follow and sync-start settings survive cloning");
    Check((bool)Call("CodexLaunchWatcher",null,"ShouldLaunch",false,true,false)&&!(bool)Call("CodexLaunchWatcher",null,"ShouldLaunch",true,true,false),"protected Codex startup respects the launch edge and manual exit");

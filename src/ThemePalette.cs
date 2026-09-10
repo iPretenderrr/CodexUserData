@@ -30,13 +30,17 @@ namespace CodexUserData
         internal static double AnimationSpeed {get{return animationSpeed;}private set{animationSpeed=value;}}
         internal static TimeSpan MotionTime(double milliseconds){return TimeSpan.FromMilliseconds(milliseconds/AnimationSpeed);}
         internal static bool MotionAllowed {get{return MotionMode!="off"&&SystemParameters.ClientAreaAnimation&&!SystemParameters.HighContrast&&(RenderCapability.Tier>>16)>0;}}
-        internal static int MotionFrameRate {get{return MotionMode=="eco"?30:(RenderCapability.Tier>>16)>=2?60:30;}}
+        internal static int MotionFrameRate {get{return Math.Max(1,ActivityFrameRate(MotionMode));}}
+        internal static int ResolveFrameRate(string mode,int tier,bool battery,bool animationEnabled)
+        {
+            if(mode=="off"||!animationEnabled)return 0;
+            if(mode=="eco"||tier==0||mode=="auto"&&(tier<2||battery))return 30;
+            return 60;
+        }
         internal static int ActivityFrameRate(string mode)
         {
-            if(mode=="off"||!SystemParameters.ClientAreaAnimation||SystemParameters.HighContrast)return 0;
-            if(mode=="eco"||(RenderCapability.Tier>>16)==0)return 30;
-            if(mode=="auto"&&System.Windows.Forms.SystemInformation.PowerStatus.PowerLineStatus==System.Windows.Forms.PowerLineStatus.Offline)return 30;
-            return 60;
+            bool battery=mode=="auto"&&System.Windows.Forms.SystemInformation.PowerStatus.PowerLineStatus==System.Windows.Forms.PowerLineStatus.Offline;
+            return ResolveFrameRate(mode,RenderCapability.Tier>>16,battery,SystemParameters.ClientAreaAnimation&&!SystemParameters.HighContrast);
         }
         private static string appliedKey;
         private static DrawingBrush LiveDrawing(){var b=new DrawingBrush{Stretch=Stretch.Fill};BindingOperations.SetBinding(b,Brush.OpacityProperty,new Binding("UnitOpacity"){Source=brushState});return b;}

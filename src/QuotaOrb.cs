@@ -18,7 +18,7 @@ namespace CodexUserData
         {
             internal readonly double Radius,Width;
             internal Brush Color,Light;
-            internal Pen Stroke,Glow;
+            internal Pen Stroke,Glow,TrackStroke,TailStroke,TailGlow;
             internal bool Known;
             internal double Remaining,Target,Focus,Drawn=-1,DrawnRadius=-1;
             internal bool Warped;
@@ -27,9 +27,13 @@ namespace CodexUserData
             internal FormattedText Number,Caption;
             internal Ring(double radius,double width,Brush color,Brush light,string period)
             {
-                Radius=radius;Width=width;Period=period;Recolor(color,light);
+                Radius=radius;Width=width;Period=period;TrackStroke=new Pen(Theme.Line,width);Recolor(color,light);
             }
-            internal void Recolor(Brush color,Brush light){Color=color;Light=light;Stroke=new Pen(color,Width){StartLineCap=PenLineCap.Round,EndLineCap=PenLineCap.Round};Stroke.Freeze();Glow=new Pen(color,Width+4){StartLineCap=PenLineCap.Round,EndLineCap=PenLineCap.Round};Glow.Freeze();}
+            internal void Recolor(Brush color,Brush light)
+            {
+                Color=color;Light=light;Stroke=new Pen(color,Width){StartLineCap=PenLineCap.Round,EndLineCap=PenLineCap.Round};Stroke.Freeze();Glow=new Pen(color,Width+4){StartLineCap=PenLineCap.Round,EndLineCap=PenLineCap.Round};Glow.Freeze();
+                TailStroke=new Pen(light,1.5){StartLineCap=PenLineCap.Round,EndLineCap=PenLineCap.Round};TailStroke.Freeze();TailGlow=new Pen(light,4){StartLineCap=PenLineCap.Round,EndLineCap=PenLineCap.Round};TailGlow.Freeze();
+            }
         }
         private readonly Stopwatch clock=Stopwatch.StartNew();
         private readonly DispatcherTimer heartbeat=new DispatcherTimer{Interval=TimeSpan.FromSeconds(1)};
@@ -48,11 +52,15 @@ namespace CodexUserData
         private bool baseline,subscribed,disposed,pressed;
         private int focus=-1,paletteRevision=-1,fpsTarget;
         private DrawingGroup shell;
+        private readonly Pen chassisStroke=new Pen(Theme.Line,.45),unknownStroke=new Pen(Theme.Line,6);
         private Brush chassisFill;
         private FormattedText label;
         private bool ShortKnown {get{return rings[0].Known;}}
         private bool LongKnown {get{return rings[1].Known;}}
         internal int VisibleRingCount {get;private set;}
+        private bool Lightweight {get{return fpsTarget<=30;}}
+        internal static int WaveSamples(int fps){return fps<=30?40:112;}
+        internal static int ParticleCount(int fps){return fps<=0?0:fps<=30?4:22;}
 
         internal QuotaOrb()
         {
@@ -100,8 +108,8 @@ namespace CodexUserData
         }
         internal void ApplyActivity(ActivityReport report)
         {
-            activity=report;if(report==null)return;activeUntil=report.ActiveTasks>0?report.Until:0;
-            if(report.ActiveTasks==0){lastBurst=-100;rateEnergy=0;}RefreshState();
+            activity=report;activeUntil=report!=null&&report.ActiveTasks>0?report.Until:0;
+            if(report==null||report.ActiveTasks==0){lastBurst=-100;rateEnergy=0;}RefreshState();
         }
         private static string PeriodLabel(QuotaWindow w,string fallback)
         {
@@ -132,7 +140,7 @@ namespace CodexUserData
             // in this refresh, keeping a lone weekly quota centered instead of reserving a fake 5h row.
             int count=(ShortKnown?1:0)+(LongKnown?1:0);
             if(count!=VisibleRingCount){VisibleRingCount=count;if(focus>=0)focus=2;}
-            string text=String.Join("/",rings.Select(r=>r.Period+":"+r.Label))+"/"+VisibleRingCount+"/"+Theme.Revision;
+            string text=String.Join("/",rings.Select(r=>r.Period+":"+r.Label))+"/"+VisibleRingCount+"/"+Theme.Revision+"/"+(bucket==null?"":bucket.SourceLabel);
             if(textKey!=text)
             {
                 textKey=text;var bold=new Typeface(face.FontFamily,FontStyles.Normal,FontWeights.SemiBold,FontStretches.Normal);
@@ -145,7 +153,7 @@ namespace CodexUserData
                 label=new FormattedText("额度待更新",CultureInfo.InvariantCulture,FlowDirection.LeftToRight,face,11,Theme.Muted,1);
                 AutomationProperties.SetName(this,VisibleRingCount==0?"Codex 额度待更新":"Codex 剩余额度 · "+String.Join(" · ",rings.Where(r=>r.Known).Select(r=>r.Period+" "+r.Label)));InvalidateVisual();
             }
-            string status=activeUntil>now?"任务活动中":activity!=null&&activity.UncertainTasks>0?"任务状态待确认":clock.Elapsed.TotalSeconds-lastBurst<10?"近期有用量活动":"空闲";
+            string status=QuotaStatus.ActivityLabel(activity,false,now);
             AutomationProperties.SetItemStatus(this,status);
             if(activityText!=status){activityText=status;InvalidateVisual();}
             fpsTarget=FrameRate();if(fpsTarget==0)pulseAt=-100;UpdateMotion();
@@ -226,10 +234,11 @@ namespace CodexUserData
             double r=radius+5*power*(radius/52.5)*bend;
             return At(r,angle+.035*power*Math.Sin(2*angle+time));
         }
-        private static Geometry WaveArc(double radius,double start,double end,double time,double power,bool filled=false)
+        private Geometry WaveArc(double radius,double start,double end,double time,double power,bool filled=false)
         {
             if(end<=start)return Geometry.Empty;
-            int count=Math.Max(8,(int)Math.Ceiling(112*(end-start)));
+            // The lightweight profile changes geometry complexity as well as frame cadence.
+            int count=Math.Max(8,(int)Math.Ceiling(WaveSamples(fpsTarget)*(end-start)));
             var shape=new StreamGeometry();using(var line=shape.Open())
             {
                 for(int i=0;i<=count;i++)
@@ -251,17 +260,18 @@ namespace CodexUserData
                 ring.Track=warp?WaveArc(radius,0,1,time,power):Arc(radius,1);
                 ring.Arc=warp?WaveArc(radius,0,drawValue,time,power):Arc(radius,drawValue);
             }
-            double emphasis=1-.3*Math.Max(0,otherFocus-ring.Focus);
+            double emphasis=(1-.3*Math.Max(0,otherFocus-ring.Focus))*(bucket!=null&&bucket.IsOnline?1:.76);
             dc.PushOpacity(emphasis);
-            dc.PushOpacity(Theme.IsLight?.48:.5);dc.DrawGeometry(null,new Pen(Theme.Line,ring.Width),ring.Track);dc.Pop();
+            dc.PushOpacity(Theme.IsLight?.48:.5);dc.DrawGeometry(null,ring.TrackStroke,ring.Track);dc.Pop();
             if(ring.Known&&fraction>0)
             {
-                dc.PushOpacity(.07+.14*power+.13*ring.Focus);dc.DrawGeometry(null,ring.Glow,ring.Arc);dc.Pop();
+                if(!Lightweight){dc.PushOpacity(.07+.14*power+.13*ring.Focus);dc.DrawGeometry(null,ring.Glow,ring.Arc);dc.Pop();}
                 dc.DrawGeometry(null,ring.Stroke,ring.Arc);
                 // Sparse glints stay inside the colored arc with stable positions, no random flicker.
-                for(int j=0;j<9;j++)
+                int glints=Lightweight?3:9;
+                for(int j=0;j<glints;j++)
                 {
-                    double along=(j+.55)/10;if(along>=fraction)continue;
+                    double along=(j+.55)/(glints+1);if(along>=fraction)continue;
                     double angle=-Math.PI/2+along*Math.PI*2;
                     double opacity=.18+.45*power*(.5+.5*Math.Sin(time*2-j));
                     dc.PushOpacity(opacity);dc.DrawEllipse(ring.Light,null,WavePoint(radius+(j%3-1)*1.1,angle,time,power),j%3==0?.85:.48,j%3==0?.85:.48);dc.Pop();
@@ -272,9 +282,9 @@ namespace CodexUserData
                     double angle=-Math.PI/2+cycle*fraction*Math.PI*2,fade=Math.Sin(cycle*Math.PI)*power;
                     // Layer a soft, longer trail underneath the moving highlight; no blur filter.
                     var tail=WaveArc(radius,Math.Max(0,cycle*fraction-.16),cycle*fraction,time,power);
-                    dc.PushOpacity(.18*fade);dc.DrawGeometry(null,new Pen(ring.Light,4){StartLineCap=PenLineCap.Round,EndLineCap=PenLineCap.Round},tail);dc.Pop();
-                    dc.PushOpacity(.68*fade);dc.DrawGeometry(null,new Pen(ring.Light,1.5){StartLineCap=PenLineCap.Round,EndLineCap=PenLineCap.Round},tail);dc.Pop();
-                    dc.PushOpacity(.2*fade);dc.DrawEllipse(ring.Light,null,WavePoint(radius,angle,time,power),3.6,3.6);dc.Pop();
+                    if(!Lightweight){dc.PushOpacity(.18*fade);dc.DrawGeometry(null,ring.TailGlow,tail);dc.Pop();}
+                    dc.PushOpacity(.68*fade);dc.DrawGeometry(null,ring.TailStroke,tail);dc.Pop();
+                    if(!Lightweight){dc.PushOpacity(.2*fade);dc.DrawEllipse(ring.Light,null,WavePoint(radius,angle,time,power),3.6,3.6);dc.Pop();}
                     dc.PushOpacity(fade);dc.DrawEllipse(ring.Light,null,WavePoint(radius,angle,time,power),1.4,1.4);dc.Pop();
                 }
             }
@@ -282,7 +292,7 @@ namespace CodexUserData
         }
         private void DrawParticles(DrawingContext dc,double time,double power)
         {
-            if(power<=.005)return;int count=fpsTarget<=30?12:22;
+            if(power<=.005)return;int count=ParticleCount(fpsTarget);
             // Deterministic orbital particles: bounded count, no allocations for particle state,
             // no random frame-to-frame flicker, and no particle crosses the central text.
             for(int i=0;i<count;i++)
@@ -293,19 +303,26 @@ namespace CodexUserData
                 double opacity=Math.Sin(life*Math.PI);opacity=opacity*opacity*power*.85;
                 Point p=WavePoint(radius,angle,time,power*.18);double size=i%5==0?1.05:.55;
                 Brush color=ring.Known?ring.Light:Theme.Muted;
-                if(i%5==0){dc.PushOpacity(opacity*.16);dc.DrawEllipse(color,null,p,2.8,2.8);dc.Pop();}
+                if(!Lightweight&&i%5==0){dc.PushOpacity(opacity*.16);dc.DrawEllipse(color,null,p,2.8,2.8);dc.Pop();}
                 dc.PushOpacity(opacity);dc.DrawEllipse(color,null,p,size,size);
-                if(i%7==0){var pen=new Pen(color,.55);dc.DrawLine(pen,new Point(p.X-1.8,p.Y),new Point(p.X+1.8,p.Y));dc.DrawLine(pen,new Point(p.X,p.Y-1.8),new Point(p.X,p.Y+1.8));}
+                if(!Lightweight&&i%7==0){var pen=new Pen(color,.55);dc.DrawLine(pen,new Point(p.X-1.8,p.Y),new Point(p.X+1.8,p.Y));dc.DrawLine(pen,new Point(p.X,p.Y-1.8),new Point(p.X,p.Y+1.8));}
                 dc.Pop();
             }
         }
         private void DrawChassis(DrawingContext dc,double time,double power)
         {
-            if(power<=.003){dc.DrawDrawing(shell);return;}
+            if(power<=.003||Lightweight)
+            {
+                dc.DrawDrawing(shell);
+                // Reuse the cached chassis in eco mode. Its shared rotation/scale and a quiet
+                // breathing tint retain task feedback without rebuilding a filled wave path.
+                if(Lightweight&&power>.003){dc.PushOpacity(power*(.025+.055*(.5+.5*Math.Sin(time*2))));dc.DrawEllipse(rings[ShortKnown?0:1].Color,null,new Point(64,64),59,59);dc.Pop();}
+                return;
+            }
             // The body follows the same wave field with a smaller amplitude, moving as one
             // object with the rings. Native bounds and center text remain untouched.
             var body=WaveArc(58.5,0,1,time,power*.55,true);
-            dc.DrawGeometry(chassisFill,new Pen(Theme.Line,.45),body);
+            dc.DrawGeometry(chassisFill,chassisStroke,body);
             dc.PushOpacity(.18);dc.DrawGeometry(Theme.WindowBackground,null,body);dc.Pop();
         }
         protected override void OnRender(DrawingContext dc)
@@ -324,7 +341,7 @@ namespace CodexUserData
             DrawChassis(dc,time,power);
             if(VisibleRingCount==0)
             {
-                dc.PushOpacity(.5);dc.DrawGeometry(null,new Pen(Theme.Line,6),power>.003?WaveArc(52.5,0,1,time,power):Arc(52.5,1));dc.Pop();
+                dc.PushOpacity(.5);dc.DrawGeometry(null,unknownStroke,power>.003?WaveArc(52.5,0,1,time,power):Arc(52.5,1));dc.Pop();
             }
             else for(int i=0;i<2;i++)if(rings[i].Known)DrawRing(dc,rings[i],VisibleRingCount==1?0:rings[1-i].Focus,time,power);
             DrawParticles(dc,time,power);

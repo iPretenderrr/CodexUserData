@@ -9,7 +9,7 @@ using System.Windows.Media;
 
 namespace CodexUserData
 {
-    // Build the selected day's grouped rows only after a short hover dwell, not on every pointer pixel.
+    // Build details only for a selected chart period. The outer page owns scrolling.
     internal sealed class UsageDetails : Border
     {
         private readonly StackPanel body=new StackPanel();
@@ -27,7 +27,7 @@ namespace CodexUserData
         }
         internal void Clear(string message="等待当前来源的数据")
         {
-            if(signature=="empty/"+message)return;signature="empty/"+message;Heading=message;ModelRows=0;body.Children.Clear();
+            if(signature=="empty/"+message)return;signature="empty/"+message;Heading=message;ModelRows=0;body.Children.Clear();modelGrid=null;metricGrid=null;
             var text=Theme.Text(message,11,Theme.Muted);text.TextWrapping=TextWrapping.Wrap;AutomationProperties.SetAutomationId(text,idPrefix+"DetailStatus");body.Children.Add(text);
         }
         internal void Apply(DailyUsage day,bool pinned,string countLabel)
@@ -39,7 +39,7 @@ namespace CodexUserData
             var date=Theme.Text(day.Date,13,Theme.Ink);date.FontWeight=FontWeights.SemiBold;AutomationProperties.SetAutomationId(date,idPrefix+"DailyUsageDetail");AutomationProperties.SetName(date,Heading);heading.Children.Add(date);body.Children.Add(heading);
             var totals=new UniformGrid{Columns=2,Margin=new Thickness(-3,10,-3,0)};body.Children.Add(totals);
             Metric(totals,"TOKENS",TokenText.Compact(day.Tokens),Theme.Ink,idPrefix+"SelectedDayTokens");
-            Metric(totals,"API 等效 · USD",ModelColors.Money(day.Models.Sum(m=>m.EquivalentUsd),day.Models.Sum(m=>m.UnpricedTokens),day.Tokens),Theme.Ink,idPrefix+"SelectedDayValue");
+            Metric(totals,"API 估算 · USD",ModelColors.Money(day.Models.Sum(m=>m.EquivalentUsd),day.Models.Sum(m=>m.UnpricedTokens),day.Tokens),Theme.Ink,idPrefix+"SelectedDayValue");
             var metrics=new UniformGrid{Columns=2,Margin=new Thickness(-3,3,-3,7)};body.Children.Add(metrics);metricGrid=metrics;
             Metric(metrics,"未缓存输入",TokenText.Compact(day.Input),Theme.Muted,null,true);Metric(metrics,"输出",TokenText.Compact(day.Output),Theme.Muted,null,true);
             Metric(metrics,"缓存读取",TokenText.Compact(day.CacheRead),Theme.Muted,null,true);Metric(metrics,"缓存创建",TokenText.Compact(day.CacheWrite),Theme.Muted,null,true);

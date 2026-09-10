@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
+using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -21,7 +23,11 @@ namespace CodexUserData
         private readonly TextBlock error,opacityLabel;
         private readonly ThemeEditor themeEditor;
         private string activePage;
+        private bool closed;
+        private CancellationTokenSource updateCheck;
         internal SettingsWindow(Preferences current,Action<double> preview)
+            :this(current,preview,null){}
+        internal SettingsWindow(Preferences current,Action<double> preview,Func<string> diagnosticsPreview)
         {
             draft=current.Clone();Title="CodexUserData 设置";ShowInTaskbar=false;Width=Math.Min(760,SystemParameters.WorkArea.Width-32);Height=Math.Min(720,SystemParameters.WorkArea.Height-32);MinWidth=Math.Min(560,Width);MinHeight=Math.Min(460,Height);Theme.InstallStyles(this);
             MaxHeight=SystemParameters.WorkArea.Height;WindowStartupLocation=WindowStartupLocation.CenterOwner;
@@ -58,6 +64,10 @@ namespace CodexUserData
             var import=Theme.Button("导入 HTML 形态…","选择 shape.json",180);import.HorizontalAlignment=HorizontalAlignment.Left;import.Margin=new Thickness(0,8,0,0);floating.Children.Add(import);
             import.Click+=delegate{var picker=new Microsoft.Win32.OpenFileDialog{Filter="形态配置|shape.json",InitialDirectory=Path.Combine(Program.Folder,"examples")};if(picker.ShowDialog()!=true)return;try{draft.CustomShape=ShapeManifest.Import(picker.FileName);draft.BallStyle="html";ballStyle.Select("html");shapeName.Text=ShapeManifest.Read(ShapeManifest.Resolve(draft.CustomShape)).name??"已导入形态";}catch(Exception ex){error.Text=ex.Message;}};
             Note(floating,"形态会复制到用户数据目录。任意位置右键可切回主界面；Alt + 拖动可移动。",Theme.Muted);
+            var positionLock=new CheckBox{Content="锁定悬浮球位置",IsChecked=draft.BallPositionLocked,Foreground=Theme.Ink,Margin=new Thickness(0,10,0,0)};
+            System.Windows.Automation.AutomationProperties.SetAutomationId(positionLock,"BallPositionLocked");floating.Children.Add(positionLock);
+            positionLock.Checked+=delegate{draft.BallPositionLocked=true;};positionLock.Unchecked+=delegate{draft.BallPositionLocked=false;};
+            Note(floating,"锁定后仍可右键切换形态或返回主界面。软件记住各显示器的位置，屏幕断开时会把窗口移回可见区域。",Theme.Muted);
             var orbColors=Theme.Button("圆环配色  →","自定义短周期、长周期渐变",180);orbColors.HorizontalAlignment=HorizontalAlignment.Stretch;orbColors.Margin=new Thickness(0,12,0,0);orbColors.Height=36;floating.Children.Add(orbColors);
             orbColors.Click+=delegate{var editor=new OrbAppearance(draft){Owner=this};if(editor.ShowDialog()==true){draft.OrbFollowTheme=editor.Result.OrbFollowTheme;draft.OrbShortColors=editor.Result.OrbShortColors;draft.OrbLongColors=editor.Result.OrbLongColors;draft.OrbShortAngle=editor.Result.OrbShortAngle;draft.OrbLongAngle=editor.Result.OrbLongAngle;}};
             Label(floating,"贴边额度条周期");
@@ -68,7 +78,8 @@ namespace CodexUserData
             var ballAlphaLabel=Theme.Text(((int)(draft.BallOpacity*100))+"%",12,Theme.Accent);floating.Children.Add(ballAlphaLabel);
             var ballAlpha=new Slider{Minimum=20,Maximum=100,Value=draft.BallOpacity*100,TickFrequency=5,IsSnapToTickEnabled=true};ballAlpha.ValueChanged+=delegate{draft.BallOpacity=ballAlpha.Value/100;ballAlphaLabel.Text=((int)ballAlpha.Value)+"%";};floating.Children.Add(ballAlpha);
             Label(floating,"界面与光环动画");
-            var orbMotion=new ChoiceButton(new Dictionary<string,string>{{"auto","自动 · 按设备性能调节"},{"smooth","流畅 · 最高 60 帧"},{"eco","节能 · 最高 30 帧"},{"off","关闭动画"}},"界面与光环动画档位");orbMotion.Select(draft.OrbAnimation);orbMotion.Changed+=v=>draft.OrbAnimation=v;floating.Children.Add(orbMotion);
+            var orbMotion=new ChoiceButton(new Dictionary<string,string>{{"auto","自动 · 按设备与供电调节"},{"smooth","完整 · 流光与粒子"},{"eco","轻量 · 减少装饰绘制"},{"off","关闭 · 保留静态状态提示"}},"界面与光环动画档位");orbMotion.Select(draft.OrbAnimation);orbMotion.Changed+=v=>{draft.OrbAnimation=v;Theme.Apply(draft);};floating.Children.Add(orbMotion);
+            Note(floating,"轻量模式保留切换和任务提示，减少粒子与光晕；隐藏窗口暂停装饰动画。关闭动画不影响任务检测和完成状态。",Theme.Muted);
             Note(floating,"统一控制窗口过渡、菜单、圆环、托盘呼吸和贴边脉冲；关闭后保留静态状态反馈。",Theme.Muted);
             Label(floating,"动画速率 · 界面过渡");
             var speedRow=new DockPanel();var speedLabel=Theme.Text(draft.AnimationSpeed.ToString("0.0",System.Globalization.CultureInfo.InvariantCulture)+"×",12,Theme.Accent);speedRow.Children.Add(speedLabel);
@@ -95,7 +106,7 @@ namespace CodexUserData
             Note(display,"保存模型价格后，全部历史用量会按新价格重新估算。",Theme.Muted);
             Label(display,"主页图表");
             var heatmap=new CheckBox{Content="每日用量热度图",IsChecked=draft.ShowHeatmap,Foreground=Theme.Ink,Margin=new Thickness(0,5,0,8)};display.Children.Add(heatmap);heatmap.Checked+=delegate{draft.ShowHeatmap=true;};heatmap.Unchecked+=delegate{draft.ShowHeatmap=false;};
-            var trend=new CheckBox{Content="每日 Token 趋势",IsChecked=draft.ShowTrend,Foreground=Theme.Ink,Margin=new Thickness(0,5,0,8)};display.Children.Add(trend);trend.Checked+=delegate{draft.ShowTrend=true;};trend.Unchecked+=delegate{draft.ShowTrend=false;};
+            var trend=new CheckBox{Content="每日用量趋势",IsChecked=draft.ShowTrend,Foreground=Theme.Ink,Margin=new Thickness(0,5,0,8)};display.Children.Add(trend);trend.Checked+=delegate{draft.ShowTrend=true;};trend.Unchecked+=delegate{draft.ShowTrend=false;};
             Note(display,"顶部图表按钮可在独立大窗口查看完整热度图和趋势。",Theme.Muted);
             AddPage("display",display);
 
@@ -113,7 +124,7 @@ namespace CodexUserData
             var detect=Theme.Button("自动检测","重新检测本机 Codex CLI",108);cliActions.Children.Add(detect);
             var browseCli=Theme.Button("手动选择…","选择 codex.exe",108);browseCli.Margin=new Thickness(8,0,0,0);cliActions.Children.Add(browseCli);
             var cliStatus=Theme.Text(File.Exists(draft.QuotaCli)?"已找到本机可执行文件":"未找到 CLI；本地日志统计仍可使用。",11,Theme.Muted);cliStatus.TextWrapping=TextWrapping.Wrap;cliStatus.Margin=new Thickness(0,7,0,0);data.Children.Add(cliStatus);
-            detect.Click+=async delegate{detect.IsEnabled=false;cliStatus.Text="正在检测…";try{string found=await System.Threading.Tasks.Task.Run(()=>QuotaReader.FindDefaultExe());if(!String.IsNullOrEmpty(found)){quotaCli.Text=found;cliStatus.Text="已自动填入检测结果。";}else{cliStatus.Text="所有位置均未找到，请手动选择 codex.exe。在线额度需要可用且已登录的 CLI。";cliStatus.Foreground=Theme.Warning;}}finally{detect.IsEnabled=true;}};
+            detect.Click+=async delegate{detect.IsEnabled=false;cliStatus.Text="正在检测…";try{string found=await System.Threading.Tasks.Task.Run(()=>QuotaReader.FindDefaultExe());if(closed)return;if(!String.IsNullOrEmpty(found)){quotaCli.Text=found;cliStatus.Text="已自动填入检测结果。";}else{cliStatus.Text="所有位置均未找到，请手动选择 codex.exe。在线额度需要可用且已登录的 CLI。";cliStatus.Foreground=Theme.Warning;}}finally{if(!closed)detect.IsEnabled=true;}};
             browseCli.Click+=delegate{var picker=new Microsoft.Win32.OpenFileDialog{Filter="Codex CLI|codex.exe|可执行文件|*.exe"};if(picker.ShowDialog()==true){quotaCli.Text=picker.FileName;cliStatus.Text="已选择，保存后用于在线额度查询。";}};
             Label(data,"Codex 数据目录");home=Theme.Input(draft.CodexHome);PathRow(data,home,true);
             Label(data,"CC Switch 数据库");database=Theme.Input(draft.Database);PathRow(data,database,false);
@@ -143,9 +154,44 @@ namespace CodexUserData
             Note(about,"设置、价格、自定义形态和统计缓存保存在当前 Windows 用户目录。软件不会上传本地用量记录；在线额度由已登录的 Codex CLI 查询。",Theme.Muted);
             var project=Theme.Button("打开 GitHub 项目主页","打开 CodexUserData GitHub 仓库",180);project.HorizontalAlignment=HorizontalAlignment.Left;project.Margin=new Thickness(0,14,0,0);about.Children.Add(project);
             project.Click+=delegate{try{System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo{FileName="https://github.com/iPretenderrr/CodexUserData",UseShellExecute=true});}catch(Exception ex){error.Text="无法打开项目主页："+ex.Message;}};
+            Label(about,"软件更新");
+            var updateMessage=Theme.Text("点击后查询 GitHub 最新公开版本。",11,Theme.Muted);updateMessage.TextWrapping=TextWrapping.Wrap;about.Children.Add(updateMessage);
+            var updateActions=new StackPanel{Orientation=Orientation.Horizontal,Margin=new Thickness(0,8,0,0)};about.Children.Add(updateActions);
+            var checkUpdate=Theme.Button("检查更新","查询最新公开版本",100);updateActions.Children.Add(checkUpdate);
+            var openRelease=Theme.Button("打开版本页面","在浏览器查看此版本",120);openRelease.IsEnabled=false;openRelease.Margin=new Thickness(8,0,0,0);updateActions.Children.Add(openRelease);
+            var releaseNotes=new TextBox{IsReadOnly=true,TextWrapping=TextWrapping.Wrap,VerticalScrollBarVisibility=ScrollBarVisibility.Auto,Height=190,Visibility=Visibility.Collapsed,Margin=new Thickness(0,10,0,0),Background=Theme.Surface,Foreground=Theme.Ink,Padding=new Thickness(10)};about.Children.Add(releaseNotes);
+            System.Windows.Automation.AutomationProperties.SetAutomationId(releaseNotes,"ReleaseNotes");ReleaseInfo latestRelease=null;
+            checkUpdate.Click+=async delegate
+            {
+                if(closed||updateCheck!=null)return;var pending=new CancellationTokenSource();updateCheck=pending;checkUpdate.IsEnabled=false;updateMessage.Text="正在检查更新…";
+                try
+                {
+                    var found=await ReleaseUpdate.CheckAsync(pending.Token);if(closed||!Object.ReferenceEquals(updateCheck,pending))return;
+                    latestRelease=found;updateMessage.Text=found.Describe(GetType().Assembly.GetName().Version);releaseNotes.Text=found.Notes;releaseNotes.Visibility=Visibility.Visible;openRelease.IsEnabled=true;
+                }
+                catch(OperationCanceledException){if(!closed)updateMessage.Text="更新检查已取消。";}
+                catch(TimeoutException){if(!closed)updateMessage.Text="检查更新超时，请稍后重试。";}
+                catch(Exception){if(!closed)updateMessage.Text="无法检查更新，请检查网络后重试。";}
+                finally{if(Object.ReferenceEquals(updateCheck,pending))updateCheck=null;pending.Dispose();if(!closed)checkUpdate.IsEnabled=true;}
+            };
+            openRelease.Click+=delegate
+            {
+                if(latestRelease==null)return;
+                try{System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo{FileName=latestRelease.Page.AbsoluteUri,UseShellExecute=true});}
+                catch(Exception){updateMessage.Text="无法打开浏览器，请稍后重试。";}
+            };
+            Label(about,"问题诊断");
+            Note(about,"先预览诊断内容，再选择保存到本机。",Theme.Muted);
+            var diagnostic=Theme.Button("预览诊断信息…","查看并选择保存诊断信息",180);diagnostic.HorizontalAlignment=HorizontalAlignment.Left;diagnostic.Margin=new Thickness(0,8,0,0);diagnostic.IsEnabled=diagnosticsPreview!=null;about.Children.Add(diagnostic);
+            diagnostic.Click+=delegate
+            {
+                if(closed||diagnosticsPreview==null)return;
+                try{string text=diagnosticsPreview();if(closed)return;new DiagnosticPreviewWindow(text){Owner=this}.ShowDialog();}
+                catch(Exception){error.Text="无法生成诊断信息，请稍后重试。";}
+            };
             AddPage("about",about);
 
-            Closed+=delegate{Theme.Apply(Result??current);};
+            Closed+=delegate{closed=true;if(updateCheck!=null)updateCheck.Cancel();Theme.Apply(DialogResult==true&&Result!=null?Result:current);};
             var bottom=new StackPanel{Margin=new Thickness(0,12,0,0)};Grid.SetRow(bottom,1);outer.Children.Add(bottom);
             error=Theme.Text("",11,Theme.Warning);error.TextWrapping=TextWrapping.Wrap;bottom.Children.Add(error);
             var buttons=new StackPanel{Orientation=Orientation.Horizontal,HorizontalAlignment=HorizontalAlignment.Right,Margin=new Thickness(0,8,0,0)};bottom.Children.Add(buttons);
@@ -218,8 +264,35 @@ namespace CodexUserData
             if(draft.Source=="ccswitch"&&!File.Exists(draft.Database)){SelectPage("data");error.Text="找不到 CC Switch 数据库文件。";return;}
             if(draft.BallStyle=="html")try{ShapeManifest.Read(ShapeManifest.Resolve(draft.CustomShape));}catch(Exception){SelectPage("floating");error.Text="请先导入有效的 HTML 形态，或选择内置形态。";return;}
             draft.RefreshSeconds=seconds;draft.Metrics=selected;draft.Validate();
-            try{StartupRegistration.Configure(draft,Path.Combine(Program.Folder,"CodexUserData.exe"));}catch(Exception ex){SelectPage("behavior");error.Text="无法更新自启动设置："+ex.Message;return;}
-            Result=draft;WindowInteraction.CompleteDialog(this,true);
+            // Commit external settings only when the accepted close actually completes.
+            // Closing the owner during the animation must not apply a half-saved draft.
+            WindowInteraction.CompleteDialog(this,true,delegate
+            {
+                try{StartupRegistration.Configure(draft,Path.Combine(Program.Folder,"CodexUserData.exe"));}
+                catch(Exception ex){SelectPage("behavior");error.Text="无法更新自启动设置："+ex.Message;return false;}
+                Result=draft;return true;
+            });
         }
+    }
+    internal sealed class DiagnosticPreviewWindow : StyledWindow
+    {
+        internal readonly string PreviewText;
+        internal DiagnosticPreviewWindow(string text)
+        {
+            PreviewText=text??"";Title="诊断信息预览";ShowInTaskbar=false;WindowStartupLocation=WindowStartupLocation.CenterOwner;
+            Width=Math.Min(680,SystemParameters.WorkArea.Width-32);Height=Math.Min(600,SystemParameters.WorkArea.Height-32);MinWidth=Math.Min(360,Width);MinHeight=Math.Min(300,Height);
+            var layout=new Grid{Margin=new Thickness(18,0,18,16)};layout.RowDefinitions.Add(new RowDefinition{Height=GridLength.Auto});layout.RowDefinitions.Add(new RowDefinition{Height=new GridLength(1,GridUnitType.Star)});layout.RowDefinitions.Add(new RowDefinition{Height=GridLength.Auto});SetBody(layout,"诊断信息预览","DIAGNOSTICS",true);
+            var note=Theme.Text("以下为将要保存的全部内容；保存后可自行决定是否分享。",11,Theme.Muted);note.TextWrapping=TextWrapping.Wrap;note.Margin=new Thickness(0,0,0,10);layout.Children.Add(note);
+            var content=new TextBox{Text=PreviewText,IsReadOnly=true,TextWrapping=TextWrapping.NoWrap,AcceptsReturn=true,VerticalScrollBarVisibility=ScrollBarVisibility.Auto,HorizontalScrollBarVisibility=ScrollBarVisibility.Auto,FontFamily=new FontFamily("Consolas"),FontSize=11,Background=Theme.Surface,Foreground=Theme.Ink,Padding=new Thickness(10)};Grid.SetRow(content,1);layout.Children.Add(content);System.Windows.Automation.AutomationProperties.SetAutomationId(content,"DiagnosticsPreview");
+            var footer=new DockPanel{Margin=new Thickness(0,12,0,0)};Grid.SetRow(footer,2);layout.Children.Add(footer);var save=Theme.Button("保存此内容…","保存当前预览文本",130);DockPanel.SetDock(save,Dock.Right);footer.Children.Add(save);var status=Theme.Text("",11,Theme.Muted);status.TextWrapping=TextWrapping.Wrap;footer.Children.Add(status);
+            save.Click+=delegate
+            {
+                var picker=new Microsoft.Win32.SaveFileDialog{Title="保存诊断信息",Filter="文本文件|*.txt",FileName="CodexUserData-diagnostics-"+DateTime.Now.ToString("yyyyMMdd-HHmmss")+".txt",AddExtension=true,DefaultExt=".txt"};
+                if(picker.ShowDialog(this)!=true)return;
+                try{SavePreview(picker.FileName);status.Text="已保存当前预览内容。";}
+                catch(Exception){status.Text="保存失败，请选择可写入的位置。";}
+            };
+        }
+        internal void SavePreview(string path){File.WriteAllText(path,PreviewText,new UTF8Encoding(false));}
     }
 }

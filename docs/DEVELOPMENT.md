@@ -6,6 +6,7 @@
 | --- | --- |
 | src/*.cs、src/widget.manifest、src/build.ps1 | WPF 应用源码及构建入口；图标由构建脚本生成 |
 | tools/ReleaseProbe.cs、tools/HtmlReleaseProbe.cs | 针对实际混淆产物的回归验证，使用独立演示数据 |
+| tools/verify-source.ps1、tools/*StabilityProbe.cs、tools/FakeQuotaHelper.cs | 源码集成回归与模拟截图；不访问真实日志、账号或在线额度 |
 | restore-dependencies.ps1 | 从 NuGet 恢复固定版本依赖，并验证 SHA-256 |
 | pack.ps1、obfuscation.rules.xml | 编译、混淆、验证并生成可分发程序包 |
 | CodexUserData.exe.config、启动.cmd | 公共运行配置与相对路径启动入口 |
@@ -24,6 +25,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\pack.ps1
 恢复脚本仅下载固定版本 Microsoft.Web.WebView2 1.0.3296.44 和 Obfuscar 2.2.50，不需要开发者的安装路径、账号或配置。缓存完整时可以用 `-Offline` 校验并恢复。版本或哈希不一致会停止。
 
 普通构建在根目录生成 EXE 和三个 WebView2 DLL，不启动程序。`pack.ps1` 使用独立 `.build` 目录重新构建并运行两组验证，需要已安装 WebView2 Runtime 的交互式 Windows 桌面；不会覆盖正在运行的根目录 EXE。成功后在 `dist` 生成 protected ZIP 与 SHA-256 文件。程序包包含 MIT 许可证、第三方声明和使用文档。
+
+日常修改后可先运行源码回归：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\verify-source.ps1
+```
+
+回归在 `.build/source-verification` 创建独立模拟用户目录，覆盖窗口切换、HTML 显隐、日志增量读取、配置恢复、监测状态、图表与诊断等边界。需要可创建 WPF / WebView2 窗口的桌面会话；受限环境的浏览器启动失败不等同于产品功能失败。模拟截图输出到同目录的 `guide-images`，不得替换为真实用户截图。
+
+发布前同步 `src/Program.cs` 的程序集版本、`pack.ps1` 的默认版本以及用户文档，再运行 `pack.ps1`。脚本会拒绝程序版本与包名版本不一致的产物。自动回归不能替代实体多屏热拔插、不同显示缩放和长期运行检查。
+
+`pack.ps1` 使用带 BOM 的 UTF-8，以便 Windows PowerShell 5.1 正确读取白名单中的中文文档名；修改时请保留该编码。
 
 源码公开后，混淆只是保留的发行处理流程，不用于隐藏公开源码。产物可能因编译工具和混淆过程而不同，不保证逐字节可复现。
 

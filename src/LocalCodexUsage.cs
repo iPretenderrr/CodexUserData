@@ -28,13 +28,18 @@ namespace CodexUserData
         public string Id, Parent, Path, Model = "unknown", Effort="unknown", Previous, Head, Tail;
         public List<QuotaBucket> Quotas=new List<QuotaBucket>();
         public long Started, Offset, Length, Modified, Created;
-        public long TaskStarted, TaskEnded;
+        public long TaskStarted, TaskEnded, TaskOrder;
+        public string TaskTurn, TaskEndedTurn;
         public bool TaskRunning;
         public int Invalid;
         public bool Meta;
         public TokenCounters High;
         public Dictionary<string, string> Lanes = new Dictionary<string, string>();
         public List<LocalUsageEvent> Events = new List<LocalUsageEvent>();
+        // An irrelevant or oversized partial line has already been classified. Retain only
+        // its byte checkpoint/hash in memory; cache restarts still resume at the last newline.
+        internal long SkippedOffset;
+        internal string SkippedTail;
     }
     internal sealed class LogCache
     {
@@ -91,9 +96,16 @@ namespace CodexUserData
             if(type=="event_msg")
             {
                 string activity=Str(payload,"type");long at=Timestamp(Get(entry,"timestamp"));
-                // Event order resolves a finish/start pair within the same timestamp second.
-                if(activity=="task_started"){if(at>=Math.Max(cursor.TaskStarted,cursor.TaskEnded))cursor.TaskRunning=true;cursor.TaskStarted=Math.Max(cursor.TaskStarted,at);return;}
-                if(activity=="task_complete"||activity=="turn_aborted"){if(at>=Math.Max(cursor.TaskStarted,cursor.TaskEnded))cursor.TaskRunning=false;cursor.TaskEnded=Math.Max(cursor.TaskEnded,at);return;}
+                if(activity=="task_started"||activity=="turn_started"||activity=="task_complete"||activity=="turn_completed"||activity=="turn_aborted"||activity=="task_failed")
+                {
+                    // Statistics and the live tail share turn identity/order rules. Older caches
+                    // omit the new fields safely; a stale completion cannot stop a newer turn.
+                    var task=new ActivityTurn{Session=cursor.Id,Created=cursor.Started,Started=cursor.TaskStarted,Ended=cursor.TaskEnded,
+                        Signal=Math.Max(cursor.TaskStarted,cursor.TaskEnded),Order=cursor.TaskOrder,Turn=cursor.TaskTurn,EndedTurn=cursor.TaskEndedTurn,Running=cursor.TaskRunning,Explicit=true};
+                    DateTimeOffset precise;long order=DateTimeOffset.TryParse(Str(entry,"timestamp"),out precise)?precise.ToUnixTimeMilliseconds():0;
+                    task.Accept(type,payload,at,order);cursor.TaskStarted=task.Started;cursor.TaskEnded=task.Ended;cursor.TaskOrder=task.Order;
+                    cursor.TaskTurn=task.Turn;cursor.TaskEndedTurn=task.EndedTurn;cursor.TaskRunning=task.Running;return;
+                }
             }
             if (type == "session_meta" && !cursor.Meta)
             {
@@ -156,14 +168,16 @@ namespace CodexUserData
                 string head = Fingerprint(stream, 0, (int)Math.Min(512, length));
                 bool reset = cursor.Offset > length || (cursor.Head != null && cursor.Head != head) || (cursor.Path == file.FullName && cursor.Created != file.CreationTimeUtc.Ticks) || (cursor.Length == length && cursor.Modified != file.LastWriteTimeUtc.Ticks && cursor.Offset == length);
                 if (!reset && cursor.Offset > 0 && cursor.Tail != null) reset = cursor.Tail != Fingerprint(stream, Math.Max(0,cursor.Offset-64), (int)Math.Min(64,cursor.Offset));
+                if(!reset&&cursor.SkippedOffset>cursor.Offset)reset=cursor.SkippedOffset>length||cursor.SkippedTail!=Fingerprint(stream,Math.Max(0,cursor.SkippedOffset-64),(int)Math.Min(64,cursor.SkippedOffset));
                 if (reset)
                 {
-                    cursor.Events.Clear(); cursor.Lanes.Clear();cursor.Quotas.Clear();cursor.Effort="unknown"; cursor.Offset=0; cursor.High=null; cursor.Previous=null; cursor.Meta=false; cursor.Parent=null; cursor.Invalid=0; cursor.Model="unknown";cursor.TaskStarted=0;cursor.TaskEnded=0;cursor.TaskRunning=false;
+                    cursor.Events.Clear(); cursor.Lanes.Clear();cursor.Quotas.Clear();cursor.Effort="unknown"; cursor.Offset=0; cursor.High=null; cursor.Previous=null; cursor.Meta=false; cursor.Parent=null; cursor.Invalid=0; cursor.Model="unknown";cursor.TaskStarted=0;cursor.TaskEnded=0;cursor.TaskOrder=0;cursor.TaskTurn=cursor.TaskEndedTurn=null;cursor.TaskRunning=false;
+                    cursor.SkippedOffset=0;cursor.SkippedTail=null;
                 }
                 cursor.Path=file.FullName; cursor.Created=file.CreationTimeUtc.Ticks; cursor.Head=head;
-                stream.Position=cursor.Offset;
-                byte[] buffer=new byte[65536]; var line=new MemoryStream(); long baseOffset=cursor.Offset;
-                bool skip=false; int bytes;
+                bool skip=cursor.SkippedOffset>cursor.Offset;long baseOffset=skip?cursor.SkippedOffset:cursor.Offset;
+                stream.Position=baseOffset;
+                byte[] buffer=new byte[65536]; var line=new MemoryStream();int bytes;
                 try
                 {
                     while (stream.Position < length && (bytes=stream.Read(buffer,0,(int)Math.Min(buffer.Length,length-stream.Position)))>0)
@@ -195,6 +209,8 @@ namespace CodexUserData
                 }
                 finally
                 {
+                    cursor.SkippedOffset=skip?baseOffset:0;
+                    cursor.SkippedTail=skip?Fingerprint(stream,Math.Max(0,baseOffset-64),(int)Math.Min(64,baseOffset)):null;
                     line.Dispose(); cursor.Tail=Fingerprint(stream,Math.Max(0,cursor.Offset-64),(int)Math.Min(64,cursor.Offset));
                     cursor.Length=length; cursor.Modified=file.LastWriteTimeUtc.Ticks;
                 }
@@ -204,13 +220,15 @@ namespace CodexUserData
 
         private static void Enumerate(string path, List<FileInfo> files, ref int failures, int depth)
         {
-            if(!Directory.Exists(path) || depth>8) return;
+            if(depth>8){failures++;return;}
             try
             {
                 foreach(string file in Directory.GetFiles(path,"rollout-*.jsonl")) files.Add(new FileInfo(file));
                 foreach(string child in Directory.GetDirectories(path)) if((File.GetAttributes(child)&FileAttributes.ReparsePoint)==0) Enumerate(child,files,ref failures,depth+1);
             }
-            catch(IOException){failures++;} catch(UnauthorizedAccessException){failures++;}
+            // Missing optional roots are normal. Exists() also returns false for inaccessible
+            // directories, so let enumeration distinguish absence from a partial/failed scan.
+            catch(DirectoryNotFoundException){} catch(IOException){failures++;} catch(UnauthorizedAccessException){failures++;}
         }
         private static string IdFor(FileInfo file)
         {
@@ -229,23 +247,32 @@ namespace CodexUserData
             return stem[start-1]=='-'&&Guid.TryParse(stem.Substring(start,36),out id)?id.ToString():null;
         }
 
-        private static bool ActivityLine(string text){return text.Contains("\"task_started\"")||text.Contains("\"task_complete\"")||text.Contains("\"turn_aborted\"");}
+        private static bool ActivityLine(string text){return text.Contains("\"task_started\"")||text.Contains("\"turn_started\"")||text.Contains("\"task_complete\"")||text.Contains("\"turn_completed\"")||text.Contains("\"turn_aborted\"")||text.Contains("\"task_failed\"");}
         internal UsageSnapshot Read(string range, DateTime now, Action<string> progress, Func<bool> cancel)
         {
             if(!Directory.Exists(System.IO.Path.Combine(root,"sessions")) && !Directory.Exists(System.IO.Path.Combine(root,"archived_sessions"))) throw new DirectoryNotFoundException("找不到 Codex sessions 日志目录，可在设置中选择 Codex 数据目录。");
-            LastBytesRead=0; int failed=0; List<FileInfo> found=new List<FileInfo>();
+            int failed=0; List<FileInfo> found=new List<FileInfo>();
             Enumerate(System.IO.Path.Combine(root,"sessions"),found,ref failed,0); Enumerate(System.IO.Path.Combine(root,"archived_sessions"),found,ref failed,0);
+            return ReadEnumerated(range,now,found,failed,progress,cancel);
+        }
+        // Keep enumeration completeness explicit through reconciliation and aggregation. Tests
+        // can exercise partial listings without altering directory ACLs or reading user logs.
+        internal UsageSnapshot ReadEnumerated(string range,DateTime now,List<FileInfo> found,int failed,Action<string> progress,Func<bool> cancel)
+        {
+            LastBytesRead=0;
             // One ledger per thread: moving/duplicating a rollout in archived_sessions must not add its usage twice.
             var files=found.GroupBy(IdFor,StringComparer.OrdinalIgnoreCase).Select(g=>g.OrderByDescending(f=>f.Length).ThenByDescending(f=>f.LastWriteTimeUtc).First()).OrderByDescending(f=>f.LastWriteTimeUtc).ToList();
             var active=new HashSet<string>(files.Select(IdFor),StringComparer.OrdinalIgnoreCase);
-            foreach(string deleted in cursors.Keys.Where(k=>!active.Contains(k)).ToArray()) {cursors.Remove(deleted);dirty=true;}
+            // Not seeing a file during a partial traversal is not evidence of deletion. Retain
+            // its last numeric ledger until a complete traversal can authoritatively remove it.
+            if(failed==0)foreach(string deleted in cursors.Keys.Where(k=>!active.Contains(k)).ToArray()) {cursors.Remove(deleted);dirty=true;}
             int completed=0; DateTime reported=DateTime.MinValue;
             foreach(FileInfo file in files)
             {
                 if(cancel!=null && cancel()) { SaveCache(true); throw new OperationCanceledException(); }
                 string id=IdFor(file); LogCursor cursor;
                 if(!cursors.TryGetValue(id,out cursor)) { cursor=new LogCursor {Id=id};cursors[id]=cursor;dirty=true; }
-                if(cursor.Path!=file.FullName || cursor.Modified!=file.LastWriteTimeUtc.Ticks || cursor.Length!=file.Length || cursor.Offset<file.Length)
+                if(cursor.Path!=file.FullName || cursor.Created!=file.CreationTimeUtc.Ticks || cursor.Modified!=file.LastWriteTimeUtc.Ticks || cursor.Length!=file.Length || Math.Max(cursor.Offset,cursor.SkippedOffset)<file.Length)
                 {
                     try { ReadFile(cursor,file,cancel);dirty=true; }
                     catch(IOException){failed++;} catch(UnauthorizedAccessException){failed++;}
