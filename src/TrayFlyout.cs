@@ -21,12 +21,17 @@ namespace CodexUserData
         private string contentKey;
         private bool dismissReversible;
         private int revealRevision;
+        private bool hasAnchor;
+        private System.Drawing.Point lastAnchor;
         internal bool Dismissing {get;private set;}
         internal void Reveal(System.Drawing.Point anchor)
         {
             if(Dismissing&&!dismissReversible)return;
+            // A second hover/click can arrive before the first render. Keep that pending
+            // position/reveal callback alive instead of leaving native Opacity at zero.
+            if(IsVisible&&!Dismissing){PositionAt(anchor);return;}
             bool opening=!IsVisible;Dismissing=false;int revision=++revealRevision;
-            if(!opening){PositionAt(anchor);WindowInteraction.Reveal(this);return;}
+            if(!opening){PositionAt(anchor);Opacity=1;WindowInteraction.Reveal(this);return;}
             // Keep the native popup transparent until SizeToContent has produced its real first size.
             // Positioning it again at render priority avoids the initial wrong-monitor/wrong-edge jump.
             Opacity=0;WindowInteraction.PrepareReveal(this);Show();PositionAt(anchor);
@@ -67,7 +72,22 @@ namespace CodexUserData
             var additional=all.Where(b=>b!=general).OrderBy(b=>b.Id).ToArray();
             if(additional.Length>0)
             {
-                var extra=new StackPanel();var expander=new Expander{Header="其他额度 · "+additional.Length,Foreground=Theme.Muted,FontSize=11,IsExpanded=otherExpanded,Margin=new Thickness(0,9,0,0),Content=extra};expander.Expanded+=delegate{otherExpanded=true;};expander.Collapsed+=delegate{otherExpanded=false;};body.Children.Add(expander);
+                var extra=new StackPanel{Visibility=otherExpanded?Visibility.Visible:Visibility.Collapsed};
+                var expander=Theme.Button((otherExpanded?"收起":"展开")+"其他额度 · "+additional.Length,"展开或收起其他额度",120);expander.Margin=new Thickness(0,9,0,0);expander.HorizontalAlignment=HorizontalAlignment.Left;
+                expander.Click+=delegate
+                {
+                    bool expanded=!otherExpanded;
+                    WindowInteraction.ChangeShape(this,delegate
+                    {
+                        // A quota refresh can replace this group during the fade. Never mutate
+                        // a detached group or persist a state that was not actually displayed.
+                        if(!body.Children.Contains(extra))return;
+                        otherExpanded=expanded;extra.Visibility=expanded?Visibility.Visible:Visibility.Collapsed;
+                        expander.Content=(expanded?"收起":"展开")+"其他额度 · "+additional.Length;
+                        UpdateLayout();if(hasAnchor)PositionAt(lastAnchor);
+                    });
+                };
+                body.Children.Add(expander);body.Children.Add(extra);
                 foreach(var bucket in additional)
                 {
                     foreach(var window in new[]{bucket.Primary,bucket.Secondary}.Where(w=>w!=null))
@@ -129,6 +149,7 @@ namespace CodexUserData
         internal bool Contains(System.Drawing.Point point){NativeRect rect;return IsVisible&&GetWindowRect(new WindowInteropHelper(this).Handle,out rect)&&point.X>=rect.Left&&point.X<rect.Right&&point.Y>=rect.Top&&point.Y<rect.Bottom;}
         internal void PositionAt(System.Drawing.Point anchor)
         {
+            lastAnchor=anchor;hasAnchor=true;
             // Place in physical pixels after layout. This avoids mixing logical coordinates between monitors with different DPI.
             UpdateLayout();var handle=new WindowInteropHelper(this).Handle;NativeRect rect;if(!GetWindowRect(handle,out rect))return;
             var work=Forms.Screen.FromPoint(anchor).WorkingArea;int width=rect.Right-rect.Left,height=rect.Bottom-rect.Top;

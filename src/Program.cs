@@ -10,8 +10,8 @@ using System.Windows;
 
 [assembly: System.Reflection.AssemblyTitle("CodexUserData")]
 [assembly: System.Reflection.AssemblyProduct("CodexUserData")]
-[assembly: System.Reflection.AssemblyVersion("1.6.6.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.6.6.0")]
+[assembly: System.Reflection.AssemblyVersion("1.6.10.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.6.10.0")]
 
 namespace CodexUserData
 {
@@ -29,6 +29,7 @@ namespace CodexUserData
         public bool BallMode {get;set;} public bool BallExpanded {get;set;}
         public string BallStyle {get;set;} public string OrbQuotaWindow {get;set;} public string OrbAnimation {get;set;}
         public double OrbSize {get;set;}
+        public double AnimationSpeed {get;set;}
         public string[] OrbShortColors {get;set;} public string[] OrbLongColors {get;set;}
         public double OrbShortAngle {get;set;} public double OrbLongAngle {get;set;}
         public bool StartWithWindows {get;set;} public bool StartWithCodex {get;set;}
@@ -47,7 +48,7 @@ namespace CodexUserData
         {
             string user=Environment.GetEnvironmentVariable("USERPROFILE") ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
             BallLeft=Double.NaN;BallTop=Double.NaN;BallDock="";
-            BallOpacity=1;OrbFollowTheme=true;CompletionFlash=true;BallStyle="orb";OrbQuotaWindow="auto";OrbAnimation="auto";OrbSize=84;
+            BallOpacity=1;OrbFollowTheme=true;CompletionFlash=true;BallStyle="orb";OrbQuotaWindow="auto";OrbAnimation="auto";OrbSize=84;AnimationSpeed=1;
             OrbShortColors=new[]{"#316BF1","#5F97FF","#89CDEC"};OrbLongColors=new[]{"#7965EA","#AB8DF0","#E2B0ED"};OrbShortAngle=OrbLongAngle=45;
             ThemeMode="dark";ThemeBase="auto";GradientKind="linear";GradientSpread="pad";GradientColors=new[]{"#F7BBE3","#E6D7FA","#AAF1ED"};GradientStops=new[]{0d,48d,100d};GradientAngle=120;GradientSpan=100;GradientCenterX=50;GradientCenterY=35;GradientRadius=80;GradientStrength=85;ThemeCardOpacity=82;
             PriceOverrides=new Dictionary<string,decimal[]>();KnownModels=new string[0];

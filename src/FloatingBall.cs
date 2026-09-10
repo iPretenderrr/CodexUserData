@@ -10,6 +10,7 @@ using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 
 namespace CodexUserData
@@ -36,6 +37,7 @@ namespace CodexUserData
         private UsageSnapshot usage;
         private string source="",quotaStamp="",dock="",valuesKey;
         private bool dragging,disposing;
+        private DockTransition dockMotion;
         private string builtShape;
         private double dockAnchor;
         internal bool Expanded {get{return preferences().BallStyle=="capsule"&&preferences().BallExpanded;}}
@@ -53,11 +55,12 @@ namespace CodexUserData
             preferences=get;save=persist;restore=showMain;exit=quit;
             Title="今日用量悬浮球";ShowInTaskbar=false;ShowActivated=false;Topmost=true;ResizeMode=ResizeMode.NoResize;WindowStyle=WindowStyle.None;AllowsTransparency=true;Background=Brushes.Transparent;
             FontFamily=new FontFamily("Segoe UI, Microsoft YaHei UI");UseLayoutRounding=true;Theme.InstallStyles(this);WindowInteraction.EnableMotion(this);
-            shell=new Border{Background=Theme.WindowBackground,BorderBrush=Theme.Frame,BorderThickness=new Thickness(1),CornerRadius=new CornerRadius(22),Padding=new Thickness(12,9,10,9)};Content=shell;
+            // Keep completion breathing separate from visibility/shape transition clocks.
+            shell=new Border{Background=Theme.WindowBackground,BorderBrush=Theme.Frame,BorderThickness=new Thickness(1),CornerRadius=new CornerRadius(22),Padding=new Thickness(12,9,10,9)};Content=new Border{Child=shell};
             var menu=Theme.Menu();
             AddMenu(menu,"光环 · 圆形额度球",SetOrb);
             AddMenu(menu,"小形态 · 仅今日 Tokens",()=>SetExpanded(false));AddMenu(menu,"大形态 · 额度与今日 Tokens",()=>SetExpanded(true));
-            AddMenu(menu,"自定义 HTML 形态",SetCustom);AddMenu(menu,"重新载入自定义形态",()=>{if(IsCustom){builtShape=null;Build();}});
+            AddMenu(menu,"自定义 HTML 形态",SetCustom);AddMenu(menu,"重新载入自定义形态",()=>{if(IsCustom)WindowInteraction.ChangeShape(this,()=>{builtShape=null;Build();});});
             AddMenu(menu,"形态设置",()=>{if(SettingsRequested!=null)SettingsRequested();});
             AddMenu(menu,"返回完整窗口",restore);AddMenu(menu,"退出软件",exit);shell.ContextMenu=menu;
             shell.MouseLeftButtonDown+=Drag;
@@ -78,7 +81,7 @@ namespace CodexUserData
                 if(dock.Length>0)PositionDock();else Clamp();SavePosition();
             };
             Closing+=delegate(object sender,System.ComponentModel.CancelEventArgs e){if(!disposing){e.Cancel=true;restore();}};
-            IsVisibleChanged+=delegate{UpdateActivityMotion();};activityMotionClock.Tick+=delegate{UpdateActivityMotion();};
+            IsVisibleChanged+=delegate{if(!IsVisible)CancelDockMotion();UpdateActivityMotion();};activityMotionClock.Tick+=delegate{UpdateActivityMotion();};
             Build();
         }
         private IntPtr Handle {get{return new WindowInteropHelper(this).Handle;}}
@@ -101,7 +104,7 @@ namespace CodexUserData
         {
             var p=preferences();long now=LocalCodexUsage.Unix(DateTime.Now);
             bool capsule=!IsPillar&&!IsOrb&&!IsCustom&&capsuleChrome!=null,ready=IsPillar&&dockTrack!=null||capsule;
-            bool running=!disposing&&IsVisible&&ready&&activity!=null&&activity.ActiveTasks>0&&activity.Until>now;
+            bool running=!disposing&&dockMotion==null&&IsVisible&&ready&&activity!=null&&activity.ActiveTasks>0&&activity.Until>now;
             int fps=running?Theme.ActivityFrameRate(p.OrbAnimation):0;
             if(fps==activityMotionFps)return;StopActivityMotion();if(fps==0)return;activityMotionFps=fps;
             // Animate paint only: quota length, hit targets and native window coordinates never move.
@@ -127,14 +130,15 @@ namespace CodexUserData
         internal void SetExpanded(bool value)
         {
             if(disposing||dragging)return;
-            preferences().BallStyle="capsule";preferences().BallExpanded=value;dock="";Build();Clamp();SavePosition();
+            CancelDockMotion();WindowInteraction.ChangeShape(this,delegate{preferences().BallStyle="capsule";preferences().BallExpanded=value;dock="";Build();Clamp();SavePosition();});
         }
-        internal void SetOrb(){if(disposing||dragging)return;preferences().BallStyle="orb";preferences().BallExpanded=false;dock="";Build();Clamp();SavePosition();}
-        internal void SetCustom(){if(disposing||dragging)return;preferences().BallStyle="html";preferences().BallExpanded=false;dock="";builtShape=null;Build();Clamp();SavePosition();}
-        private void DragCustom(){if(disposing||dragging||Mouse.LeftButton!=MouseButtonState.Pressed)return;dragging=true;try{DragMove();}catch(InvalidOperationException){}finally{dragging=false;SnapToEdge();SavePosition();}}
+        internal void SetOrb(){if(disposing||dragging)return;CancelDockMotion();WindowInteraction.ChangeShape(this,delegate{preferences().BallStyle="orb";preferences().BallExpanded=false;dock="";Build();Clamp();SavePosition();});}
+        internal void SetCustom(){if(disposing||dragging)return;CancelDockMotion();WindowInteraction.ChangeShape(this,delegate{preferences().BallStyle="html";preferences().BallExpanded=false;dock="";builtShape=null;Build();Clamp();SavePosition();});}
+        private void DragCustom(){if(disposing||dragging||Mouse.LeftButton!=MouseButtonState.Pressed)return;CancelTransition();dragging=true;try{DragMove();}catch(InvalidOperationException){}finally{dragging=false;SnapToEdge();SavePosition();}}
         private void ResizeCustom(double width,double height){if(!IsCustom||dragging)return;Width=Theme.Bound(width,64,800,240);Height=Theme.Bound(height,40,600,90);Clamp();}
         private void Build()
         {
+            if(dockMotion!=null)return; // Usage refreshes must not replace a shape during its transition.
             string valid=NormalizeDock(dock);if(valid!=dock){dock=valid;preferences().BallExpanded=false;}
             bool pillar=IsPillar,large=!pillar&&Expanded,circle=IsOrb,horizontal=dock=="top"||dock=="bottom";
             double size=Theme.Bound(preferences().OrbSize,56,128,84);
@@ -233,6 +237,7 @@ namespace CodexUserData
             DependencyObject node=e.OriginalSource as DependencyObject;while(node!=null&&node!=shell){if(node is ButtonBase)return;var text=node as FrameworkContentElement;node=text!=null?text.Parent:VisualTreeHelper.GetParent(node);}
             if(e.ChangedButton!=MouseButton.Left)return;e.Handled=true;
             if(e.ClickCount==2){if(IsOrb)restore();else if(!IsPillar)SetExpanded(!Expanded);return;}
+            WindowInteraction.CompleteReveal(this);
             NativeRect before;GetWindowRect(Handle,out before);bool circleClick=IsOrb;
             dragging=true;if(orb!=null)orb.SetPressed(true);
             // Keep the current shape throughout the native drag. Only settle once on release,
@@ -252,13 +257,42 @@ namespace CodexUserData
         }
         internal void SnapToEdge()
         {
-            if(Handle==IntPtr.Zero)return;NativeRect r;GetWindowRect(Handle,out r);var area=WorkArea();
+            if(Handle==IntPtr.Zero||disposing)return;CancelDockMotion();WindowInteraction.CompleteReveal(this);NativeRect r;GetWindowRect(Handle,out r);var area=WorkArea();
             int side=DockEdge(new Rect(r.Left,r.Top,r.Right-r.Left,r.Bottom-r.Top),new Rect(area.Left,area.Top,area.Right-area.Left,area.Bottom-area.Top),Scale);
             bool wasDocked=IsPillar;
-            dock=side>=0?new[]{"left","right","top","bottom"}[side]:"";
-            // Docking forgets the large state; every undock deterministically returns to small.
-            if(wasDocked||dock.Length>0)preferences().BallExpanded=false;
-            dockAnchor=side<2?(r.Top+r.Bottom)/2.0:(r.Left+r.Right)/2.0;Build();if(dock.Length>0)PositionDock();else Clamp();
+            double anchor=side<2?(r.Top+r.Bottom)/2.0:(r.Left+r.Right)/2.0;
+            Action settle=delegate
+            {
+                dockMotion=null;if(disposing)return;
+                dock=side>=0?new[]{"left","right","top","bottom"}[side]:"";
+                // Docking forgets the large state; every undock deterministically returns to small.
+                if(wasDocked||dock.Length>0)preferences().BallExpanded=false;
+                dockAnchor=anchor;Build();if(dock.Length>0)PositionDock();else Clamp();SavePosition();
+            };
+            int fps=Theme.ActivityFrameRate(preferences().OrbAnimation);
+            if(side>=0&&!wasDocked&&IsVisible&&fps>0)
+            {
+                double scale=Scale;Rect final=DockBounds(side,anchor,new Rect(area.Left,area.Top,area.Right-area.Left,area.Bottom-area.Top),scale);
+                Rect track=final;if(side==0)track.Width=6*scale;else if(side==1){track.X=final.Right-6*scale;track.Width=6*scale;}else if(side==2)track.Height=6*scale;else{track.Y=final.Bottom-6*scale;track.Height=6*scale;}
+                dockMotion=new DockTransition(this,(FrameworkElement)Content,settle);StopActivityMotion();
+                dockMotion.Begin(new Rect(r.Left,r.Top,r.Right-r.Left,r.Bottom-r.Top),track,side,DockPreview(side,scale),fps,IsCustom);
+            }
+            else if(wasDocked&&(side<0||dock!=new[]{"left","right","top","bottom"}[side]))WindowInteraction.ChangeShape(this,settle);
+            else settle();
+        }
+        internal void CancelTransition(){CancelDockMotion();WindowInteraction.CompleteReveal(this);}
+        private void CancelDockMotion(){var motion=dockMotion;dockMotion=null;if(motion!=null)motion.Dispose();}
+        private BitmapSource DockPreview(int side,double scale)
+        {
+            bool horizontal=side>=2;long now=LocalCodexUsage.Unix(DateTime.Now);
+            var selected=preferences().BallStyle=="orb"?QuotaOrb.SelectWindow(bucket,preferences().OrbQuotaWindow):bucket==null?null:bucket.Secondary??bucket.Primary;
+            double fraction=RemainingFraction(bucket,selected,now),width=horizontal?80:6,height=horizontal?6:80;
+            var visual=new DrawingVisual();using(var dc=visual.RenderOpen())
+            {
+                dc.DrawRoundedRectangle(Theme.B("#50828F9E"),null,new Rect(0,0,width,height),4,4);
+                if(fraction>0)dc.DrawRoundedRectangle(OrbPalette.ForBar(preferences(),selected!=null&&selected.Minutes>=1440,!horizontal),null,horizontal?new Rect(0,0,width*fraction,height):new Rect(0,height*(1-fraction),width,height*fraction),4,4);
+            }
+            var image=new RenderTargetBitmap((int)Math.Ceiling(width*scale),(int)Math.Ceiling(height*scale),96*scale,96*scale,PixelFormats.Pbgra32);image.Render(visual);image.Freeze();return image;
         }
         internal static int DockEdge(Rect window,Rect work,double scale)
         {
@@ -269,10 +303,15 @@ namespace CodexUserData
         }
         private void PositionDock()
         {
-            if(Handle==IntPtr.Zero||dock.Length==0)return;var area=WorkArea();int w=(int)Math.Round(Width*Scale),h=(int)Math.Round(Height*Scale);
-            int x=dock=="left"?area.Left:dock=="right"?area.Right-w:(int)dockAnchor-w/2;
-            int y=dock=="top"?area.Top:dock=="bottom"?area.Bottom-h:(int)dockAnchor-h/2;
-            Place(Math.Max(area.Left,Math.Min(area.Right-w,x)),Math.Max(area.Top,Math.Min(area.Bottom-h,y)));
+            if(Handle==IntPtr.Zero||dock.Length==0)return;var area=WorkArea();
+            Rect target=DockBounds(Array.IndexOf(new[]{"left","right","top","bottom"},dock),dockAnchor,new Rect(area.Left,area.Top,area.Right-area.Left,area.Bottom-area.Top),Scale);Place((int)target.X,(int)target.Y);
+        }
+        internal static Rect DockBounds(int side,double anchor,Rect area,double scale)
+        {
+            bool horizontal=side>=2;int w=(int)Math.Round((horizontal?80:16)*scale),h=(int)Math.Round((horizontal?16:80)*scale);
+            double x=side==0?area.Left:side==1?area.Right-w:(int)anchor-w/2;
+            double y=side==2?area.Top:side==3?area.Bottom-h:(int)anchor-h/2;
+            return new Rect(Math.Max(area.Left,Math.Min(area.Right-w,x)),Math.Max(area.Top,Math.Min(area.Bottom-h,y)),w,h);
         }
         private void Clamp()
         {
@@ -284,7 +323,7 @@ namespace CodexUserData
         {
             NativeRect r;if(Handle!=IntPtr.Zero&&GetWindowRect(Handle,out r)){var p=preferences();p.BallLeft=r.Left;p.BallTop=r.Top;p.BallDock=dock;save();}
         }
-        public void Dispose(){disposing=true;StopActivityMotion();if(orb!=null)orb.Dispose();if(custom!=null)custom.Dispose();Close();}
+        public void Dispose(){disposing=true;CancelDockMotion();StopActivityMotion();if(orb!=null)orb.Dispose();if(custom!=null)custom.Dispose();Close();}
     }
 
     // A single paint layer for both capsule sizes. Cached pens and perimeter samples avoid

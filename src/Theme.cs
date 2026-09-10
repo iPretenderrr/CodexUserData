@@ -91,10 +91,14 @@ namespace CodexUserData
             m.Opened+=delegate
             {
                 m.BeginAnimation(UIElement.OpacityProperty,null);m.Opacity=1;
+                var scale=new ScaleTransform(1,1);m.RenderTransformOrigin=new Point(.5,0);m.RenderTransform=scale;
                 if(!SystemParameters.MenuAnimation||!MotionAllowed)return;
-                var fade=new System.Windows.Media.Animation.DoubleAnimation(0,1,TimeSpan.FromMilliseconds(120)){EasingFunction=new System.Windows.Media.Animation.CubicEase{EasingMode=System.Windows.Media.Animation.EasingMode.EaseOut}};
+                var fade=new System.Windows.Media.Animation.DoubleAnimation(0,1,Theme.MotionTime(120)){EasingFunction=new System.Windows.Media.Animation.CubicEase{EasingMode=System.Windows.Media.Animation.EasingMode.EaseOut}};
                 System.Windows.Media.Animation.Timeline.SetDesiredFrameRate(fade,MotionFrameRate);m.BeginAnimation(UIElement.OpacityProperty,fade);
+                var grow=new System.Windows.Media.Animation.DoubleAnimation(.94,1,Theme.MotionTime(150)){EasingFunction=new System.Windows.Media.Animation.CubicEase{EasingMode=System.Windows.Media.Animation.EasingMode.EaseOut}};
+                System.Windows.Media.Animation.Timeline.SetDesiredFrameRate(grow,MotionFrameRate);scale.BeginAnimation(ScaleTransform.ScaleXProperty,grow);scale.BeginAnimation(ScaleTransform.ScaleYProperty,grow);
             };
+            m.Closed+=delegate{m.BeginAnimation(UIElement.OpacityProperty,null);m.Opacity=1;m.RenderTransform=Transform.Identity;};
             return m;
         }
         internal static TextBox Input(string text){return new TextBox{Text=text,Background=Surface,Foreground=Ink,BorderBrush=Line,BorderThickness=new Thickness(1),Padding=new Thickness(8,6,8,6),FontSize=12,CaretBrush=Accent};}

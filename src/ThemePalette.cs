@@ -26,6 +26,9 @@ namespace CodexUserData
         internal static bool IsLight {get;private set;}
         private static string motionMode="auto";
         internal static string MotionMode {get{return motionMode;}private set{motionMode=value;}}
+        private static double animationSpeed=1;
+        internal static double AnimationSpeed {get{return animationSpeed;}private set{animationSpeed=value;}}
+        internal static TimeSpan MotionTime(double milliseconds){return TimeSpan.FromMilliseconds(milliseconds/AnimationSpeed);}
         internal static bool MotionAllowed {get{return MotionMode!="off"&&SystemParameters.ClientAreaAnimation&&!SystemParameters.HighContrast&&(RenderCapability.Tier>>16)>0;}}
         internal static int MotionFrameRate {get{return MotionMode=="eco"?30:(RenderCapability.Tier>>16)>=2?60:30;}}
         internal static int ActivityFrameRate(string mode)
@@ -42,6 +45,7 @@ namespace CodexUserData
         internal static double Bound(double n,double min,double max,double fallback){return Double.IsNaN(n)||Double.IsInfinity(n)?fallback:Math.Max(min,Math.Min(max,n));}
         internal static void Normalize(Preferences p)
         {
+            p.AnimationSpeed=Bound(p.AnimationSpeed,.5,2,1);
             if(!new[]{"dark","light","custom"}.Contains(p.ThemeMode))p.ThemeMode="dark";
             if(!new[]{"auto","light","dark"}.Contains(p.ThemeBase))p.ThemeBase="auto";
             if(!new[]{"linear","radial"}.Contains(p.GradientKind))p.GradientKind="linear";
@@ -68,7 +72,7 @@ namespace CodexUserData
         private static void Paint(DrawingBrush b,Brush paint){var d=new GeometryDrawing(paint,null,new RectangleGeometry(new Rect(0,0,1,1)));d.Freeze();b.Drawing=d;}
         internal static void Apply(Preferences p)
         {
-            Normalize(p);MotionMode=new[]{"auto","smooth","eco","off"}.Contains(p.OrbAnimation)?p.OrbAnimation:"auto";string key=p.ThemeMode+"/"+p.ThemeBase+"/"+p.GradientKind+"/"+p.GradientSpread+"/"+String.Join(",",p.GradientColors)+"/"+String.Join(",",p.GradientStops)+"/"+p.GradientAngle+"/"+p.GradientCenterX+"/"+p.GradientCenterY+"/"+p.GradientRadius+"/"+p.GradientStrength+"/"+p.ThemeCardOpacity+"/"+MotionMode;
+            Normalize(p);AnimationSpeed=p.AnimationSpeed;MotionMode=new[]{"auto","smooth","eco","off"}.Contains(p.OrbAnimation)?p.OrbAnimation:"auto";string key=p.ThemeMode+"/"+p.ThemeBase+"/"+p.GradientKind+"/"+p.GradientSpread+"/"+String.Join(",",p.GradientColors)+"/"+String.Join(",",p.GradientStops)+"/"+p.GradientAngle+"/"+p.GradientCenterX+"/"+p.GradientCenterY+"/"+p.GradientRadius+"/"+p.GradientStrength+"/"+p.ThemeCardOpacity+"/"+MotionMode;
             key+="/"+p.GradientSpan;if(key==appliedKey)return;appliedKey=key;bool custom=p.ThemeMode=="custom";
             double luminance=p.GradientColors.Select(c=>{var col=ColorOf(c);return (.2126*col.R+.7152*col.G+.0722*col.B)/255;}).Average();
             IsLight=p.ThemeMode=="light"||(custom&&(p.ThemeBase=="light"||p.ThemeBase=="auto"&&luminance>.6));

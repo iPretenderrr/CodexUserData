@@ -261,7 +261,10 @@ namespace CodexUserData
         }
         private static void Render(System.Windows.Window window)
         {
-            var content=window.Content as System.Windows.UIElement;
+            // App windows retain a separate outer motion host across every form. Clearing a
+            // completion clock must never clear the host's entrance/exit opacity animation.
+            var host=window.Content as System.Windows.Controls.Decorator;
+            var content=host==null?null:host.Child;
             if(content==null)return;
             content.BeginAnimation(System.Windows.UIElement.OpacityProperty,null);
             if(!(bool)window.GetValue(PendingProperty)||!window.IsVisible||window.WindowState==System.Windows.WindowState.Minimized||!System.Windows.SystemParameters.ClientAreaAnimation)return;

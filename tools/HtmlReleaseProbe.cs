@@ -28,7 +28,7 @@ internal static class HtmlReleaseProbe
     {
         var match=Regex.Match(map,@"CodexUserData\."+Regex.Escape(type)+"::"+Regex.Escape(name)+@" -> ([^\r\n]+)");
         if(!match.Success||instance==null)return null;
-        var owner=T(type);Type expected=name=="custom"?T("CustomShapeView"):typeof(string);
+        var owner=T(type);Type expected=name=="custom"?T("CustomShapeView"):name=="shell"?typeof(Border):typeof(string);
         return owner.GetFields(BindingFlags.Instance|BindingFlags.Public|BindingFlags.NonPublic).Single(f=>f.DeclaringType==owner&&f.Name==match.Groups[1].Value.Trim()&&f.FieldType==expected).GetValue(instance);
     }
     static U Find<U>(DependencyObject root) where U:DependencyObject
@@ -54,12 +54,15 @@ internal static class HtmlReleaseProbe
         string value="";while(!value.Contains("246")){if(DateTime.UtcNow>until)throw new Exception("Protected HTML never received numeric snapshot: "+value);try{value=await web.ExecuteScriptAsync("document.getElementById('value')?.textContent??''");}catch(ObjectDisposedException ex){var custom=Field("FloatingBall",ball,"custom");throw new Exception("Protected HTML renderer was disposed at "+Convert.ToString(Field("CustomShapeView",custom,"LoadStage"))+": "+Convert.ToString(Field("CustomShapeView",custom,"LastError")),ex);}await Task.Delay(100);}
         Check(value.Contains("246"),"actual protected HTML host publishes its versioned data contract");
         Check(web.DefaultBackgroundColor.A==0&&ball.Width==240&&ball.Height==84,"protected browser renderer keeps transparent background and manifest dimensions");
-        var menu=((Border)ball.Content).ContextMenu;
+        var menu=((Border)Field("FloatingBall",ball,"shell")).ContextMenu;
         var right=new MouseButtonEventArgs(Mouse.PrimaryDevice,0,MouseButton.Right){RoutedEvent=Mouse.PreviewMouseDownEvent,Source=web};web.RaiseEvent(right);
         Check(right.Handled&&menu.IsOpen,"protected host retains native right-click routing");
         menu.Items.OfType<MenuItem>().Single(m=>Convert.ToString(m.Header)=="返回完整窗口").RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));Check(restored,"protected native menu returns to the main UI");menu.IsOpen=false;
         await web.ExecuteScriptAsync("chrome.webview.postMessage({type:'resize',width:312,height:96})");await Task.Delay(120);Check(ball.Width==312&&ball.Height==96,"protected page-to-host commands survive string hiding");
-        Call("FloatingBall",ball,"SetOrb");Check(Find<WebView2CompositionControl>(ball)==null,"protected form switch removes its browser renderer");
+        Call("FloatingBall",ball,"SetOrb");
+        // Shape changes now commit at the fade midpoint; wait for that lifecycle boundary.
+        var switchDeadline=DateTime.UtcNow.AddSeconds(2);while(Find<WebView2CompositionControl>(ball)!=null&&DateTime.UtcNow<switchDeadline)await Task.Delay(30);
+        Check(Find<WebView2CompositionControl>(ball)==null,"protected form switch removes its browser renderer");
         ((IDisposable)ball).Dispose();ball=null;File.WriteAllText(Path.Combine(output,"html-verification.json"),"{\"passed\":true,\"checks\":"+checks+"}");
     }
     [STAThread]static int Main(string[] args)

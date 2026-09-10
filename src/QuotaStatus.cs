@@ -65,8 +65,8 @@ namespace CodexUserData
                 tray=new Forms.NotifyIcon{Visible=true,Text="CodexUserData · 用量悬浮窗",Icon=Drawing.SystemIcons.Information};
                 var menu=new Forms.ContextMenuStrip();menu.Items.Add("额度与今日用量",null,delegate{Dispatcher.BeginInvoke(new Action(()=>ShowFlyout()));});menu.Items.Add("显示 / 隐藏悬浮窗",null,delegate{Dispatcher.BeginInvoke(toggle);});
                 menu.Items.Add("立即刷新额度",null,delegate{Dispatcher.BeginInvoke(new Action(Refresh));});
-                menu.Items.Add("退出",null,delegate{Dispatcher.BeginInvoke(exit);});tray.ContextMenuStrip=menu;
-                tray.DoubleClick+=delegate{Dispatcher.BeginInvoke(new Action(()=>{if(flyout!=null)flyout.Dismiss();hoverTimer.Stop();toggle();}));};
+                menu.Items.Add("退出",null,delegate{Dispatcher.BeginInvoke(new Action(()=>{if(flyout!=null)flyout.Dismiss(exit);else exit();}));});tray.ContextMenuStrip=menu;
+                tray.DoubleClick+=delegate{Dispatcher.BeginInvoke(new Action(()=>{hoverTimer.Stop();if(flyout!=null)flyout.Dismiss(toggle);else toggle();}));};
                 tray.MouseMove+=delegate{AcknowledgeCompletion();if(!hoverTimer.IsEnabled){anchor=Forms.Cursor.Position;hoverStarted=lastInside=DateTime.UtcNow;hoverTimer.Start();}};
                 tray.MouseClick+=delegate(object sender,Forms.MouseEventArgs e){if(e.Button==Forms.MouseButtons.Left&&e.Clicks==1)Dispatcher.BeginInvoke(new Action(()=>ShowFlyout()));};
             }

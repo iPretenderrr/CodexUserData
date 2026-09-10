@@ -32,6 +32,7 @@
 !/src/CustomShape.cs
 !/src/Dashboard.cs
 !/src/FloatingBall.cs
+!/src/DockTransition.cs
 !/src/LocalCodexUsage.cs
 !/src/OrbAppearance.cs
 !/src/PortableServices.cs

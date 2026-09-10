@@ -70,6 +70,13 @@ namespace CodexUserData
             Label(floating,"界面与光环动画");
             var orbMotion=new ChoiceButton(new Dictionary<string,string>{{"auto","自动 · 按设备性能调节"},{"smooth","流畅 · 最高 60 帧"},{"eco","节能 · 最高 30 帧"},{"off","关闭动画"}},"界面与光环动画档位");orbMotion.Select(draft.OrbAnimation);orbMotion.Changed+=v=>draft.OrbAnimation=v;floating.Children.Add(orbMotion);
             Note(floating,"统一控制窗口过渡、菜单、圆环、托盘呼吸和贴边脉冲；关闭后保留静态状态反馈。",Theme.Muted);
+            Label(floating,"动画速率 · 界面过渡");
+            var speedRow=new DockPanel();var speedLabel=Theme.Text(draft.AnimationSpeed.ToString("0.0",System.Globalization.CultureInfo.InvariantCulture)+"×",12,Theme.Accent);speedRow.Children.Add(speedLabel);
+            var resetSpeed=Theme.Button("恢复 1×","恢复默认动画速率",90);DockPanel.SetDock(resetSpeed,Dock.Right);speedRow.Children.Insert(0,resetSpeed);floating.Children.Add(speedRow);
+            var speed=new Slider{Minimum=.5,Maximum=2,Value=draft.AnimationSpeed,TickFrequency=.1,IsSnapToTickEnabled=true,Margin=new Thickness(0,8,0,0)};
+            System.Windows.Automation.AutomationProperties.SetName(speed,"动画速率");System.Windows.Automation.AutomationProperties.SetAutomationId(speed,"AnimationSpeed");
+            speed.ValueChanged+=delegate{draft.AnimationSpeed=speed.Value;speedLabel.Text=speed.Value.ToString("0.0",System.Globalization.CultureInfo.InvariantCulture)+"×";Theme.Apply(draft);};resetSpeed.Click+=delegate{speed.Value=1;};floating.Children.Add(speed);
+            Note(floating,"0.5× 更舒缓，1× 默认，2× 更利落。控制吸附、展开、形态切换和窗口开关；帧率由上方动画档位决定。",Theme.Muted);
             var completion=new CheckBox{Content="任务完成后闪烁提示",IsChecked=draft.CompletionFlash,Foreground=Theme.Ink,Margin=new Thickness(0,16,0,5)};floating.Children.Add(completion);completion.Checked+=delegate{draft.CompletionFlash=true;};completion.Unchecked+=delegate{draft.CompletionFlash=false;};
             Note(floating,"明确完成后持续闪烁，鼠标移入悬浮窗或托盘确认。任务状态仍可能受日志落盘延迟影响。",Theme.Muted);
             AddPage("floating",floating);
@@ -173,7 +180,7 @@ namespace CodexUserData
             {
                 var page=pages[key];var shift=new TranslateTransform(7,0);page.RenderTransform=shift;page.Opacity=1;
                 var ease=new System.Windows.Media.Animation.CubicEase{EasingMode=System.Windows.Media.Animation.EasingMode.EaseOut};
-                var fade=new System.Windows.Media.Animation.DoubleAnimation(0,1,TimeSpan.FromMilliseconds(150)){EasingFunction=ease};var slide=new System.Windows.Media.Animation.DoubleAnimation(7,0,TimeSpan.FromMilliseconds(170)){EasingFunction=ease};
+                var fade=new System.Windows.Media.Animation.DoubleAnimation(0,1,Theme.MotionTime(150)){EasingFunction=ease};var slide=new System.Windows.Media.Animation.DoubleAnimation(7,0,Theme.MotionTime(170)){EasingFunction=ease};
                 int fps=Theme.MotionFrameRate;System.Windows.Media.Animation.Timeline.SetDesiredFrameRate(fade,fps);System.Windows.Media.Animation.Timeline.SetDesiredFrameRate(slide,fps);page.BeginAnimation(OpacityProperty,fade);shift.BeginAnimation(TranslateTransform.XProperty,slide);
             }
         }

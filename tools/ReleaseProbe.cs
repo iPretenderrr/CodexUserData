@@ -101,6 +101,138 @@ internal static class ReleaseProbe
   int changed=0,count=0;for(int y=8;y<height-8;y++)for(int x=12;x<width-12;x++){int n=(y*width+x)*4;count++;if(Math.Abs(a[n]-b[n])+Math.Abs(a[n+1]-b[n+1])+Math.Abs(a[n+2]-b[n+2])>24)changed++;}
   return changed>count*.25;
  }
+ static void Pump(int milliseconds)
+ {
+  var frame=new System.Windows.Threading.DispatcherFrame();var timer=new System.Windows.Threading.DispatcherTimer{Interval=TimeSpan.FromMilliseconds(milliseconds)};
+  timer.Tick+=delegate{timer.Stop();frame.Continue=false;};timer.Start();System.Windows.Threading.Dispatcher.PushFrame(frame);
+ }
+ static bool WaitForUi(Func<bool> ready)
+ {
+  var clock=System.Diagnostics.Stopwatch.StartNew();while(!ready()&&clock.ElapsedMilliseconds<2500)Pump(40);return ready();
+ }
+ static void DockRegression(object prefs,Delegate getPrefs,string dir)
+ {
+  var area=SystemParameters.WorkArea;Set(prefs,"BallStyle","capsule");Set(prefs,"BallDock","");Set(prefs,"BallExpanded",true);Set(prefs,"OrbAnimation","smooth");
+  for(int side=0;side<4;side++)
+  {
+   foreach(double scale in new[]{1d,1.5d,2d})
+   {
+    var work=new Rect(-1920,0,1920,1080);var dock=(Rect)Call("FloatingBall",null,"DockBounds",side,500d,work,scale);
+    Check(work.Contains(dock)&&(side==0?dock.Left==work.Left:side==1?dock.Right==work.Right:side==2?dock.Top==work.Top:dock.Bottom==work.Bottom),"dock endpoint is flush on edge "+side+" at scale "+scale);
+   }
+   Set(prefs,"BallDock","");var ball=(Window)New("FloatingBall",getPrefs,new Action(()=>{}),new Action(()=>{}),new Action(()=>{}));ball.Show();
+   ball.Left=side==0?area.Left+8:side==1?area.Right-ball.Width-8:area.Left+area.Width/2;
+   ball.Top=side==2?area.Top+8:side==3?area.Bottom-ball.Height-8:area.Top+area.Height/2;
+   Pump(240);Call("FloatingBall",ball,"SnapToEdge");
+   Check(((FrameworkElement)ball.Content).Visibility==Visibility.Hidden,"edge "+side+" morph hides the live source while retaining its snapshot");
+   Pump(650);
+   Check((bool)Call("FloatingBall",ball,"get_IsPillar")&&((FrameworkElement)ball.Content).Visibility==Visibility.Visible,"edge "+side+" morph settles to a visible dock strip");
+   Check(!Application.Current.Windows.Cast<Window>().Any(w=>w.Title=="CodexUserData 吸附过渡"),"edge "+side+" morph releases its overlay");
+   ((IDisposable)ball).Dispose();
+  }
+  Set(prefs,"BallDock","");var interrupted=(Window)New("FloatingBall",getPrefs,new Action(()=>{}),new Action(()=>{}),new Action(()=>{}));interrupted.Show();interrupted.Left=area.Left+8;interrupted.Top=area.Top+area.Height/2;Pump(240);
+  Call("FloatingBall",interrupted,"SnapToEdge");Call("FloatingBall",interrupted,"SetExpanded",false);Pump(600);
+  Check(!(bool)Call("FloatingBall",interrupted,"get_IsPillar")&&((FrameworkElement)interrupted.Content).Visibility==Visibility.Visible,"changing form cancels docking without a late callback or hidden content");
+  Call("FloatingBall",interrupted,"SnapToEdge");interrupted.Hide();Pump(600);
+  Check(!Application.Current.Windows.Cast<Window>().Any(w=>w.Title=="CodexUserData 吸附过渡"),"hiding during docking leaves no overlay");((IDisposable)interrupted).Dispose();
+  // Synthetic image only; diagnostic frames never contain a user's session or desktop.
+  var drawing=new DrawingVisual();using(var dc=drawing.RenderOpen()){dc.DrawRoundedRectangle(Brushes.CornflowerBlue,null,new Rect(0,0,240,90),16,16);dc.DrawEllipse(Brushes.Aquamarine,null,new Point(70,45),23,23);}
+  var image=new RenderTargetBitmap(240,90,96,96,PixelFormats.Pbgra32);image.Render(drawing);image.Freeze();
+  for(int side=0;side<4;side++)
+  {
+   var from=new Rect(90,110,240,90);var target=side==0?new Rect(0,115,6,80):side==1?new Rect(414,115,6,80):side==2?new Rect(170,0,80,6):new Rect(170,304,80,6);
+   var morph=(FrameworkElement)New("DockMorph",image,image,from,target,side,64);morph.Width=420;morph.Height=310;
+   var property=(DependencyProperty)morph.GetType().GetFields(BindingFlags.Static|BindingFlags.NonPublic|BindingFlags.Public).Single(f=>f.FieldType==typeof(DependencyProperty)).GetValue(null);
+   var sheet=new DrawingVisual();using(var dc=sheet.RenderOpen())for(int frame=0;frame<5;frame++)
+   {
+    double t=frame/4d;morph.SetValue(property,t);morph.Measure(new Size(420,310));morph.Arrange(new Rect(0,0,420,310));morph.UpdateLayout();
+    var bitmap=new RenderTargetBitmap(420,310,96,96,PixelFormats.Pbgra32);bitmap.Render(morph);dc.DrawImage(bitmap,new Rect(frame*420,0,420,310));
+    var first=(Rect)Call("DockMorph",morph,"SliceBounds",0d,1d,t);Check(first.Width>0&&first.Height>0,"edge "+side+" funnel stays nondegenerate at progress "+t);
+   }
+   var output=new RenderTargetBitmap(2100,310,96,96,PixelFormats.Pbgra32);output.Render(sheet);var png=new PngBitmapEncoder();png.Frames.Add(BitmapFrame.Create(output));using(var file=File.Create(Path.Combine(dir,"dock-morph-"+side+".png")))png.Save(file);
+  }
+ }
+ static void TransitionRegression(object prefs,Delegate getPrefs)
+ {
+  Set(prefs,"AnimationSpeed",1.7d);var clone=Call("Preferences",prefs,"Clone");Check(Math.Abs((double)Get(clone,"AnimationSpeed")-1.7)<.001,"animation speed survives protected settings serialization");
+  Set(prefs,"AnimationSpeed",2d);Call("Theme",null,"Apply",prefs);Check(((TimeSpan)Call("Theme",null,"MotionTime",400d)).TotalMilliseconds==200,"2x animation speed halves transition duration");
+  Set(prefs,"AnimationSpeed",.5d);Call("Theme",null,"Apply",prefs);Check(((TimeSpan)Call("Theme",null,"MotionTime",400d)).TotalMilliseconds==800,"0.5x animation speed doubles transition duration");
+  Set(prefs,"AnimationSpeed",Double.NaN);Call("Theme",null,"Normalize",prefs);Check((double)Get(prefs,"AnimationSpeed")==1,"invalid animation speed recovers to the default");
+  Set(prefs,"AnimationSpeed",1d);Set(prefs,"OrbAnimation","smooth");Call("Theme",null,"Apply",prefs);
+  var a=new Window{Width=340,Height=100,ShowActivated=false,ShowInTaskbar=false,Content=new Border{Background=Brushes.SlateBlue}};
+  var b=new Window{Width=500,Height=300,ShowActivated=false,ShowInTaskbar=false,Content=new Border{Background=Brushes.CornflowerBlue}};
+  Call("WindowInteraction",null,"EnableMotion",a);Call("WindowInteraction",null,"EnableMotion",b);a.Show();Pump(240);
+  int changes=0;Call("WindowInteraction",null,"ChangeShape",a,new Action(()=>{changes++;a.Width=174;}));Check(changes==0,"shape mutation waits for the transparent midpoint");
+  Check(WaitForUi(()=>changes==1&&a.Width==174&&((FrameworkElement)a.Content).Opacity==1),"shrink-to-small finishes once and restores visible content");
+  Call("WindowInteraction",null,"ChangeShape",a,new Action(()=>{changes++;a.Width=340;}));Pump(450);Check(a.Width==340,"small-to-large expansion reaches the requested size");
+  Call("WindowInteraction",null,"ChangeShape",a,new Action(()=>{a.Width=200;}));Call("WindowInteraction",null,"ChangeShape",a,new Action(()=>{a.Width=280;}));Pump(450);Check(a.Width==280,"rapid shape changes honor only the last request");
+  Call("WindowInteraction",null,"ChangeShape",a,new Action(()=>{a.Width=400;}));Call("WindowInteraction",null,"Hide",a,null);Pump(450);Check(!a.IsVisible&&a.Width==280,"hiding cancels a pending shape mutation");
+  a.Show();Pump(240);int prepared=0;Call("WindowInteraction",null,"ShowFrom",b,a,new Action(()=>{prepared++;}),new Action(()=>{}));
+  bool transferred=WaitForUi(()=>!a.IsVisible&&b.IsVisible&&prepared==1&&((FrameworkElement)b.Content).Opacity==1);
+  Check(transferred,"floating-to-main transfer leaves only a visible destination (source="+a.IsVisible+", destination="+b.IsVisible+", prepared="+prepared+", opacity="+((FrameworkElement)b.Content).Opacity+")");
+  Call("WindowInteraction",null,"ShowFrom",a,b,new Action(()=>{}),new Action(()=>{}));Call("WindowInteraction",null,"ShowFrom",b,a,new Action(()=>{}),new Action(()=>{}));Pump(500);
+  Check(b.IsVisible&&!a.IsVisible,"reversing a window transfer cancels the obsolete destination");
+  Call("WindowInteraction",null,"ToggleMaximize",b);
+  Check(b.WindowState==WindowState.Normal,"maximize waits for the transition midpoint");
+  Check(WaitForUi(()=>b.WindowState==WindowState.Maximized&&((FrameworkElement)b.Content).Opacity==1),"maximize transition completes with visible content");
+  Call("WindowInteraction",null,"ToggleMaximize",b);
+  Check(WaitForUi(()=>b.WindowState==WindowState.Normal&&((FrameworkElement)b.Content).Opacity==1),"restore transition returns to normal bounds");
+  Call("WindowInteraction",null,"ToggleMaximize",b);Call("WindowInteraction",null,"CompleteReveal",b);Pump(400);
+  Check(b.WindowState==WindowState.Normal&&((FrameworkElement)b.Content).Opacity==1,"starting native interaction cancels a pending maximize");
+  Call("WindowInteraction",null,"ShowFrom",a,b,new Action(()=>{}),new Action(()=>{}));Call("WindowInteraction",null,"Hide",a,null);Pump(500);
+  Check(!a.IsVisible,"hiding an incoming destination prevents its delayed reappearance");
+  Set(prefs,"OrbAnimation","off");Call("Theme",null,"Apply",prefs);b.Show();Call("WindowInteraction",null,"ChangeShape",b,new Action(()=>{b.Width=360;}));Check(b.Width==360&&((FrameworkElement)b.Content).Opacity==1,"disabled animations apply shape changes immediately");a.Close();b.Close();
+  Set(prefs,"OrbAnimation","smooth");Set(prefs,"BallDock","left");Set(prefs,"BallStyle","capsule");Call("Theme",null,"Apply",prefs);
+  var ball=(Window)New("FloatingBall",getPrefs,new Action(()=>{}),new Action(()=>{}),new Action(()=>{}));ball.Show();Pump(240);Call("FloatingBall",ball,"SetExpanded",true);Pump(500);
+  Check(!(bool)Call("FloatingBall",ball,"get_IsPillar")&&ball.Width==340&&((FrameworkElement)ball.Content).Opacity==1,"docked strip expands to the large capsule");
+  Call("FloatingBall",ball,"SetExpanded",false);Pump(450);Check(ball.Width==174,"large capsule animates back to small");Call("FloatingBall",ball,"SetOrb");Pump(450);Check((bool)Call("FloatingBall",ball,"get_IsOrb"),"capsule expands into the circular form");((IDisposable)ball).Dispose();
+ }
+ static Button NamedButton(DependencyObject root,string name)
+ {
+  var button=root as Button;if(button!=null&&System.Windows.Automation.AutomationProperties.GetName(button)==name)return button;
+  for(int i=0;i<VisualTreeHelper.GetChildrenCount(root);i++){var found=NamedButton(VisualTreeHelper.GetChild(root,i),name);if(found!=null)return found;}return null;
+ }
+ static void StabilityRegression(object original)
+ {
+  var prefs=Call("Preferences",original,"Clone");Set(prefs,"BallMode",false);Set(prefs,"BallDock","");Set(prefs,"BallStyle","capsule");Set(prefs,"OrbAnimation","smooth");Set(prefs,"AnimationSpeed",.5d);Set(prefs,"Opacity",.73d);Set(prefs,"Height",480d);
+  var main=(Window)New("WidgetWindow",prefs,true);main.Show();Pump(500);main.Hide();
+  var getter=System.Linq.Expressions.Expression.Lambda(typeof(Func<>).MakeGenericType(TypeFor("Preferences")),System.Linq.Expressions.Expression.Constant(prefs)).Compile();
+  var ball=(Window)New("FloatingBall",getter,new Action(()=>{}),new Action(()=>Call("WidgetWindow",main,"RestoreWindow")),new Action(()=>{}));
+  main.GetType().GetFields(BindingFlags.Instance|BindingFlags.NonPublic).Single(f=>f.FieldType==ball.GetType()).SetValue(main,ball);
+  var host=(FrameworkElement)main.Content;double firstOpacity=-1;main.IsVisibleChanged+=delegate{if(main.IsVisible)firstOpacity=host.Opacity;};
+  foreach(bool large in new[]{false,true})
+  {
+   Call("FloatingBall",ball,"SetExpanded",large);Set(prefs,"BallMode",true);ball.Show();Pump(500);
+   Call("CompletionFeedback",null,"Set",main,true);
+   var back=NamedButton((DependencyObject)ball.Content,"返回完整窗口");Check(back!=null,"capsule restore button exists: "+large);
+   bool monotonic=true;double last=0;int frames=0;EventHandler observe=delegate{if(main.IsVisible){double now=host.Opacity;if(now+.02<last)monotonic=false;last=now;frames++;}};CompositionTarget.Rendering+=observe;
+   try
+   {
+    back.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+    Check(WaitForUi(()=>main.IsVisible&&host.Opacity>0&&host.Opacity<.9),"capsule-to-main has an observable entrance: "+large);
+    Check(firstOpacity==0,"main is transparent before its first visible frame: "+large);
+    Call("WidgetWindow",main,"RestoreWindow");
+    Check(DependencyPropertyHelper.GetValueSource(host,UIElement.OpacityProperty).IsAnimated&&host.Opacity<1,"repeated restore preserves the entrance clock: "+large);
+    Call("CompletionFeedback",null,"Set",main,false);
+    Check(DependencyPropertyHelper.GetValueSource(host,UIElement.OpacityProperty).IsAnimated,"completion acknowledgment cannot cancel the entrance: "+large);
+    Check(WaitForUi(()=>host.Opacity==1&&!ball.IsVisible)&&monotonic&&frames>=3,"capsule-to-main opacity advances without a flash: "+large);
+    Check(main.Opacity==.73d,"transition preserves user window transparency: "+large);
+   }
+   finally{CompositionTarget.Rendering-=observe;}
+   Call("CompletionFeedback",null,"Set",main,true);var skin=((System.Windows.Controls.Decorator)host).Child;
+   Call("WindowInteraction",null,"ChangeShape",main,new Action(()=>main.Height=500));
+   Check(WaitForUi(()=>main.Height==500&&host.Opacity==1)&&DependencyPropertyHelper.GetValueSource(skin,UIElement.OpacityProperty).IsAnimated,"completion keeps blinking after a shape transition: "+large);
+   main.Hide();Check(!DependencyPropertyHelper.GetValueSource(skin,UIElement.OpacityProperty).IsAnimated,"hidden completion clock stops: "+large);
+   Call("CompletionFeedback",null,"Set",main,false);main.Height=480;
+  }
+  main.Close();
+  var flyout=(Window)New("TrayFlyout",new Action(()=>{}),new Action(()=>{}),new Action(()=>{}));var anchor=new System.Drawing.Point(700,700);
+  Call("TrayFlyout",flyout,"Reveal",anchor);Call("TrayFlyout",flyout,"Reveal",anchor);
+  Check(WaitForUi(()=>flyout.IsVisible&&flyout.Opacity==1&&((FrameworkElement)flyout.Content).Opacity==1),"repeated first-frame tray reveal cannot leave an invisible popup");
+  int dismissed=0;Call("TrayFlyout",flyout,"Dismiss",new Action(()=>dismissed++),false);
+  Check(WaitForUi(()=>!flyout.IsVisible)&&dismissed==1,"manual popup dismissal calls its continuation exactly once");flyout.Close();
+  Call("Theme",null,"Apply",original);
+ }
  [STAThread] static int Main(string[] args)
  {
   try{
@@ -156,6 +288,10 @@ internal static class ReleaseProbe
    }
    Check(categories,"settings are split into six switchable categories");
    var settingsBody=(FrameworkElement)settingsWindow.Content;settingsBody.Measure(new Size(760,720));settingsBody.Arrange(new Rect(0,0,760,720));settingsBody.UpdateLayout();
+   Call("SettingsWindow",settingsWindow,"SelectPage","floating");settingsBody.UpdateLayout();
+   var speedControl=FindAutomation(settingsBody,"AnimationSpeed") as Slider;Check(speedControl!=null&&speedControl.Minimum==.5&&speedControl.Maximum==2&&speedControl.IsSnapToTickEnabled,"settings exposes the 0.5x to 2x animation speed control");
+   speedControl.BringIntoView();settingsBody.UpdateLayout();
+   var motionSettings=new RenderTargetBitmap(760,720,96,96,PixelFormats.Pbgra32);motionSettings.Render(settingsBody);var motionPng=new PngBitmapEncoder();motionPng.Frames.Add(BitmapFrame.Create(motionSettings));using(var file=File.Create(Path.Combine(dir,"animation-settings.png")))motionPng.Save(file);
    var aboutVersion=FindAutomation((DependencyObject)settingsWindow.Content,"AboutVersion") as TextBlock;Check(aboutVersion!=null&&aboutVersion.Text=="v"+assembly.GetName().Version.ToString(3),"about page reports the protected assembly version");
    Set(prefs,"ThemeMode","custom");Set(prefs,"GradientColors",new[]{"#F7BBE3","#E6D7FA","#AAF1ED"});Set(prefs,"GradientStops",new[]{0d,48d,100d});Set(prefs,"GradientKind","radial");Set(prefs,"GradientSpan",65d);
    var themeClone=Call("Preferences",prefs,"Clone");Check((string)Get(themeClone,"ThemeMode")=="custom"&&((string[])Get(themeClone,"GradientColors")).Length==3&&(double)Get(themeClone,"GradientSpan")==65,"theme settings survive protected JSON roundtrip");
@@ -163,6 +299,19 @@ internal static class ReleaseProbe
    var themeSettings=(Window)New("SettingsWindow",themeClone,null);var themeBody=(FrameworkElement)themeSettings.Content;themeBody.Measure(new Size(760,720));themeBody.Arrange(new Rect(0,0,760,720));themeBody.UpdateLayout();
    Check(themeBody.ActualWidth==760,"protected theme editor renders and palettes switch after template sealing");
    var flyout=(Window)New("TrayFlyout",new Action(()=>{}),new Action(()=>{}),new Action(()=>{}));Check(flyout.Content!=null,"tray flyout constructs after string hiding");
+   Set(prefs,"OrbAnimation","smooth");Call("Theme",null,"Apply",prefs);
+   var extraQuota=New("QuotaBucket");Set(extraQuota,"Id","fixture-extra");Set(extraQuota,"Name","Fixture extra");Set(extraQuota,"Primary",parsedWindow);
+   var trayQuotas=Array.CreateInstance(TypeFor("QuotaBucket"),2);trayQuotas.SetValue(quotas[0],0);trayQuotas.SetValue(extraQuota,1);
+   Call("TrayFlyout",flyout,"Apply",trayQuotas,null,"fixture","fixture");Call("TrayFlyout",flyout,"Reveal",new System.Drawing.Point(700,700));Pump(350);
+   var trayBody=InternalField<StackPanel>("TrayFlyout",flyout,"body");var extraToggle=trayBody.Children.OfType<Button>().Single();double closedHeight=flyout.ActualHeight;
+   extraToggle.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+   Check(!InternalField<bool>("TrayFlyout",flyout,"otherExpanded"),"tray expansion waits for transparent midpoint");
+   Check(WaitForUi(()=>InternalField<bool>("TrayFlyout",flyout,"otherExpanded")&&((FrameworkElement)flyout.Content).Opacity==1)&&flyout.ActualHeight>closedHeight,"tray extra quotas expand and resize the popup");
+   extraToggle.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+   Check(WaitForUi(()=>!InternalField<bool>("TrayFlyout",flyout,"otherExpanded")&&((FrameworkElement)flyout.Content).Opacity==1)&&Math.Abs(flyout.ActualHeight-closedHeight)<1,"tray extra quotas collapse back to their original height");
+   extraToggle.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));Call("TrayFlyout",flyout,"Apply",trayQuotas,null,"fixture","refreshed");Pump(400);
+   Check(!InternalField<bool>("TrayFlyout",flyout,"otherExpanded")&&((FrameworkElement)flyout.Content).Opacity==1,"refresh during tray expansion cannot mutate detached content");
+   flyout.Hide();
    var badge=(System.Drawing.Bitmap)Call("QuotaStatus",null,"CreateBadge","80",themeClone,false,0d);var pulseBadge=(System.Drawing.Bitmap)Call("QuotaStatus",null,"CreateBadge","80",themeClone,true,1d);
    try
    {
@@ -192,7 +341,8 @@ internal static class ReleaseProbe
     ball.Hide();Check(!chrome.HasAnimatedProperties,"hidden capsule stops animation: "+form);ball.Show();Check(chrome.HasAnimatedProperties,"shown active capsule resumes animation: "+form);
     Call("FloatingBall",ball,"ApplyActivity",New("ActivityReport"));Check(!chrome.HasAnimatedProperties,"idle capsule stops animation: "+form);((IDisposable)ball).Dispose();
    }
-   Set(prefs,"BallStyle","orb");Set(prefs,"OrbQuotaWindow","short");Set(prefs,"OrbSize",100d);Set(prefs,"OrbAnimation","eco");var orbPrefs=Call("Preferences",prefs,"Clone");
+   DockRegression(prefs,getPrefs,dir);TransitionRegression(prefs,getPrefs);StabilityRegression(prefs);
+   Set(prefs,"BallDock","");Set(prefs,"BallStyle","orb");Set(prefs,"OrbQuotaWindow","short");Set(prefs,"OrbSize",100d);Set(prefs,"OrbAnimation","eco");var orbPrefs=Call("Preferences",prefs,"Clone");
    Check((string)Get(orbPrefs,"BallStyle")=="orb"&&(string)Get(orbPrefs,"OrbAnimation")=="eco"&&(double)Get(orbPrefs,"OrbSize")==100,"orb settings survive protected JSON roundtrip");
    Set(prefs,"OrbShortColors",new[]{"#20BBAA","#73DBAD","#AADDEE"});Set(prefs,"OrbLongColors",new[]{"#FA9566","#EFC578"});Set(prefs,"OrbShortAngle",125d);Set(prefs,"OrbLongAngle",70d);var colorClone=Call("Preferences",prefs,"Clone");
    Check(((string[])Get(colorClone,"OrbShortColors")).Length==3&&((string[])Get(colorClone,"OrbLongColors"))[0]=="#FA9566"&&(double)Get(colorClone,"OrbShortAngle")==125,"independent ring gradients survive protected JSON roundtrip");
@@ -201,7 +351,7 @@ internal static class ReleaseProbe
    Check(colorBody.ActualWidth==440&&ClearCorners(colorEditor,440,760),"protected color editor renders with transparent styled corners");
    var orbWindow=(Window)New("FloatingBall",getPrefs,new Action(()=>{}),new Action(()=>{}),new Action(()=>{}));Set(quotas[0],"ObservedAt",DateTimeOffset.Now.ToUnixTimeSeconds());Call("FloatingBall",orbWindow,"Apply",snapshot,quotas[0],"fixture","fixture");
    Check(orbWindow.Width==100&&orbWindow.Height==100&&ClearCorners(orbWindow,100,100),"protected circular orb renders with fully transparent corners");
-   var orb=((Border)orbWindow.Content).Child;Check(System.Windows.Automation.AutomationProperties.GetName(orb).Contains("93%"),"protected orb center uses actual quota percentage");
+   var orb=InternalField<Border>("FloatingBall",orbWindow,"shell").Child;Check(System.Windows.Automation.AutomationProperties.GetName(orb).Contains("93%"),"protected orb center uses actual quota percentage");
    Check(((FrameworkElement)orb).ToolTip==null&&!ToolTipService.GetIsEnabled(orb),"protected orb suppresses hover tooltip text");
    var weekly=New("QuotaWindow");Set(weekly,"Minutes",10080);Set(weekly,"UsedPercent",27d);Set(weekly,"ResetsAt",9999999999L);Set(quotas[0],"Secondary",weekly);Call("FloatingBall",orbWindow,"Apply",snapshot,quotas[0],"fixture","fixture");
    string dualName=System.Windows.Automation.AutomationProperties.GetName(orb);Check(dualName.Contains("5h 93%")&&dualName.Contains("7d 73%"),"protected dual rings keep both quota windows independent");
@@ -210,13 +360,13 @@ internal static class ReleaseProbe
    Set(quotas[0],"Secondary",null);Call("FloatingBall",orbWindow,"Apply",snapshot,quotas[0],"fixture","fixture");
    Check((int)Call("QuotaOrb",orb,"get_VisibleRingCount")==0&&System.Windows.Automation.AutomationProperties.GetName(orb).Contains("待更新"),"protected unavailable quota renders one neutral waiting state");
    Set(quotas[0],"Secondary",weekly);for(int step=0;step<8;step++){Set(quotas[0],"Primary",step%2==0?null:shortQuota);Call("FloatingBall",orbWindow,"Apply",snapshot,quotas[0],"fixture","fixture");}
-   Check(Object.ReferenceEquals(orb,((Border)orbWindow.Content).Child)&&orbWindow.Width==100&&(int)Call("QuotaOrb",orb,"get_VisibleRingCount")==2,"quota availability transitions preserve the same orb and native window size");
+   Check(Object.ReferenceEquals(orb,InternalField<Border>("FloatingBall",orbWindow,"shell").Child)&&orbWindow.Width==100&&(int)Call("QuotaOrb",orb,"get_VisibleRingCount")==2,"quota availability transitions preserve the same orb and native window size");
    int windowCount=Application.Current.Windows.Count;Call("QuotaOrb",orb,"SetPressed",true);Call("QuotaOrb",orb,"SetPressed",false);Call("QuotaOrb",orb,"Pulse");Check(Application.Current.Windows.Count==windowCount,"protected orb click feedback creates no details popup");
    Call("FloatingBall",orbWindow,"SetExpanded",true);Call("FloatingBall",orbWindow,"SetOrb");Check(orbWindow.Width==100,"protected orb and capsule transitions restore the chosen diameter");
    var latestTask=DateTime.UtcNow.AddSeconds(-2).ToString("o");string fixtureLog=Path.Combine(logs,"rollout-test-"+id+".jsonl");
    File.AppendAllText(fixtureLog,json.Serialize(new{type="event_msg",timestamp=latestTask,payload=new{type="task_started"}})+"\n");var active=Call("LocalCodexUsage",reader,"Read","today",DateTime.Now,null,null);
    Check((int)Get(active,"ActiveTasks")==1&&(long)Get(active,"TotalTokens")==110,"protected activity parser preserves token accounting");
-   var liveActivity=New("CodexActivity",home,false);var liveReport=Call("CodexActivity",liveActivity,"Scan",DateTime.Now);var liveOrb=((Border)orbWindow.Content).Child;Call("QuotaOrb",liveOrb,"ApplyActivity",liveReport);
+   var liveActivity=New("CodexActivity",home,false);var liveReport=Call("CodexActivity",liveActivity,"Scan",DateTime.Now);var liveOrb=InternalField<Border>("FloatingBall",orbWindow,"shell").Child;Call("QuotaOrb",liveOrb,"ApplyActivity",liveReport);
    Check(System.Windows.Automation.AutomationProperties.GetItemStatus(liveOrb)=="任务活动中","protected independent event monitor drives activity without a usage refresh");
    File.AppendAllText(fixtureLog,json.Serialize(new{type="event_msg",timestamp=latestTask,payload=new{type="task_complete"}})+"\n");active=Call("LocalCodexUsage",reader,"Read","today",DateTime.Now,null,null);Check((int)Get(active,"ActiveTasks")==0,"protected activity parser handles completion");
    liveReport=Call("CodexActivity",liveActivity,"Scan",DateTime.Now.AddSeconds(6));Call("QuotaOrb",liveOrb,"ApplyActivity",liveReport);Check(System.Windows.Automation.AutomationProperties.GetItemStatus(liveOrb)=="空闲","protected independent monitor clears a completed task");Call("CodexActivity",liveActivity,"Dispose");
