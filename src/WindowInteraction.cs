@@ -18,11 +18,13 @@ namespace CodexUserData
         {
             internal bool Attached;
             internal int Revision;
+            internal int TransferRevision;
             internal FrameworkElement View;
             internal ScaleTransform Scale;
             internal TranslateTransform Shift;
             internal double NextRevealScale=.94;
             internal bool Prepared;
+            internal bool HoldingReveal;
             internal bool Dismissing;
             internal bool NativeFade;
             internal double NativeOpacity;
@@ -106,8 +108,8 @@ namespace CodexUserData
             if(state.Attached)return;state.Attached=true;
             if(automatic)window.IsVisibleChanged+=delegate
             {
-                if(window.IsVisible){if(!state.Prepared)PrepareReveal(window);QueueReveal(window);}
-                else{state.Revision++;state.Prepared=false;if(state.CompletingDialog){state.CompletingDialog=false;window.IsEnabled=state.DialogWasEnabled;}Reset(window,state);}
+                if(window.IsVisible){if(!state.Prepared)PrepareReveal(window);if(!state.HoldingReveal)QueueReveal(window);}
+                else{state.Revision++;state.Prepared=false;state.HoldingReveal=false;if(state.CompletingDialog){state.CompletingDialog=false;window.IsEnabled=state.DialogWasEnabled;}Reset(window,state);}
             };
             window.Closed+=delegate{state.Revision++;state.Prepared=false;Reset(window,state);state.Closed=true;};
         }
@@ -151,7 +153,7 @@ namespace CodexUserData
         }
         internal static void CompleteReveal(Window window)
         {
-            if(IsClosed(window))return;var state=Visual(window);if(state.CompletingDialog)return;state.Revision++;state.Prepared=false;Reset(window,state);
+            if(IsClosed(window))return;var state=Visual(window);if(state.CompletingDialog)return;state.Revision++;state.Prepared=false;state.HoldingReveal=false;Reset(window,state);
         }
         internal static void ResumeReveal(Window window)
         {
@@ -176,19 +178,21 @@ namespace CodexUserData
         {
             if(IsClosed(window))return;var state=Visual(window);if(state.CompletingDialog)return;int revision=++state.Revision;
             if(!CanAnimate||!window.IsVisible||state.View==null){Reset(window,state);change();return;}
-            // Change native dimensions only at the transparent midpoint. This avoids clipping
-            // a large source to the new smaller window, and avoids native resize work per frame.
-            state.Dismissing=true;var fade=Animate(state.View.Opacity,0,105,EasingMode.EaseIn);
-            var shrink=Animate(state.Scale.ScaleX,.86,105,EasingMode.EaseIn);
+            // Browser-backed shapes still need a fully hidden midpoint while their first frame
+            // is prepared. Native vector forms retain part of the old frame, avoiding a black
+            // flash while the same HWND changes dimensions.
+            bool browser=IsBrowser(window);double midpointOpacity=browser?0:.34,midpointScale=browser?.86:.96;
+            state.Dismissing=true;var fade=Animate(state.View.Opacity,midpointOpacity,browser?105:85,EasingMode.EaseIn);
+            var shrink=Animate(state.Scale.ScaleX,midpointScale,browser?105:85,EasingMode.EaseIn);
             fade.Completed+=delegate
             {
                 if(state.Closed||state.Revision!=revision||!window.IsVisible)return;
                 try{change();}catch{Reset(window,state);throw;}state=Visual(window);state.Revision++;PrepareNativeReveal(window,state);
                 state.View.BeginAnimation(UIElement.OpacityProperty,null);state.Scale.BeginAnimation(ScaleTransform.ScaleXProperty,null);state.Scale.BeginAnimation(ScaleTransform.ScaleYProperty,null);state.Shift.BeginAnimation(TranslateTransform.YProperty,null);
-                state.View.Opacity=0;state.Scale.ScaleX=state.Scale.ScaleY=.86;state.Shift.Y=0;
+                state.View.Opacity=midpointOpacity;state.Scale.ScaleX=state.Scale.ScaleY=midpointScale;state.Shift.Y=0;
                 window.UpdateLayout();if(IsBrowser(window))QueueReveal(window);else Reveal(window);
             };
-            if(IsBrowser(window)||state.NativeFade)FadeNative(window,0,105);
+            if(browser||state.NativeFade)FadeNative(window,0,105);
             state.View.BeginAnimation(UIElement.OpacityProperty,fade);state.Scale.BeginAnimation(ScaleTransform.ScaleXProperty,shrink);state.Scale.BeginAnimation(ScaleTransform.ScaleYProperty,shrink);
         }
         internal static void ToggleMaximize(Window window)
@@ -199,19 +203,38 @@ namespace CodexUserData
         internal static void ShowFrom(Window target,Window source,Action prepare,Action shown)
         {
             if(IsClosed(target))return;
-            var state=Visual(target);if(state.CompletingDialog||!IsClosed(source)&&Visual(source).CompletingDialog)return;int revision=++state.Revision;
-            Action show=delegate
+            var state=Visual(target);if(state.CompletingDialog||!IsClosed(source)&&Visual(source).CompletingDialog)return;int transferRevision=++state.TransferRevision;
+            // Mount the destination's prepared first frame before dismissing the source. The
+            // two native windows then overlap during their short fades, so desktop pixels never
+            // show through between forms. HoldingReveal suppresses the automatic Show handler.
+            bool alreadyVisible=target.IsVisible;
+            if(!alreadyVisible)
             {
-                MotionState current;if(state.Closed||!motions.TryGetValue(target,out current)||current!=state||state.Revision!=revision)return;
-                state.NextRevealScale=.86;PrepareReveal(target);
-                if(prepare!=null)prepare();if(state.Closed)return;target.UpdateLayout();
-                bool visible=target.IsVisible;target.Show();
-                if(visible)QueueReveal(target);
+                state.HoldingReveal=true;
+                try
+                {
+                    state.NextRevealScale=.86;PrepareReveal(target);
+                    if(prepare!=null)prepare();if(state.Closed)return;target.UpdateLayout();target.Show();
+                }
+                catch
+                {
+                    // A failed prepare must not leave an unseen window permanently holding its
+                    // automatic reveal. A later ordinary Show or retry starts from clean state.
+                    state.HoldingReveal=false;state.Prepared=false;Reset(target,state);throw;
+                }
+            }
+            else if(prepare!=null)prepare();
+            MotionState current;if(state.Closed||!motions.TryGetValue(target,out current)||current!=state)return;
+            state.HoldingReveal=false;
+            if(alreadyVisible)ResumeReveal(target);else if(IsBrowser(target))QueueReveal(target);else Reveal(target);
+            Action finished=delegate
+            {
+                MotionState latest;if(state.Closed||!motions.TryGetValue(target,out latest)||latest!=state||state.TransferRevision!=transferRevision)return;
                 if(shown!=null)shown();
             };
             // Invalidating the destination first cancels any earlier transfer in the opposite
             // direction. A rapid main -> ball -> main sequence can only show its last target.
-            if(source==target)show();else Dismiss(source,true,show);
+            if(source==target)finished();else Dismiss(source,true,finished);
         }
         internal static void Reveal(Window window)
         {
@@ -229,7 +252,7 @@ namespace CodexUserData
         }
         private static void Dismiss(Window window,bool hide,Action after)
         {
-            if(IsClosed(window)){if(after!=null)after();return;}var state=Visual(window);int revision=++state.Revision;
+            if(IsClosed(window)){if(after!=null)after();return;}var state=Visual(window);state.TransferRevision++;int revision=++state.Revision;
             if(!window.IsVisible){Reset(window,state);if(after!=null)after();return;}
             if(!CanAnimate||state.View==null){if(hide)window.Hide();Reset(window,state);if(after!=null)after();return;}
             state.Dismissing=true;

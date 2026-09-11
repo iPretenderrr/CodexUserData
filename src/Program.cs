@@ -10,8 +10,8 @@ using System.Windows;
 
 [assembly: System.Reflection.AssemblyTitle("CodexUserData")]
 [assembly: System.Reflection.AssemblyProduct("CodexUserData")]
-[assembly: System.Reflection.AssemblyVersion("1.7.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.7.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.8.2.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.8.2.0")]
 
 namespace CodexUserData
 {
@@ -42,6 +42,7 @@ namespace CodexUserData
         public double OrbShortAngle {get;set;} public double OrbLongAngle {get;set;}
         public bool StartWithWindows {get;set;} public bool StartWithCodex {get;set;}
         public double BallOpacity {get;set;} public bool OrbFollowTheme {get;set;}
+        public bool IslandFollowTheme {get;set;} public string[] IslandColors {get;set;} public string IslandMaterial {get;set;}
         public string CustomShape {get;set;}
         public bool CompletionFlash {get;set;}
         public bool CliNoticeShown {get;set;}
@@ -61,7 +62,7 @@ namespace CodexUserData
             string user=Environment.GetEnvironmentVariable("USERPROFILE") ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
             BallLeft=Double.NaN;BallTop=Double.NaN;BallDock="";
             BallMonitor="";BallPlacements=new Dictionary<string,BallPlacement>(StringComparer.OrdinalIgnoreCase);CustomShapeSizes=new Dictionary<string,double[]>(StringComparer.OrdinalIgnoreCase);
-            BallOpacity=1;OrbFollowTheme=true;CompletionFlash=true;BallStyle="orb";OrbQuotaWindow="auto";OrbAnimation="auto";OrbSize=84;AnimationSpeed=1;
+            BallOpacity=1;OrbFollowTheme=true;IslandFollowTheme=true;IslandMaterial="glass";IslandColors=new[]{"#3976FF","#35C8E2","#87F3BE","#C68BFF","#FF83C4"};CompletionFlash=true;BallStyle="orb";OrbQuotaWindow="auto";OrbAnimation="auto";OrbSize=84;AnimationSpeed=1;
             OrbShortColors=new[]{"#316BF1","#5F97FF","#89CDEC"};OrbLongColors=new[]{"#7965EA","#AB8DF0","#E2B0ED"};OrbShortAngle=OrbLongAngle=45;
             ThemeMode="dark";ThemeBase="auto";GradientKind="linear";GradientSpread="pad";GradientColors=new[]{"#F7BBE3","#E6D7FA","#AAF1ED"};GradientStops=new[]{0d,48d,100d};GradientAngle=120;GradientSpan=100;GradientCenterX=50;GradientCenterY=35;GradientRadius=80;GradientStrength=85;ThemeCardOpacity=82;
             PriceOverrides=new Dictionary<string,decimal[]>();KnownModels=new string[0];
@@ -79,7 +80,9 @@ namespace CodexUserData
             Theme.Normalize(this);BallOpacity=Clamp(BallOpacity,.2,1,1);
             NormalizePlacement();
             OrbPalette.Normalize(this);
-            if(BallStyle!="capsule"&&BallStyle!="html")BallStyle="orb";
+            IslandColors=OrbPalette.Clean(IslandColors,new[]{"#3976FF","#35C8E2","#87F3BE","#C68BFF","#FF83C4"});
+            if(IslandMaterial!="classic")IslandMaterial="glass";
+            if(BallStyle!="capsule"&&BallStyle!="island"&&BallStyle!="html")BallStyle="orb";
             if(!new[]{"auto","short","week"}.Contains(OrbQuotaWindow))OrbQuotaWindow="auto";
             if(!new[]{"auto","smooth","eco","off"}.Contains(OrbAnimation))OrbAnimation="auto";
             OrbSize=Clamp(OrbSize,56,128,84);

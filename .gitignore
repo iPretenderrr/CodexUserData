@@ -37,12 +37,16 @@
 !/tools/ChartStabilityProbe.cs
 !/tools/DiagnosticStabilityProbe.cs
 !/tools/UpdateStabilityProbe.cs
+!/tools/IslandStabilityProbe.cs
+!/tools/WindowMotionStabilityProbe.cs
 !/src/build.ps1
 !/src/widget.manifest
 !/src/ActivityJsonLine.cs
 !/src/CodexActivity.cs
 !/src/CustomShape.cs
 !/src/Dashboard.cs
+!/src/DynamicIsland.cs
+!/src/DynamicIsland.Glass.cs
 !/src/FloatingBall.cs
 !/src/DockTransition.cs
 !/src/LocalCodexUsage.cs

@@ -63,7 +63,7 @@ namespace CodexUserData
         {
             if(value==null)return "unknown";if(!value.BallMode)return value.Collapsed?"main-compact":"main";
             if(!String.IsNullOrEmpty(value.BallDock))return Pick(value.BallDock,"left","right","top","bottom")=="unknown"?"unknown":"docked";
-            return value.BallStyle=="capsule"?(value.BallExpanded?"capsule-expanded":"capsule-small"):Pick(value.BallStyle,"orb","html");
+            return value.BallStyle=="capsule"?(value.BallExpanded?"capsule-expanded":"capsule-small"):Pick(value.BallStyle,"orb","island","html");
         }
         private static string ActivityState(ActivityReport report,bool fresh,long now)
         {

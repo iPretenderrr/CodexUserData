@@ -85,8 +85,19 @@ internal static class HtmlReleaseProbe
         Call("FloatingBall",ball,"SetCustom");var htmlDeadline=DateTime.UtcNow.AddSeconds(8);while((web=Find<WebView2CompositionControl>(ball))==null&&DateTime.UtcNow<htmlDeadline)await Task.Delay(40);
         while(web!=null&&web.CoreWebView2==null&&DateTime.UtcNow<htmlDeadline)await Task.Delay(40);
         Check(web!=null&&web.CoreWebView2!=null,"shared browser environment accelerates a later HTML form");
-        menu.Items.OfType<MenuItem>().Single(m=>Convert.ToString(m.Header)=="返回完整窗口").RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
-        await Task.Delay(55);Check(ball.IsVisible&&ball.Opacity>0&&ball.Opacity<1,"HTML-to-main transition fades the complete browser window");
+        // Core initialization precedes the first visible browser frame. Wait for the form
+        // a real user can click, then observe rendered frames rather than one 55ms sample.
+        while((ball.Opacity<.999||((FrameworkElement)ball.Content).Opacity<.999)&&DateTime.UtcNow<htmlDeadline)await Task.Delay(30);
+        Check(ball.IsVisible&&ball.Opacity>=.999&&((FrameworkElement)ball.Content).Opacity>=.999,"HTML form presents its first frame before simulated menu input");
+        bool sawRestoreFade=false;EventHandler sampleRestore=delegate{if(ball.IsVisible&&ball.Opacity>0&&ball.Opacity<1)sawRestoreFade=true;};
+        CompositionTarget.Rendering+=sampleRestore;
+        try
+        {
+            menu.Items.OfType<MenuItem>().Single(m=>Convert.ToString(m.Header)=="返回完整窗口").RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            var fadeDeadline=DateTime.UtcNow.AddSeconds(3);while(ball.IsVisible&&DateTime.UtcNow<fadeDeadline)await Task.Delay(20);
+        }
+        finally{CompositionTarget.Rendering-=sampleRestore;}
+        Check(sawRestoreFade,"HTML-to-main transition fades the complete browser window");
         var restoreDeadline=DateTime.UtcNow.AddSeconds(3);while((ball.IsVisible||!main.IsVisible||((FrameworkElement)main.Content).Opacity<.999)&&DateTime.UtcNow<restoreDeadline)await Task.Delay(30);
         Check(restored&&!ball.IsVisible&&main.IsVisible&&((FrameworkElement)main.Content).Opacity>=.999,"protected native menu returns to the main UI without a browser-frame flash");
         main.Close();((IDisposable)ball).Dispose();ball=null;File.WriteAllText(Path.Combine(output,"html-verification.json"),"{\"passed\":true,\"checks\":"+checks+"}");

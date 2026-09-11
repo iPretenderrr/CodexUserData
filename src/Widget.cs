@@ -238,7 +238,7 @@ namespace CodexUserData
             if(closed)return;
             if(!prefs.BallMode&&IsVisible&&WindowState==WindowState.Normal){WindowInteraction.ResumeReveal(this);Activate();if(ready!=null)ready();return;}
             // A second restore can arrive before the first animation has hidden the ball.
-            bool fromBall=prefs.BallMode||(ball!=null&&ball.IsVisible);prefs.BallMode=false;if(ball!=null)ball.CancelTransition();
+            bool fromBall=prefs.BallMode||(ball!=null&&ball.IsVisible);prefs.BallMode=false;if(ball!=null)ball.CancelTransferMotion();
             WindowInteraction.ShowFrom(this,ball,delegate
             {
                 ShowInTaskbar=true;WindowState=WindowState.Normal;
@@ -249,8 +249,8 @@ namespace CodexUserData
         private void OpenBall()
         {
             if(preview||closed)return;Persist();prefs.BallMode=true;
-            if(ball==null){ball=new FloatingBall(()=>prefs,Persist,RestoreWindow,RequestClose);ball.PreviewMouseMove+=delegate{quota.AcknowledgeCompletion();};ball.SettingsRequested=()=>RestoreWindowThen(OpenSettings);if(Double.IsNaN(prefs.BallLeft)){ball.Left=Left+20;ball.Top=Top+20;}}
-            ball.CancelTransition();if(historyWindow!=null)WindowInteraction.Close(historyWindow);if(coverageWindow!=null)WindowInteraction.Close(coverageWindow);WindowInteraction.ShowFrom(ball,this,UpdateBall,Persist);
+            if(ball==null){ball=new FloatingBall(()=>prefs,Persist,RestoreWindow,RequestClose);ball.PreviewMouseMove+=delegate{quota.AcknowledgeCompletion();};ball.SettingsRequested=()=>RestoreWindowThen(OpenSettings);ball.SetCompletionPending(quota.CompletionPending);if(Double.IsNaN(prefs.BallLeft)){ball.Left=Left+20;ball.Top=Top+20;}}
+            ball.CancelTransferMotion();if(historyWindow!=null)WindowInteraction.Close(historyWindow);if(coverageWindow!=null)WindowInteraction.Close(coverageWindow);WindowInteraction.ShowFrom(ball,this,UpdateBall,Persist);
         }
         private void UpdateBall()
         {
@@ -258,7 +258,7 @@ namespace CodexUserData
             EnsureActivity();if(ball==null)return;
             ball.Apply(snapshot,quota.MainBucket,Scope(),quota.StatusText);
         }
-        private void UpdateCompletionViews(){CompletionFeedback.Set(this,quota.CompletionPending);if(ball!=null)CompletionFeedback.Set(ball,quota.CompletionPending);UpdateActivityStatus();}
+        private void UpdateCompletionViews(){CompletionFeedback.Set(this,quota.CompletionPending);if(ball!=null)ball.SetCompletionPending(quota.CompletionPending);UpdateActivityStatus();}
         internal void ApplyActivityReport(ActivityReport report)
         {
             if(closed)return;activityReport=report;quota.ApplyActivity(report);if(ball!=null)ball.ApplyActivity(report);UpdateCompletionViews();

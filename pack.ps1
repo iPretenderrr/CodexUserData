@@ -1,4 +1,4 @@
-﻿param([string]$Version='1.7.0')
+﻿param([string]$Version='1.8.2')
 # Keep this script UTF-8 with BOM: Windows PowerShell 5.1 must decode the Chinese allowlist paths correctly.
 $ErrorActionPreference='Stop'
 if($Version -notmatch '^\d+\.\d+\.\d+$'){throw 'Version must be major.minor.patch'}

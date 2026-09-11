@@ -46,7 +46,7 @@ $compilerArgs = @(
   (Join-Path $PSScriptRoot 'LocalCodexUsage.cs'), (Join-Path $PSScriptRoot 'UsageDatabase.cs')
   (Join-Path $PSScriptRoot 'UsageCharts.cs')
   (Join-Path $PSScriptRoot 'Dashboard.cs'), (Join-Path $PSScriptRoot 'QuotaReader.cs'), (Join-Path $PSScriptRoot 'QuotaStatus.cs')
-  (Join-Path $PSScriptRoot 'FloatingBall.cs'), (Join-Path $PSScriptRoot 'DockTransition.cs'), (Join-Path $PSScriptRoot 'WindowInteraction.cs'), (Join-Path $PSScriptRoot 'PriceEditor.cs'), (Join-Path $PSScriptRoot 'UsageDetails.cs'), (Join-Path $PSScriptRoot 'TrayFlyout.cs')
+  (Join-Path $PSScriptRoot 'DynamicIsland.cs'), (Join-Path $PSScriptRoot 'DynamicIsland.Glass.cs'), (Join-Path $PSScriptRoot 'FloatingBall.cs'), (Join-Path $PSScriptRoot 'DockTransition.cs'), (Join-Path $PSScriptRoot 'WindowInteraction.cs'), (Join-Path $PSScriptRoot 'PriceEditor.cs'), (Join-Path $PSScriptRoot 'UsageDetails.cs'), (Join-Path $PSScriptRoot 'TrayFlyout.cs')
 )
 & $compilerPath @compilerArgs
 if ($LASTEXITCODE -ne 0) { throw 'Widget compilation failed.' }

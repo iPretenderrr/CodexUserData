@@ -59,35 +59,38 @@ namespace CodexUserData
         private readonly List<TextBox> inputs=new List<TextBox>();
         private readonly StackPanel palettes=new StackPanel();
         private readonly QuotaOrb example=new QuotaOrb{Width=144,Height=144};
+        private readonly Border islandExample=new Border{Width=220,Height=54,CornerRadius=new CornerRadius(27),BorderThickness=new Thickness(2),Margin=new Thickness(0,18,0,12)};
+        private readonly bool islandMode;
         private readonly TextBlock validation=Theme.Text("",11,Theme.Warning);
         private readonly QuotaBucket demo;
         internal Preferences Result;
         internal bool IsValid {get{return inputs.All(t=>Theme.ValidHex(t.Text.Trim()));}}
-        internal OrbAppearance(Preferences current)
+        internal OrbAppearance(Preferences current):this(current,false){}
+        internal OrbAppearance(Preferences current,bool editIsland)
         {
-            draft=current.Clone();OrbPalette.Normalize(draft);Title="圆环配色";Width=440;Height=760;MinWidth=360;MinHeight=460;MaxHeight=SystemParameters.WorkArea.Height;ShowInTaskbar=false;WindowStartupLocation=WindowStartupLocation.CenterOwner;Theme.InstallStyles(this);
-            var outer=new DockPanel{Margin=new Thickness(22,8,22,16)};SetBody(outer,"圆环配色","ORBIT COLORS",true);
+            islandMode=editIsland;draft=current.Clone();OrbPalette.Normalize(draft);Title=islandMode?"灵动岛配色":"圆环配色";Width=440;Height=islandMode?620:760;MinWidth=360;MinHeight=460;MaxHeight=SystemParameters.WorkArea.Height;ShowInTaskbar=false;WindowStartupLocation=WindowStartupLocation.CenterOwner;Theme.InstallStyles(this);
+            var outer=new DockPanel{Margin=new Thickness(22,8,22,16)};SetBody(outer,islandMode?"灵动岛配色":"圆环配色",islandMode?"ISLAND COLORS":"ORBIT COLORS",true);
             var actions=new StackPanel{Orientation=Orientation.Horizontal,HorizontalAlignment=HorizontalAlignment.Right,Margin=new Thickness(0,12,0,0)};DockPanel.SetDock(actions,Dock.Bottom);outer.Children.Add(actions);
             var cancel=Theme.Button("取消","取消配色修改",76);cancel.Margin=new Thickness(4);cancel.Click+=delegate{WindowInteraction.CompleteDialog(this,false);};actions.Children.Add(cancel);
-            var save=Theme.Button("保存配色","保存圆环配色",100);save.Margin=new Thickness(4);save.Click+=delegate{if(!IsValid){validation.Text="请检查颜色格式，使用 #RRGGBB。";return;}Result=draft;WindowInteraction.CompleteDialog(this,true);};actions.Children.Add(save);
+            var save=Theme.Button("保存配色",islandMode?"保存灵动岛配色":"保存圆环配色",100);save.Margin=new Thickness(4);save.Click+=delegate{if(!IsValid){validation.Text="请检查颜色格式，使用 #RRGGBB。";return;}Result=draft;WindowInteraction.CompleteDialog(this,true);};actions.Children.Add(save);
             PreviewKeyDown+=delegate(object sender,System.Windows.Input.KeyEventArgs args){if(args.Key==System.Windows.Input.Key.Escape){args.Handled=true;WindowInteraction.CompleteDialog(this,false);}};
             var body=new StackPanel();outer.Children.Add(new ScrollViewer{Content=body,VerticalScrollBarVisibility=ScrollBarVisibility.Auto,HorizontalScrollBarVisibility=ScrollBarVisibility.Disabled});
-            var preview=new StackPanel{HorizontalAlignment=HorizontalAlignment.Center};preview.Children.Add(example);preview.Children.Add(Theme.Text("演示额度 · 悬停体验动画",11,Theme.Muted));body.Children.Add(preview);
+            var preview=new StackPanel{HorizontalAlignment=HorizontalAlignment.Center};preview.Children.Add(islandMode?(UIElement)islandExample:example);preview.Children.Add(Theme.Text(islandMode?"灵动岛渐变预览":"演示额度 · 悬停体验动画",11,Theme.Muted));body.Children.Add(preview);
             long now=LocalCodexUsage.Unix(DateTime.Now);demo=new QuotaBucket{ObservedAt=now,Primary=new QuotaWindow{Minutes=300,UsedPercent=18,ResetsAt=now+86400},Secondary=new QuotaWindow{Minutes=10080,UsedPercent=34,ResetsAt=now+86400}};
-            var follow=new CheckBox{Content="圆环及额度条跟随主题渐变",IsChecked=draft.OrbFollowTheme,Foreground=Theme.Ink,Margin=new Thickness(0,12,0,10)};body.Children.Add(follow);follow.Checked+=delegate{draft.OrbFollowTheme=true;Refresh();};follow.Unchecked+=delegate{draft.OrbFollowTheme=false;Refresh();};
-            body.Children.Add(Theme.Text("关闭跟随主题后，使用下面的独立圆环配色。",10,Theme.Muted));body.Children.Add(palettes);validation.TextWrapping=TextWrapping.Wrap;body.Children.Add(validation);
+            var follow=new CheckBox{Content=islandMode?"灵动岛跟随主题渐变":"圆环及额度条跟随主题渐变",IsChecked=draft.OrbFollowTheme,Foreground=Theme.Ink,Margin=new Thickness(0,12,0,10)};body.Children.Add(follow);follow.Checked+=delegate{draft.OrbFollowTheme=true;Refresh();};follow.Unchecked+=delegate{draft.OrbFollowTheme=false;Refresh();};
+            body.Children.Add(Theme.Text(islandMode?"关闭跟随后，使用下面的独立灵动岛配色。":"关闭跟随主题后，使用下面的独立圆环配色。",10,Theme.Muted));body.Children.Add(palettes);validation.TextWrapping=TextWrapping.Wrap;body.Children.Add(validation);
             var reset=Theme.Button("恢复默认配色","恢复蓝色和紫色渐变",130);reset.HorizontalAlignment=HorizontalAlignment.Left;reset.Margin=new Thickness(0,12,0,0);body.Children.Add(reset);
-            reset.Click+=delegate{var defaults=new Preferences();draft.OrbShortColors=defaults.OrbShortColors;draft.OrbLongColors=defaults.OrbLongColors;draft.OrbShortAngle=draft.OrbLongAngle=45;Build();Refresh();};
+            reset.Click+=delegate{var defaults=new Preferences();draft.OrbShortColors=islandMode?defaults.IslandColors:defaults.OrbShortColors;draft.OrbLongColors=islandMode?defaults.IslandColors:defaults.OrbLongColors;draft.OrbShortAngle=draft.OrbLongAngle=45;Build();Refresh();};
             Closed+=delegate{example.Dispose();};Build();Refresh();
         }
-        private void Refresh(){if(IsValid)example.Apply(draft,demo,null,"palette-demo");}
+        private void Refresh(){if(!IsValid)return;if(islandMode){var mapped=draft.Clone();mapped.IslandFollowTheme=draft.OrbFollowTheme;mapped.IslandColors=draft.OrbShortColors;var brush=OrbPalette.Create(DynamicIsland.EffectiveColors(mapped),35,true);islandExample.Background=Theme.IsLight?Theme.B("#F7FAFC"):Theme.B("#0B0D11");islandExample.BorderBrush=brush;}else example.Apply(draft,demo,null,"palette-demo");}
         private void Build()
         {
-            palettes.Children.Clear();inputs.Clear();validation.Text="";Section(false);Section(true);
+            palettes.Children.Clear();inputs.Clear();validation.Text="";Section(false);if(!islandMode)Section(true);
         }
         private void Section(bool week)
         {
-            string title=week?"长周期 · 通常 7 天":"短周期 · 通常 5 小时";var heading=Theme.Text(title,12,Theme.Ink);heading.FontWeight=FontWeights.SemiBold;heading.Margin=new Thickness(0,18,0,8);palettes.Children.Add(heading);
+            string title=islandMode?"灵动岛流光":week?"长周期 · 通常 7 天":"短周期 · 通常 5 小时";var heading=Theme.Text(title,12,Theme.Ink);heading.FontWeight=FontWeights.SemiBold;heading.Margin=new Thickness(0,18,0,8);palettes.Children.Add(heading);
             var colors=week?draft.OrbLongColors:draft.OrbShortColors;
             for(int i=0;i<colors.Length;i++)
             {
@@ -109,6 +112,7 @@ namespace CodexUserData
             }
             var add=Theme.Button("＋ 添加颜色","最多 5 个渐变颜色",110);add.HorizontalAlignment=HorizontalAlignment.Left;add.IsEnabled=colors.Length<5;add.Margin=new Thickness(0,5,0,7);palettes.Children.Add(add);
             add.Click+=delegate{var next=colors.Concat(new[]{colors.Last()}).ToArray();if(week)draft.OrbLongColors=next;else draft.OrbShortColors=next;Build();Refresh();};
+            if(islandMode)return;
             var label=Theme.Text("渐变角度  "+(week?draft.OrbLongAngle:draft.OrbShortAngle).ToString("0",CultureInfo.InvariantCulture)+"°",11,Theme.Muted);palettes.Children.Add(label);
             var angle=new Slider{Minimum=0,Maximum=360,Value=week?draft.OrbLongAngle:draft.OrbShortAngle,IsSnapToTickEnabled=true,TickFrequency=1};palettes.Children.Add(angle);
             angle.ValueChanged+=delegate{if(week)draft.OrbLongAngle=angle.Value;else draft.OrbShortAngle=angle.Value;label.Text="渐变角度  "+angle.Value.ToString("0",CultureInfo.InvariantCulture)+"°";Refresh();};

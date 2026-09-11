@@ -167,6 +167,34 @@ internal static class ReleaseProbe
    var output=new RenderTargetBitmap(2100,310,96,96,PixelFormats.Pbgra32);output.Render(sheet);var png=new PngBitmapEncoder();png.Frames.Add(BitmapFrame.Create(output));using(var file=File.Create(Path.Combine(dir,"dock-morph-"+side+".png")))png.Save(file);
   }
  }
+ static void IslandRegression(object prefs,Delegate getPrefs,object snapshot,object quota)
+ {
+  ResetBallPlacement(prefs,"");Set(prefs,"BallStyle","island");Set(prefs,"OrbAnimation","off");Call("Theme",null,"Apply",prefs);
+  var clone=Call("Preferences",prefs,"Clone");Check((string)Get(clone,"BallStyle")=="island","protected settings preserve the island form");
+  int restored=0;var ball=(Window)New("FloatingBall",getPrefs,new Action(()=>{}),new Action(()=>restored++),new Action(()=>{}));
+  try
+  {
+   Call("FloatingBall",ball,"Apply",snapshot,quota,"fixture","fixture");ball.Show();Pump(50);
+   var island=FindAutomation(ball,"DynamicIsland");double idleWidth=ball.Width;
+   Check(island!=null&&(bool)Call("FloatingBall",ball,"get_IsIsland"),"protected native island initializes without a browser");
+   var report=New("ActivityReport");long now=DateTimeOffset.UtcNow.ToUnixTimeSeconds();SetInternal<int>("ActivityReport",report,"ActiveTasks",2);SetInternal<long>("ActivityReport",report,"ObservedAt",now);SetInternal<long>("ActivityReport",report,"Until",now+60);
+   Call("FloatingBall",ball,"ApplyActivity",report);Pump(50);
+   Check(ball.Width>idleWidth&&Object.ReferenceEquals(island,FindAutomation(ball,"DynamicIsland")),"protected task activity stretches the existing island");
+   Call("FloatingBall",ball,"SetIslandExpanded",true);Pump(50);
+   Check(ball.Width==252&&ball.Height==72&&(bool)Call("FloatingBall",ball,"get_IslandExpanded"),"protected single-quota island expands without an empty second column");
+   var dual=New("QuotaBucket");Set(dual,"ObservedAt",now);Set(dual,"Primary",Get(quota,"Primary"));var week=New("QuotaWindow");Set(week,"Minutes",10080);Set(week,"UsedPercent",43d);Set(week,"ResetsAt",now+86400);Set(dual,"Secondary",week);
+   Call("FloatingBall",ball,"Apply",snapshot,dual,"fixture","fixture");Pump(50);
+   Check(ball.Width==312&&ball.Height==72&&System.Windows.Automation.AutomationProperties.GetName(island).Contains("57%"),"protected dual-quota island adds its real second ring while retaining the capsule height");
+   Check(ClearCorners(ball,(int)ball.Width,(int)ball.Height),"protected expanded island has transparent outer corners");
+   Call("FloatingBall",ball,"SetIslandExpanded",false);Pump(50);
+   Check(ball.Height<80&&!(bool)Call("FloatingBall",ball,"get_IslandExpanded"),"protected island details collapse without replacing the host");
+   var shell=InternalField<Border>("FloatingBall",ball,"shell");var back=shell.ContextMenu.Items.OfType<MenuItem>().Single(i=>Convert.ToString(i.Header).Contains("返回完整窗口"));back.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+   Check(restored==1,"protected island retains the shared return-to-main menu action");
+  }
+  finally{((IDisposable)ball).Dispose();}
+  Call("FloatingBall",ball,"SetIsland");Check(!ball.IsVisible,"disposed protected island ignores late form changes");
+  Set(prefs,"OrbAnimation","smooth");Call("Theme",null,"Apply",prefs);
+ }
  static void TransitionRegression(object prefs,Delegate getPrefs)
  {
   Set(prefs,"AnimationSpeed",1.7d);var clone=Call("Preferences",prefs,"Clone");Check(Math.Abs((double)Get(clone,"AnimationSpeed")-1.7)<.001,"animation speed survives protected settings serialization");
@@ -364,7 +392,7 @@ internal static class ReleaseProbe
     ball.Hide();Check(!chrome.HasAnimatedProperties,"hidden capsule stops animation: "+form);ball.Show();Check(chrome.HasAnimatedProperties,"shown active capsule resumes animation: "+form);
     Call("FloatingBall",ball,"ApplyActivity",New("ActivityReport"));Check(!chrome.HasAnimatedProperties,"idle capsule stops animation: "+form);((IDisposable)ball).Dispose();
    }
-   DockRegression(prefs,getPrefs,dir);TransitionRegression(prefs,getPrefs);StabilityRegression(prefs);
+   DockRegression(prefs,getPrefs,dir);TransitionRegression(prefs,getPrefs);StabilityRegression(prefs);IslandRegression(prefs,getPrefs,snapshot,quotas[0]);
    ResetBallPlacement(prefs,"");Set(prefs,"BallStyle","orb");Set(prefs,"OrbQuotaWindow","short");Set(prefs,"OrbSize",100d);Set(prefs,"OrbAnimation","eco");var orbPrefs=Call("Preferences",prefs,"Clone");
    Check((string)Get(orbPrefs,"BallStyle")=="orb"&&(string)Get(orbPrefs,"OrbAnimation")=="eco"&&(double)Get(orbPrefs,"OrbSize")==100,"orb settings survive protected JSON roundtrip");
    Set(prefs,"OrbShortColors",new[]{"#20BBAA","#73DBAD","#AADDEE"});Set(prefs,"OrbLongColors",new[]{"#FA9566","#EFC578"});Set(prefs,"OrbShortAngle",125d);Set(prefs,"OrbLongAngle",70d);var colorClone=Call("Preferences",prefs,"Clone");
