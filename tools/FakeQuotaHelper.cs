@@ -18,6 +18,11 @@ namespace CodexUserData
             if(Console.ReadLine()==null||Console.ReadLine()==null)return 4;
             File.WriteAllText(Path.Combine(root,"helper.pid"),Process.GetCurrentProcess().Id.ToString());
             File.WriteAllText(Path.Combine(root,"helper.ready"),"waiting");
+            if(File.Exists(Path.Combine(root,"fake-quota.reply")))
+            {
+                Console.WriteLine("{\"id\":2,\"result\":{\"rateLimits\":{\"limitId\":\"codex\",\"primary\":{\"usedPercent\":24,\"windowDurationMins\":300,\"resetsAt\":"+(DateTimeOffset.UtcNow.ToUnixTimeSeconds()+3600)+"}}}}");
+                Console.Out.Flush();return 0;
+            }
             // A finite fallback prevents an orphan even if the probe process itself is killed.
             Thread.Sleep(30000);return 0;
         }

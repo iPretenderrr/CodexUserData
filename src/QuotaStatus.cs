@@ -33,6 +33,9 @@ namespace CodexUserData
         private CancellationTokenSource queryCancellation;
         private int accountRevision;
         private readonly bool preview;
+        internal readonly QuotaHistoryStore HistoryStore=new QuotaHistoryStore(System.IO.Path.Combine(Program.DataFolder,"quota-history"));
+        internal event Action HistoryChanged;
+        internal string HistoryError {get;private set;}
         private string failure="",iconKey="";
         private string balanceIcon="?";
         private string pulseIconKey="";
@@ -89,7 +92,7 @@ namespace CodexUserData
         {
             if(newAccount){accountRevision++;latest.Clear();failure="";SetCompletion(false);}
             if((newAccount||!preferences().LiveQuota)&&queryCancellation!=null)queryCancellation.Cancel();
-            Render();Refresh();
+            Render();Refresh();if(HistoryChanged!=null)HistoryChanged();
         }
         internal void ApplyTheme(){iconKey="";pulseIconKey="";UpdateTrayPulse();UpdateCompletionAnimation();UpdateTrayIcon();}
         internal void Accept(IEnumerable<QuotaBucket> buckets)
@@ -182,7 +185,14 @@ namespace CodexUserData
             try
             {
                 var result=await Task.Run(()=>QuotaReader.Query(cli,home,cancellation.Token));
-                if(CurrentQuery(revision,home,cli)&&!cancellation.IsCancellationRequested){failure="";Accept(result);}
+                if(CurrentQuery(revision,home,cli)&&!cancellation.IsCancellationRequested)
+                {
+                    failure="";Accept(result);
+                    try{await HistoryStore.RecordAsync(QuotaHistoryStore.Scope(home),result);HistoryError="";}
+                    catch(System.IO.IOException){HistoryError="额度已更新，但历史记录写入失败。";}
+                    catch(UnauthorizedAccessException){HistoryError="额度已更新，但历史目录无法写入。";}
+                    if(!disposed&&HistoryChanged!=null)HistoryChanged();
+                }
             }
             catch(OperationCanceledException){}
             catch(Exception){if(CurrentQuery(revision,home,cli)&&!cancellation.IsCancellationRequested){failure="在线额度暂不可用";Render();}}

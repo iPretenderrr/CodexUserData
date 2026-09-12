@@ -44,7 +44,7 @@ $compilerArgs = @(
   (Join-Path $PSScriptRoot 'Widget.cs'), (Join-Path $PSScriptRoot 'SettingsWindow.cs'),
   (Join-Path $PSScriptRoot 'ReleaseUpdate.cs'), (Join-Path $PSScriptRoot 'Diagnostics.cs'),
   (Join-Path $PSScriptRoot 'LocalCodexUsage.cs'), (Join-Path $PSScriptRoot 'UsageDatabase.cs')
-  (Join-Path $PSScriptRoot 'UsageCharts.cs')
+  (Join-Path $PSScriptRoot 'UsageCharts.cs'), (Join-Path $PSScriptRoot 'QuotaHistory.cs'), (Join-Path $PSScriptRoot 'QuotaHistoryChart.cs')
   (Join-Path $PSScriptRoot 'Dashboard.cs'), (Join-Path $PSScriptRoot 'QuotaReader.cs'), (Join-Path $PSScriptRoot 'QuotaStatus.cs')
   (Join-Path $PSScriptRoot 'DynamicIsland.cs'), (Join-Path $PSScriptRoot 'DynamicIsland.Glass.cs'), (Join-Path $PSScriptRoot 'FloatingBall.cs'), (Join-Path $PSScriptRoot 'DockTransition.cs'), (Join-Path $PSScriptRoot 'WindowInteraction.cs'), (Join-Path $PSScriptRoot 'PriceEditor.cs'), (Join-Path $PSScriptRoot 'UsageDetails.cs'), (Join-Path $PSScriptRoot 'TrayFlyout.cs')
 )

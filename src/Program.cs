@@ -10,8 +10,8 @@ using System.Windows;
 
 [assembly: System.Reflection.AssemblyTitle("CodexUserData")]
 [assembly: System.Reflection.AssemblyProduct("CodexUserData")]
-[assembly: System.Reflection.AssemblyVersion("1.8.2.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.8.2.0")]
+[assembly: System.Reflection.AssemblyVersion("1.8.3.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.8.3.0")]
 
 namespace CodexUserData
 {

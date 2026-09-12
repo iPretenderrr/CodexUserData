@@ -54,6 +54,7 @@ namespace CodexUserData
         private readonly QuotaStatus quota;
         private HistoryPanel largeHistory;
         private Window historyWindow;
+        private QuotaHistoryPanel quotaHistoryPanel;
         private SettingsWindow settingsWindow;
         private readonly StackPanel body;
         private readonly UniformGrid cards;
@@ -99,7 +100,7 @@ namespace CodexUserData
                 });
             };
             var filters=new Grid{Margin=new Thickness(0,0,0,9)};filters.ColumnDefinitions.Add(new ColumnDefinition{Width=new GridLength(1,GridUnitType.Star)});filters.ColumnDefinitions.Add(new ColumnDefinition{Width=new GridLength(1,GridUnitType.Star)});var filtersAndQuota=new StackPanel();Grid.SetRow(filtersAndQuota,1);grid.Children.Add(filtersAndQuota);filtersAndQuota.Children.Add(filters);
-            quota=new QuotaStatus(()=>prefs,()=>{if(!IsVisible||WindowState==WindowState.Minimized)RestoreWindow();else WindowInteraction.Hide(this);},RequestClose,preview,()=>RestoreWindowThen(RefreshData),()=>RestoreWindowThen(OpenHistory));filtersAndQuota.Children.Add(quota);quota.Changed+=UpdateBall;
+            quota=new QuotaStatus(()=>prefs,()=>{if(!IsVisible||WindowState==WindowState.Minimized)RestoreWindow();else WindowInteraction.Hide(this);},RequestClose,preview,()=>RestoreWindowThen(RefreshData),()=>RestoreWindowThen(OpenHistory));filtersAndQuota.Children.Add(quota);quota.Changed+=UpdateBall;quota.HistoryChanged+=delegate{if(quotaHistoryPanel!=null)quotaHistoryPanel.Refresh();};
             source=new ChoiceButton(new Dictionary<string,string>{{"ccswitch","CC Switch"},{"local","本地 Codex"}},"数据来源");source.Select(prefs.Source);filters.Children.Add(source);
             app=new ChoiceButton(new Dictionary<string,string>{{"","全部应用"},{"claude","Claude"},{"codex","Codex"},{"gemini","Gemini"},{"opencode","OpenCode"},{"grokbuild","Grok"},{"hermes","Hermes"},{"pi","Pi"}},"应用筛选");app.Select(prefs.App);app.Margin=new Thickness(7,0,0,0);Grid.SetColumn(app,1);filters.Children.Add(app);
             source.Changed+=delegate(string v){prefs.Source=v;UpdateSource();SelectionChanged();};app.Changed+=delegate(string v){prefs.App=v;SelectionChanged();};
@@ -295,9 +296,15 @@ namespace CodexUserData
             if(closed)return;
             if(historyWindow!=null){WindowInteraction.ResumeReveal(historyWindow);if(!historyWindow.IsVisible)historyWindow.Show();if(historyWindow.WindowState==WindowState.Minimized)historyWindow.WindowState=WindowState.Normal;historyWindow.Activate();return;}
             largeHistory=new HistoryPanel{Margin=new Thickness(20,10,20,20)};largeHistory.RangeChanged+=SetTrendRange;largeHistory.Configure(true,true,prefs.TrendDays);largeHistory.Apply(snapshot,Scope());
-            var scroller=new ScrollViewer{Content=largeHistory,VerticalScrollBarVisibility=ScrollBarVisibility.Auto,HorizontalScrollBarVisibility=ScrollBarVisibility.Disabled};
-            var styled=new StyledWindow{Title="每日用量与 Token 趋势",Width=880,Height=850,MinWidth=340,MinHeight=420,MaxHeight=SystemParameters.WorkArea.Height,Background=Theme.Background,Foreground=Theme.Ink,FontFamily=FontFamily,Owner=this,WindowStartupLocation=WindowStartupLocation.CenterOwner,ShowInTaskbar=false};
-            styled.SetBody(scroller,"每日用量与趋势","USAGE INSIGHTS",true);historyWindow=styled;historyWindow.Loaded+=delegate{if(historyWindow!=null)ClampWindow(historyWindow);};historyWindow.Closed+=delegate{historyWindow=null;largeHistory=null;};historyWindow.Show();
+            quotaHistoryPanel=new QuotaHistoryPanel(quota.HistoryStore,()=>QuotaHistoryStore.Scope(prefs.CodexHome),()=>quota.HistoryError);
+            var content=new Grid();content.Children.Add(largeHistory);content.Children.Add(quotaHistoryPanel);quotaHistoryPanel.Visibility=Visibility.Collapsed;
+            var layout=new DockPanel();var tabs=new WrapPanel{Margin=new Thickness(20,8,20,0)};DockPanel.SetDock(tabs,Dock.Top);layout.Children.Add(tabs);
+            var usageTab=Theme.Button("用量","每日用量与趋势",70);var quotaTab=Theme.Button("额度","额度历史曲线",70);usageTab.Margin=new Thickness(0,0,6,0);tabs.Children.Add(usageTab);tabs.Children.Add(quotaTab);
+            var scroller=new ScrollViewer{Content=content,VerticalScrollBarVisibility=ScrollBarVisibility.Auto,HorizontalScrollBarVisibility=ScrollBarVisibility.Disabled};layout.Children.Add(scroller);scroller.ScrollChanged+=delegate(object sender,ScrollChangedEventArgs e){if(e.ViewportHeightChange!=0&&quotaHistoryPanel!=null)quotaHistoryPanel.SetViewportHeight(scroller.ViewportHeight);};
+            Action<bool> selectQuota=show=>{largeHistory.Visibility=show?Visibility.Collapsed:Visibility.Visible;quotaHistoryPanel.Visibility=show?Visibility.Visible:Visibility.Collapsed;usageTab.Background=show?Theme.Surface:Theme.Hover;quotaTab.Background=show?Theme.Hover:Theme.Surface;scroller.ScrollToTop();};
+            usageTab.Click+=delegate{selectQuota(false);};quotaTab.Click+=delegate{selectQuota(true);};selectQuota(false);
+            var styled=new StyledWindow{Title="用量与额度趋势",Width=880,Height=850,MinWidth=340,MinHeight=420,MaxHeight=SystemParameters.WorkArea.Height,Background=Theme.Background,Foreground=Theme.Ink,FontFamily=FontFamily,Owner=this,WindowStartupLocation=WindowStartupLocation.CenterOwner,ShowInTaskbar=false};
+            styled.SetBody(layout,"用量与额度趋势","USAGE INSIGHTS",true);historyWindow=styled;historyWindow.Loaded+=delegate{if(historyWindow!=null)ClampWindow(historyWindow);};historyWindow.Closed+=delegate{historyWindow=null;largeHistory=null;quotaHistoryPanel=null;};historyWindow.Show();
         }
         private async void RefreshData()
         {
