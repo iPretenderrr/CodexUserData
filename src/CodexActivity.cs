@@ -321,10 +321,13 @@ namespace CodexUserData
         private sealed class State
         {
             internal bool Pending,Animating;
+            internal double Strength=1;
             internal System.Windows.UIElement Target;
         }
         private static readonly System.Windows.DependencyProperty StateProperty=System.Windows.DependencyProperty.RegisterAttached("State",typeof(State),typeof(CompletionFeedback),new System.Windows.PropertyMetadata(null));
         internal static void Set(System.Windows.Window window,bool pending)
+        {Set(window,pending,1);}
+        internal static void Set(System.Windows.Window window,bool pending,double strength)
         {
             var state=window.GetValue(StateProperty) as State;
             if(state==null)
@@ -333,6 +336,8 @@ namespace CodexUserData
                 window.IsVisibleChanged+=delegate{Render(window,state);};window.StateChanged+=delegate{Render(window,state);};
                 window.Closed+=delegate{state.Pending=false;Render(window,state);};
             }
+            strength=Theme.Bound(strength,.5,3,1);
+            if(state.Strength!=strength){if(state.Target!=null&&state.Animating)state.Target.BeginAnimation(System.Windows.UIElement.OpacityProperty,null);state.Strength=strength;state.Animating=false;}
             state.Pending=pending;Render(window,state);
         }
         private static void Render(System.Windows.Window window,State state)
@@ -350,9 +355,9 @@ namespace CodexUserData
             // Polls frequently repeat the same pending value. Reevaluate motion policy, while
             // retaining the existing clock whenever nothing changed instead of restarting it.
             if(animate==state.Animating)return;state.Animating=animate;
-            if(!animate){content.BeginAnimation(System.Windows.UIElement.OpacityProperty,null);return;}
+            if(!animate){if(content!=null)content.BeginAnimation(System.Windows.UIElement.OpacityProperty,null);return;}
             // A slow breath persists until acknowledged. Hidden/minimized windows consume no frames.
-            var animation=new System.Windows.Media.Animation.DoubleAnimation(1,.5,TimeSpan.FromMilliseconds(1100)){
+            var animation=new System.Windows.Media.Animation.DoubleAnimation(1,Math.Pow(.5,state.Strength),TimeSpan.FromMilliseconds(1100)){
                 AutoReverse=true,RepeatBehavior=System.Windows.Media.Animation.RepeatBehavior.Forever,FillBehavior=System.Windows.Media.Animation.FillBehavior.Stop};
             System.Windows.Media.Animation.Timeline.SetDesiredFrameRate(animation,30);
             content.BeginAnimation(System.Windows.UIElement.OpacityProperty,animation);

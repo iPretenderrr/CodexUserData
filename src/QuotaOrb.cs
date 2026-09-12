@@ -42,6 +42,7 @@ namespace CodexUserData
             new Ring(52.5,7.2,Gradient("#316BF1","#5F97FF","#89CDEC"),Theme.B("#DAF5FF"),"5h"),
             new Ring(43.5,5.4,Gradient("#7965EA","#AB8DF0","#E2B0ED"),Theme.B("#F5E5FF"),"7d")};
         private Preferences prefs;
+        private double TaskEffectStrength=1;
         private QuotaBucket bucket;
         private UsageSnapshot snapshot;
         private ActivityReport activity;
@@ -265,7 +266,7 @@ namespace CodexUserData
             dc.PushOpacity(Theme.IsLight?.48:.5);dc.DrawGeometry(null,ring.TrackStroke,ring.Track);dc.Pop();
             if(ring.Known&&fraction>0)
             {
-                if(!Lightweight){dc.PushOpacity(.07+.14*power+.13*ring.Focus);dc.DrawGeometry(null,ring.Glow,ring.Arc);dc.Pop();}
+                if(!Lightweight){dc.PushOpacity(Math.Min(1,(.07+.14*power+.13*ring.Focus)*TaskEffectStrength));dc.DrawGeometry(null,ring.Glow,ring.Arc);dc.Pop();}
                 dc.DrawGeometry(null,ring.Stroke,ring.Arc);
                 // Sparse glints stay inside the colored arc with stable positions, no random flicker.
                 int glints=Lightweight?3:9;
@@ -273,13 +274,13 @@ namespace CodexUserData
                 {
                     double along=(j+.55)/(glints+1);if(along>=fraction)continue;
                     double angle=-Math.PI/2+along*Math.PI*2;
-                    double opacity=.18+.45*power*(.5+.5*Math.Sin(time*2-j));
+                    double opacity=Math.Min(1,(.18+.45*power*(.5+.5*Math.Sin(time*2-j)))*TaskEffectStrength);
                     dc.PushOpacity(opacity);dc.DrawEllipse(ring.Light,null,WavePoint(radius+(j%3-1)*1.1,angle,time,power),j%3==0?.85:.48,j%3==0?.85:.48);dc.Pop();
                 }
                 if(power>.005)
                 {
                     double cycle=(time/(Math.PI*2)+(ring==rings[0]?0:.46))%1;
-                    double angle=-Math.PI/2+cycle*fraction*Math.PI*2,fade=Math.Sin(cycle*Math.PI)*power;
+                    double angle=-Math.PI/2+cycle*fraction*Math.PI*2,fade=Math.Min(1,Math.Sin(cycle*Math.PI)*power);
                     // Layer a soft, longer trail underneath the moving highlight; no blur filter.
                     var tail=WaveArc(radius,Math.Max(0,cycle*fraction-.16),cycle*fraction,time,power);
                     if(!Lightweight){dc.PushOpacity(.18*fade);dc.DrawGeometry(null,ring.TailGlow,tail);dc.Pop();}
@@ -300,7 +301,7 @@ namespace CodexUserData
                 var ring=VisibleRingCount==1?(ShortKnown?rings[0]:rings[1]):rings[i%2];
                 double life=(time/(Math.PI*2)+i*.61803398875)%1;
                 double angle=i*2.39996323+time*(i%2==0?1:-1),radius=50+10*life;
-                double opacity=Math.Sin(life*Math.PI);opacity=opacity*opacity*power*.85;
+                double opacity=Math.Sin(life*Math.PI);opacity=Math.Min(1,opacity*opacity*power*.85*TaskEffectStrength);
                 Point p=WavePoint(radius,angle,time,power*.18);double size=i%5==0?1.05:.55;
                 Brush color=ring.Known?ring.Light:Theme.Muted;
                 if(!Lightweight&&i%5==0){dc.PushOpacity(opacity*.16);dc.DrawEllipse(color,null,p,2.8,2.8);dc.Pop();}
@@ -330,8 +331,11 @@ namespace CodexUserData
             base.OnRender(dc);double diameter=Math.Min(ActualWidth,ActualHeight);if(diameter<=0)return;
             if(shell==null||paletteRevision!=Theme.Revision){CacheShell();textKey=null;RefreshState();}
             dc.PushTransform(new TranslateTransform((ActualWidth-diameter)/2,(ActualHeight-diameter)/2));dc.PushTransform(new ScaleTransform(diameter/128,diameter/128));
-            double time=phase,click=ClickStrength();
-            double power=Math.Min(1,Math.Max(energy,Math.Max(hover*.88,Math.Max(press*.95,click))));
+            double time=phase,click=ClickStrength();TaskEffectStrength=prefs!=null&&activeUntil>LocalCodexUsage.Unix(DateTime.Now)?prefs.EffectStrength:1;
+            // Bound the wave independently from light strength so the ring cannot leave its
+            // transparent padding. Pointer-only interactions keep their existing amplitude.
+            double taskPower=Math.Min(1.45,energy*Math.Sqrt(TaskEffectStrength));
+            double power=Math.Max(taskPower,Math.Min(1,Math.Max(hover*.88,Math.Max(press*.95,click))));
             // Stronger elastic feedback affects the colored rings only. The native window and text
             // never rotate or resize, so dragging, edge contact and percentage reading stay stable.
             double bounce=Math.Sin((clock.Elapsed.TotalSeconds-pulseAt)*15)*click;

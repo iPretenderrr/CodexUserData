@@ -28,6 +28,7 @@ namespace CodexUserData
         private CapsuleActivityChrome capsuleChrome;
         private TranslateTransform dockFlow;
         private int activityMotionFps;
+        private double activityMotionStrength;
         private readonly DispatcherTimer activityMotionClock=new DispatcherTimer{Interval=TimeSpan.FromSeconds(1)};
         private QuotaOrb orb;
         private DynamicIsland island;
@@ -144,25 +145,26 @@ namespace CodexUserData
         private void UpdateActivityMotion()
         {
             var p=preferences();long now=LocalCodexUsage.Unix(DateTime.Now);
-            bool capsule=!IsPillar&&!IsOrb&&!IsIsland&&!IsCustom&&capsuleChrome!=null,ready=IsPillar&&dockTrack!=null||capsule||IsIsland&&island!=null;
+            bool capsule=!IsPillar&&!IsOrb&&!IsIsland&&!IsCustom&&capsuleChrome!=null,ready=IsPillar&&dockTrack!=null||capsule||IsIsland&&island!=null||IsCustom&&custom!=null;
             bool running=!disposing&&dockMotion==null&&IsVisible&&ready&&activity!=null&&activity.ActiveTasks>0&&activity.Until>now;
             int fps=!disposing&&dockMotion==null&&IsVisible&&IsIsland&&island!=null?Theme.ActivityFrameRate(p.OrbAnimation):running?Theme.ActivityFrameRate(p.OrbAnimation):0;
-            if(fps==activityMotionFps)return;StopActivityMotion();if(fps==0)return;activityMotionFps=fps;
+            UpdateCompletionFeedback();
+            if(fps==activityMotionFps&&p.EffectStrength==activityMotionStrength)return;StopActivityMotion();if(fps==0)return;activityMotionFps=fps;activityMotionStrength=p.EffectStrength;
             // Animate paint only: quota length, hit targets and native window coordinates never move.
-            var breath=new DoubleAnimation(1,.58,TimeSpan.FromSeconds(1.05)){AutoReverse=true,RepeatBehavior=RepeatBehavior.Forever};Timeline.SetDesiredFrameRate(breath,fps);
+            var breath=new DoubleAnimation(1,Math.Pow(.58,p.EffectStrength),TimeSpan.FromSeconds(1.05)){AutoReverse=true,RepeatBehavior=RepeatBehavior.Forever};Timeline.SetDesiredFrameRate(breath,fps);
             if(IsPillar)
             {
                 dockFill.BeginAnimation(OpacityProperty,breath);
                 // Unknown quota breathes its neutral track without implying a remaining balance.
                 if(dockFill.Visibility!=Visibility.Visible)dockTrack.BeginAnimation(OpacityProperty,breath);
-                var light=dockFill.Child as UIElement;if(light!=null)light.Opacity=.55;
+                var light=dockFill.Child as UIElement;if(light!=null)light.Opacity=Math.Min(1,.55*p.EffectStrength);
                 bool horizontal=dock=="top"||dock=="bottom";
                 var flow=new DoubleAnimation(horizontal?-1:1,horizontal?1:-1,TimeSpan.FromSeconds(1.9)){RepeatBehavior=RepeatBehavior.Forever};Timeline.SetDesiredFrameRate(flow,fps);
                 if(dockFlow!=null)dockFlow.BeginAnimation(horizontal?TranslateTransform.XProperty:TranslateTransform.YProperty,flow);
             }
             else
             {
-                if(island!=null)island.Start(fps);else capsuleChrome.Start(fps);
+                if(island!=null)island.Start(fps);else if(capsuleChrome!=null)capsuleChrome.Start(fps);
             }
             activityMotionClock.Start();
         }
@@ -179,7 +181,14 @@ namespace CodexUserData
         {
             if(disposing||dragging||!IsIsland||IslandExpanded==value)return;CancelIslandClick();CancelDockMotion();preferences().BallExpanded=value;Build();QueueIslandSave();
         }
-        internal void SetCompletionPending(bool value){if(disposing)return;if(completionPending==value){if(island!=null)island.SetCompletionPending(value);CompletionFeedback.Set(this,!IsIsland&&value);return;}completionPending=value;if(island!=null)island.SetCompletionPending(value);CompletionFeedback.Set(this,!IsIsland&&value);if(island!=null)Build();}
+        internal void SetCompletionPending(bool value){if(disposing)return;bool changed=completionPending!=value;completionPending=value;if(island!=null)island.SetCompletionPending(value);if(custom!=null)custom.SetCompletionPending(value);UpdateCompletionFeedback();if(changed&&island!=null)Build();}
+        private void UpdateCompletionFeedback()
+        {
+            // HTML content also receives host-owned breathing, so existing third-party shapes
+            // need no script changes. Animate the inner host without touching transition clocks.
+            bool htmlRunning=IsCustom&&activity!=null&&activity.ActiveTasks>0&&activity.Until>LocalCodexUsage.Unix(DateTime.Now);
+            CompletionFeedback.Set(this,!IsIsland&&(completionPending||htmlRunning),preferences().EffectStrength);
+        }
         internal void SetOrb(){if(disposing||dragging)return;CancelIslandClick();CancelIslandResize(true);CancelDockMotion();WindowInteraction.ChangeShape(this,delegate{preferences().BallStyle="orb";preferences().BallExpanded=false;dock="";Build();Clamp();SavePosition();});}
         internal void SetCustom(){if(disposing||dragging)return;CancelIslandClick();CancelIslandResize(true);CancelDockMotion();WindowInteraction.ChangeShape(this,delegate{preferences().BallStyle="html";preferences().BallExpanded=false;dock="";builtShape=null;Build();Clamp();SavePosition();});}
         private void DragCustom(){if(disposing||dragging||preferences().BallPositionLocked||Mouse.LeftButton!=MouseButtonState.Pressed)return;CancelTransition();RememberBeforeDrag();dragging=true;try{DragMove();}catch(InvalidOperationException){}finally{dragging=false;SnapToEdge();SavePosition();}}
@@ -304,7 +313,7 @@ namespace CodexUserData
                 tokens.Children.Add(new Viewbox{Child=tokenText,Stretch=Stretch.Uniform,StretchDirection=StretchDirection.DownOnly,HorizontalAlignment=HorizontalAlignment.Left,Height=24});AutomationProperties.SetAutomationId(tokenText,"BallTodayTokens");
                 if(large){quotaRows=new StackPanel{VerticalAlignment=VerticalAlignment.Center};row.Children.Add(quotaRows);}
             }
-            UpdateValues();UpdateActivityMotion();if(animateIsland)AnimateIslandResize(islandFromWidth,islandFromHeight,islandTargetWidth,islandTargetHeight);CompletionFeedback.Set(this,!IsIsland&&completionPending);
+            UpdateValues();UpdateActivityMotion();if(animateIsland)AnimateIslandResize(islandFromWidth,islandFromHeight,islandTargetWidth,islandTargetHeight);UpdateCompletionFeedback();if(custom!=null)custom.SetCompletionPending(completionPending);
         }
         private void AnimateIslandResize(double fromWidth,double fromHeight,double toWidth,double toHeight)
         {
@@ -327,7 +336,7 @@ namespace CodexUserData
             if(island!=null)island.Apply(usage,bucket,activity,source,quotaStamp,preferences());
             if(orb!=null){var p=preferences();orb.ApplyActivity(activity);orb.Apply(p,bucket,usage,source+"|"+p.Source+"|"+p.CodexHome+"|"+p.Database);}
             long now=LocalCodexUsage.Unix(DateTime.Now);var today=usage==null?null:usage.Daily.LastOrDefault(d=>d.Date==DateTime.Now.ToString("yyyy-MM-dd",CultureInfo.InvariantCulture));
-            string key=(today==null?"none":today.Date+":"+today.Tokens)+"/"+source+"/"+quotaStamp+"/"+OrbPalette.Key(preferences())+"/"+(bucket==null?"none":bucket.Origin+"/"+String.Join("|",new[]{bucket.Primary,bucket.Secondary}.Where(w=>w!=null).Select(w=>w.Label+":"+w.Remaining(bucket,now))));
+            string key=(today==null?"none":today.Date+":"+today.Tokens)+"/"+source+"/"+quotaStamp+"/"+OrbPalette.Key(preferences())+"/"+preferences().EffectStrength+"/"+(bucket==null?"none":bucket.Origin+"/"+String.Join("|",new[]{bucket.Primary,bucket.Secondary}.Where(w=>w!=null).Select(w=>w.Label+":"+w.Remaining(bucket,now))));
             if(valuesKey==key)return;valuesKey=key;
             if(tokenText!=null){tokenText.Text=today==null?"—":TokenText.Compact(today.Tokens);tokenText.ToolTip="今日已记录 Tokens · "+source;}
             var windows=bucket==null?new QuotaWindow[0]:new[]{bucket.Primary,bucket.Secondary}.Where(w=>w!=null).ToArray();
@@ -586,12 +595,13 @@ namespace CodexUserData
         private Rect bounds;
         private double tailFraction;
         private string paletteKey;
+        private double strength=1;
         private bool active;
 
         internal CapsuleActivityChrome(){IsHitTestVisible=false;}
         internal void ApplyPalette(Preferences p)
         {
-            string key=OrbPalette.Key(p);if(key==paletteKey)return;paletteKey=key;
+            string key=OrbPalette.Key(p)+"|"+p.EffectStrength;if(key==paletteKey)return;paletteKey=key;strength=p.EffectStrength;
             var colors=OrbPalette.EffectiveColors(p,false).Select(c=>(Color)ColorConverter.ConvertFromString(c)).ToArray();
             tint=OrbPalette.ForBar(p,false);rim=new Pen(tint,1.2);rim.Freeze();
             var light=new LinearGradientBrush{StartPoint=new Point(0,0),EndPoint=new Point(1,.3)};
@@ -603,13 +613,13 @@ namespace CodexUserData
                 double t=(i+1.0)/TailSteps,index=t*(colors.Length-1);int a=(int)index,b=Math.Min(colors.Length-1,a+1);double mix=index-a;
                 Color color=Color.FromRgb((byte)(colors[a].R+(colors[b].R-colors[a].R)*mix),(byte)(colors[a].G+(colors[b].G-colors[a].G)*mix),(byte)(colors[a].B+(colors[b].B-colors[a].B)*mix));
                 // Overlapping round segments form one uninterrupted comet with a fading tail.
-                trail[i]=MakePen(color,Math.Pow(t,1.6),2.1);halo[i]=MakePen(color,.17*Math.Pow(t,2),6);
+                trail[i]=MakePen(color,Math.Pow(t,1.6)*strength,2.1*Math.Sqrt(strength));halo[i]=MakePen(color,.17*Math.Pow(t,2)*strength,6*Math.Sqrt(strength));
             }
             InvalidateVisual();
         }
         private static Pen MakePen(Color color,double alpha,double width)
         {
-            color.A=(byte)Math.Round(255*alpha);var pen=new Pen(new SolidColorBrush(color),width){StartLineCap=PenLineCap.Round,EndLineCap=PenLineCap.Round};pen.Freeze();return pen;
+            color.A=(byte)Math.Round(255*Math.Min(1,alpha));var pen=new Pen(new SolidColorBrush(color),width){StartLineCap=PenLineCap.Round,EndLineCap=PenLineCap.Round};pen.Freeze();return pen;
         }
         internal void Start(int fps)
         {
@@ -649,9 +659,9 @@ namespace CodexUserData
             double phase=(double)GetValue(PhaseProperty),breath=(double)GetValue(BreathProperty);
             dc.PushClip(clip);
             // Brightness changes the whole background, never the text opacity or hit targets.
-            dc.PushOpacity(.06+(Theme.IsLight?.25:.34)*breath);dc.DrawRectangle(tint,null,new Rect(RenderSize));dc.Pop();
+            dc.PushOpacity(Math.Min(.85,(.06+(Theme.IsLight?.25:.34)*breath)*strength));dc.DrawRectangle(tint,null,new Rect(RenderSize));dc.Pop();
             sweepPosition.X=(-1.05+2.1*phase)*ActualWidth;
-            dc.PushOpacity(.14+.22*breath);dc.PushTransform(sweepPosition);
+            dc.PushOpacity(Math.Min(1,(.14+.22*breath)*strength));dc.PushTransform(sweepPosition);
             dc.DrawRectangle(sweep,null,new Rect(0,0,ActualWidth,ActualHeight));dc.Pop();dc.Pop();
             dc.PushOpacity(.28+.40*breath);dc.DrawRoundedRectangle(null,rim,bounds,14.95,14.95);dc.Pop();
             dc.PushOpacity(.72+.28*breath);

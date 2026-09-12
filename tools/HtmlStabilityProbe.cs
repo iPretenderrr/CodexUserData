@@ -41,6 +41,16 @@ namespace CodexUserData
             for(int i=0;i<20;i++)widget.ApplySnapshot(same);
             await Task.Delay(150);
             StabilityProbe.Check(Int32.Parse(await web.ExecuteScriptAsync("window.fixtureMessages.length"))==beforeRepeat,"identical visible data does not send duplicate browser snapshots");
+            p.BallEffectIntensity=3;long effectNow=LocalCodexUsage.Unix(DateTime.Now);
+            ball.Apply(same,null,"fixture","");ball.ApplyActivity(new ActivityReport{ActiveTasks=1,Until=effectNow+60,ObservedAt=effectNow});
+            // WPF applies a new animation clock on the next dispatcher/render tick.
+            await Task.Delay(60);var effectHost=((System.Windows.Controls.Decorator)ball.Content).Child;
+            StabilityProbe.Check(DependencyPropertyHelper.GetValueSource(effectHost,UIElement.OpacityProperty).IsAnimated,"existing HTML receives host-owned running breathing (custom="+ball.IsCustom+", visible="+ball.IsVisible+", motion="+Theme.MotionAllowed+", host="+effectHost.GetType().Name+")");
+            ball.ApplyActivity(new ActivityReport());ball.SetCompletionPending(true);
+            string effectData=(string)StabilityProbe.Call(custom,"SerializeData");
+            StabilityProbe.Check(effectData.Contains("\"effectIntensity\":3")&&effectData.Contains("\"completionPending\":true"),"HTML data contract includes persisted strength and pending acknowledgement");
+            ball.SetCompletionPending(false);
+            StabilityProbe.Check(!DependencyPropertyHelper.GetValueSource(effectHost,UIElement.OpacityProperty).IsAnimated,"HTML acknowledgement clears the host breathing clock");
             p.OrbAnimation="eco";Theme.Apply(p);widget.ApplySnapshot(same);await Task.Delay(100);
             StabilityProbe.Check(await web.ExecuteScriptAsync("window.fixtureMotion")=="\"eco\"","HTML receives the lightweight motion profile");
             p.OrbAnimation="off";Theme.Apply(p);widget.ApplySnapshot(same);await Task.Delay(100);

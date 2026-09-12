@@ -47,6 +47,8 @@ document.querySelector('#handle').addEventListener('pointerdown', e => {
 | `activity.monitoringAvailable` | 可选布尔值；当前任务监测可用且报告不超过 5 秒时为 true。false 表示目录缺失、读取受限、报告过期或尚未读取，不能把任务数为 0 当成“空闲”或“全部完成”；旧版没有此字段时也不要推定监测可用 |
 | `activity.completedTasks` / `completionSerial` | 本轮检测到的明确完成数 / 本次运行内递增的完成序号。页面按序号去重；首次接收只记录基线，不播放历史完成效果。启动、后台审查、中断和超时不触发完成 |
 | `motion` | smooth / eco / off；尊重此设置与 prefers-reduced-motion |
+| `effectIntensity` | 悬浮球特效强度，0.5–3，默认 1。调整光效幅度，不增加帧率或粒子数量；宿主已为运行和待确认状态提供整体呼吸 |
+| `completionPending` | 任务完成尚未确认；鼠标移入确认后为 false。新任务开始后以运行状态优先 |
 
 底层协议是 `window.chrome.webview`：宿主发送 `{type:'snapshot', apiVersion:1, data:{...}}`；页面发送 `{type:'ready'}`、`{type:'drag'}`、`{type:'resize',width:300,height:100}` 或 `{type:'restoreMain'}`。不支持其他命令。
 

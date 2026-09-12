@@ -10,8 +10,8 @@ using System.Windows;
 
 [assembly: System.Reflection.AssemblyTitle("CodexUserData")]
 [assembly: System.Reflection.AssemblyProduct("CodexUserData")]
-[assembly: System.Reflection.AssemblyVersion("1.8.3.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.8.3.0")]
+[assembly: System.Reflection.AssemblyVersion("1.8.4.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.8.4.0")]
 
 namespace CodexUserData
 {
@@ -38,6 +38,9 @@ namespace CodexUserData
         public string BallStyle {get;set;} public string OrbQuotaWindow {get;set;} public string OrbAnimation {get;set;}
         public double OrbSize {get;set;}
         public double AnimationSpeed {get;set;}
+        public double BallEffectIntensity {get;set;}
+        // Strength changes visual amplitude, never frame rate or animation duration.
+        internal double EffectStrength {get{return Clamp(BallEffectIntensity,.5,3,1);}}
         public string[] OrbShortColors {get;set;} public string[] OrbLongColors {get;set;}
         public double OrbShortAngle {get;set;} public double OrbLongAngle {get;set;}
         public bool StartWithWindows {get;set;} public bool StartWithCodex {get;set;}
@@ -60,7 +63,7 @@ namespace CodexUserData
         public Preferences()
         {
             string user=Environment.GetEnvironmentVariable("USERPROFILE") ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            BallLeft=Double.NaN;BallTop=Double.NaN;BallDock="";
+            BallLeft=Double.NaN;BallTop=Double.NaN;BallDock="";BallEffectIntensity=1;
             BallMonitor="";BallPlacements=new Dictionary<string,BallPlacement>(StringComparer.OrdinalIgnoreCase);CustomShapeSizes=new Dictionary<string,double[]>(StringComparer.OrdinalIgnoreCase);
             BallOpacity=1;OrbFollowTheme=true;IslandFollowTheme=true;IslandMaterial="glass";IslandColors=new[]{"#3976FF","#35C8E2","#87F3BE","#C68BFF","#FF83C4"};CompletionFlash=true;BallStyle="orb";OrbQuotaWindow="auto";OrbAnimation="auto";OrbSize=84;AnimationSpeed=1;
             OrbShortColors=new[]{"#316BF1","#5F97FF","#89CDEC"};OrbLongColors=new[]{"#7965EA","#AB8DF0","#E2B0ED"};OrbShortAngle=OrbLongAngle=45;
@@ -77,7 +80,7 @@ namespace CodexUserData
         internal Preferences Clone(){return Program.Json.Deserialize<Preferences>(Program.Json.Serialize(this));}
         internal void Validate()
         {
-            Theme.Normalize(this);BallOpacity=Clamp(BallOpacity,.2,1,1);
+            Theme.Normalize(this);BallOpacity=Clamp(BallOpacity,.2,1,1);BallEffectIntensity=EffectStrength;
             NormalizePlacement();
             OrbPalette.Normalize(this);
             IslandColors=OrbPalette.Clean(IslandColors,new[]{"#3976FF","#35C8E2","#87F3BE","#C68BFF","#FF83C4"});

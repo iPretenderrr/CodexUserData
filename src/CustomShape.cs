@@ -85,6 +85,9 @@ namespace CodexUserData
         private QuotaBucket latestBucket;
         private ActivityReport latestActivity;
         private Preferences latestPreferences;
+        private bool completionPending;
+        internal void SetCompletionPending(bool value)
+        {if(completionPending==value)return;completionPending=value;snapshotDirty=true;Send();}
         private readonly Action restore,drag;
         private readonly Action<double,double> resize;
         private readonly DispatcherTimer watchdog,frameFallback;
@@ -325,7 +328,7 @@ namespace CodexUserData
                 quota=windows.Select(w=>new{minutes=w.Minutes,remainingPercent=w.RemainingPercent(bucket,now),resetsAt=w.ResetsAt,observedAt=bucket.ObservedAt}),
                 activity=new{activeTasks=activity==null?0:activity.ActiveTasks,uncertainTasks=activity==null?0:activity.UncertainTasks,completedTasks=activity==null?0:activity.CompletedTasks,completionSerial=activity==null?0:activity.CompletionSerial,
                     monitoringAvailable=activity!=null&&!activity.MonitoringUnavailable&&activity.ObservedAt>0&&activity.ObservedAt<=now+5&&now-activity.ObservedAt<=5},
-                motion=motionFps==0?"off":motionFps<=30?"eco":"smooth"
+                motion=motionFps==0?"off":motionFps<=30?"eco":"smooth",effectIntensity=preferences.EffectStrength,completionPending=completionPending
             });
         }
         private void Send(bool force=false)

@@ -276,11 +276,37 @@ internal static class ReleaseProbe
   Check(WaitForUi(()=>!flyout.IsVisible)&&dismissed==1,"manual popup dismissal calls its continuation exactly once");flyout.Close();
   Call("Theme",null,"Apply",original);
  }
+ static void FloatingEffectsOnly(string dir)
+ {
+  var prefs=New("Preferences");Check((double)Get(prefs,"BallEffectIntensity")==1,"protected floating intensity defaults to 1x");
+  Set(prefs,"BallEffectIntensity",3d);var cloned=Call("Preferences",prefs,"Clone");Check((double)Get(cloned,"BallEffectIntensity")==3,"protected floating strength persists");
+  Set(prefs,"OrbAnimation","eco");Call("Theme",null,"Apply",prefs);
+  var getPrefs=System.Linq.Expressions.Expression.Lambda(typeof(Func<>).MakeGenericType(TypeFor("Preferences")),System.Linq.Expressions.Expression.Constant(prefs)).Compile();
+  var activity=New("ActivityReport");SetInternal("ActivityReport",activity,"ActiveTasks",1);SetInternal("ActivityReport",activity,"Until",DateTimeOffset.Now.ToUnixTimeSeconds()+90);
+  foreach(string form in new[]{"small","large","orb","classic","glass","top","left"})
+  {
+   Set(prefs,"BallStyle",form=="orb"?"orb":form=="classic"||form=="glass"?"island":"capsule");Set(prefs,"IslandMaterial",form=="classic"?"classic":"glass");Set(prefs,"BallExpanded",form=="large");ResetBallPlacement(prefs,form=="top"||form=="left"?form:"");
+   var ball=(Window)New("FloatingBall",getPrefs,new Action(()=>{}),new Action(()=>{}),new Action(()=>{}));
+   try
+   {
+    ball.ShowActivated=false;ball.Show();Call("FloatingBall",ball,"ApplyActivity",activity);Pump(400);
+    Check(ball.IsVisible&&ball.Width>0&&ball.Height>0,"protected running form renders at 3x: "+form);
+    Call("FloatingBall",ball,"ApplyActivity",New("ActivityReport"));Call("FloatingBall",ball,"SetCompletionPending",true);Pump(80);ball.Hide();
+    var target=((Decorator)ball.Content).Child;
+    Check(!DependencyPropertyHelper.GetValueSource(target,UIElement.OpacityProperty).IsAnimated,"protected hidden completion has no opacity clock: "+form);
+    ball.Show();Call("FloatingBall",ball,"SetCompletionPending",false);
+    Check(!DependencyPropertyHelper.GetValueSource(target,UIElement.OpacityProperty).IsAnimated,"protected completion acknowledgement restores opacity: "+form);
+   }
+   finally{Call("FloatingBall",ball,"Dispose");}
+  }
+  Console.WriteLine("FLOATING RELEASE CHECKS: "+checks);
+ }
  [STAThread] static int Main(string[] args)
  {
   try{
    AppDomain.CurrentDomain.SetData("CodexUserData.TestDataFolder",Path.Combine(Path.GetFullPath(args[2]),"fixture-user"));
    assembly=Assembly.LoadFrom(Path.GetFullPath(args[0]));map=File.ReadAllText(args[1]);string dir=args[2];Directory.CreateDirectory(dir);
+   if(args.Contains("--floating-only")){FloatingEffectsOnly(dir);return 0;}
    Check(assembly.GetType("CodexUserData.WidgetWindow")==null&&Regex.Matches(map,@"^\[CodexUserData\].+ -> \[CodexUserData\]",RegexOptions.Multiline).Count>20,"implementation types are renamed");
    var json=new JavaScriptSerializer();var prefs=New("Preferences");Set(prefs,"MinimizeToTray",true);Set(prefs,"PriceOverrides",new Dictionary<string,decimal[]>{{"fixture-model",new[]{1m,.1m,0m,2m}}});
    string settings=json.Serialize(prefs);var clone=Call("Preferences",prefs,"Clone");Check(settings.Contains("\"MinimizeToTray\":true")&&(bool)Get(clone,"MinimizeToTray")&&((IDictionary)Get(clone,"PriceOverrides")).Contains("fixture-model"),"settings and custom-price schema survive obfuscation");

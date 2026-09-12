@@ -1,4 +1,4 @@
-﻿param([string]$Version='1.8.3')
+﻿param([string]$Version='1.8.4',[switch]$FloatingOnly)
 # Keep this script UTF-8 with BOM: Windows PowerShell 5.1 must decode the Chinese allowlist paths correctly.
 $ErrorActionPreference='Stop'
 if($Version -notmatch '^\d+\.\d+\.\d+$'){throw 'Version must be major.minor.patch'}
@@ -34,7 +34,8 @@ $refs=@('WPF/PresentationCore.dll','WPF/PresentationFramework.dll','WPF/WindowsB
 $probe=Join-Path $run 'ReleaseProbe.exe'
 & (Join-Path $framework 'csc.exe') /nologo /target:exe /platform:x64 ('/out:'+$probe) @refs (Join-Path $root 'tools\ReleaseProbe.cs')
 if($LASTEXITCODE -ne 0){throw 'Release verifier compilation failed'}
-& $probe $binary $map (Join-Path $run 'verification')
+if($FloatingOnly){& $probe $binary $map (Join-Path $run 'verification') --floating-only}
+else{& $probe $binary $map (Join-Path $run 'verification')}
 if($LASTEXITCODE -ne 0){throw 'Protected binary verification failed; no ZIP was generated'}
 # HTML uses its own renderer process: smoke-test the protected bridge and host-owned menu.
 $htmlRefs=@($refs)+@(('/r:'+(Join-Path $protected 'Microsoft.Web.WebView2.Core.dll')),('/r:'+(Join-Path $protected 'Microsoft.Web.WebView2.Wpf.dll')))

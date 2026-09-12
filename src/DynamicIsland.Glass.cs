@@ -100,7 +100,8 @@ namespace CodexUserData
         {
             if(glassTokens==null)return;
             double width=RenderWidth,height=RenderHeight,phase=(double)GetValue(PhaseProperty),breath=(double)GetValue(BreathProperty),detail=(double)GetValue(ExpansionProperty);
-            double press=(double)GetValue(PressProperty),wave=running||completionPending?Math.Sin(phase*2*Math.PI)*.55:0;
+            double strength=preferences==null?1:preferences.EffectStrength;
+            double press=(double)GetValue(PressProperty),wave=running||completionPending?Math.Sin(phase*2*Math.PI)*.55*strength:0;
             pressScale.CenterX=width/2;pressScale.CenterY=height/2;pressScale.ScaleX=1-.012*press;pressScale.ScaleY=1-.035*press;dc.PushTransform(pressScale);
             var bounds=new Rect(4,4+wave,width-8,height-8);double radius=bounds.Height/2;
             using(var path=glassOutline.Open())
@@ -115,10 +116,10 @@ namespace CodexUserData
             // quota rings stay truthful; their lengths never animate as fake task progress.
             if(running||completionPending)
             {
-                Color tint=colors[Math.Min(1,colors.Length-1)];tint.A=(byte)(18+30*breath);innerBrush.GradientStops[0].Color=tint;
+                Color tint=colors[Math.Min(1,colors.Length-1)];tint.A=(byte)((18+30*breath)*strength);innerBrush.GradientStops[0].Color=tint;
                 innerBrush.Center=innerBrush.GradientOrigin=new Point(.5+.38*Math.Cos(phase*2*Math.PI),.5+.30*Math.Sin(phase*2*Math.PI));dc.DrawRectangle(innerBrush,null,bounds);
                 int count=currentFps<=30?Math.Min(2,rimPens.Length):rimPens.Length;
-                for(int i=0;i<count;i++){double a=phase*2*Math.PI+i*2*Math.PI/count;int k=i*rimPens.Length/count;rimBrushes[k].Center=rimBrushes[k].GradientOrigin=new Point(.5+.44*Math.Cos(a),.5+.42*Math.Sin(a));rimBrushes[k].Opacity=.45+.25*breath;rimPens[k].Thickness=2.1;dc.DrawGeometry(null,rimPens[k],glassOutline);}
+                for(int i=0;i<count;i++){double a=phase*2*Math.PI+i*2*Math.PI/count;int k=i*rimPens.Length/count;rimBrushes[k].Center=rimBrushes[k].GradientOrigin=new Point(.5+.44*Math.Cos(a),.5+.42*Math.Sin(a));rimBrushes[k].Opacity=Math.Min(1,(.45+.25*breath)*strength);rimPens[k].Thickness=2.1*Math.Sqrt(strength);dc.DrawGeometry(null,rimPens[k],glassOutline);}
             }
             dc.Pop();
             double centerY=height/2,tokenX=52;

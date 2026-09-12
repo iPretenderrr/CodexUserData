@@ -119,22 +119,24 @@ namespace CodexUserData
             // Four overlapping color lobes read as one fluid rim. Eco mode uses two larger
             // lobes, reducing radial-gradient paint work while preserving state color.
             bool completion=completionPending&&!running;
-            int lobes=currentFps>0&&currentFps<=30?Math.Min(2,rimBrushes.Length):rimBrushes.Length;double glow=completion?0.78:running?0.62:0.34;
+            double strength=preferences==null?1:preferences.EffectStrength;
+            int lobes=currentFps>0&&currentFps<=30?Math.Min(2,rimBrushes.Length):rimBrushes.Length;double glow=(completion?0.78:running?0.62:0.34)*(running||completion?strength:1);
             for(int i=0;i<lobes;i++)
             {
                 double a=phase*Math.PI*2+i*Math.PI*2/lobes;Point center=new Point(.5+.42*Math.Cos(a),.5+.38*Math.Sin(a));
-                int index=(i*rimBrushes.Length/lobes)%rimBrushes.Length;rimBrushes[index].Center=center;rimBrushes[index].GradientOrigin=center;rimBrushes[index].Opacity=.52+.22*glow+.08*breath;rimPens[index].Thickness=2.2+glow;
+                int index=(i*rimBrushes.Length/lobes)%rimBrushes.Length;rimBrushes[index].Center=center;rimBrushes[index].GradientOrigin=center;rimBrushes[index].Opacity=Math.Min(1,.52+.22*glow+.08*breath);rimPens[index].Thickness=2.2+glow;
                 dc.DrawRoundedRectangle(null,rimPens[index],rect,radius,radius);
             }
             // The body subtly swells at the moving light position; the text is painted later
             // in fixed coordinates and therefore remains perfectly stable.
-            double flex=(running||completion)?.8+1.1*breath:0;double wave=Math.Sin(phase*Math.PI*2);
+            // Keep deformation inside the existing transparent margin at maximum strength.
+            double flex=(running||completion)?Math.Min(2.8,(.8+1.1*breath)*Math.Sqrt(strength)):0;double wave=Math.Sin(phase*Math.PI*2);
             using(var g=outline.Open()){double l=pad+1,r=RenderWidth-pad-1,t=pad+1-flex*Math.Max(0,wave),b=RenderHeight-pad-1-flex*Math.Max(0,-wave);g.BeginFigure(new Point(l+radius,t),true,true);g.LineTo(new Point(r-radius,t),true,false);g.ArcTo(new Point(r,t+radius),new Size(radius,radius),0,false,SweepDirection.Clockwise,true,false);g.LineTo(new Point(r,b-radius),true,false);g.ArcTo(new Point(r-radius,b),new Size(radius,radius),0,false,SweepDirection.Clockwise,true,false);g.LineTo(new Point(l+radius,b),true,false);g.ArcTo(new Point(l,b-radius),new Size(radius,radius),0,false,SweepDirection.Clockwise,true,false);g.LineTo(new Point(l,t+radius),true,false);g.ArcTo(new Point(l+radius,t),new Size(radius,radius),0,false,SweepDirection.Clockwise,true,false);}dc.DrawGeometry(IsMouseOver?bodyHover:body,linePen,outline);
             dc.PushClip(outline);dc.DrawRectangle(sheen,null,rect);
             if(running||completion)
             {
-                Color c=completion?colors[colors.Length-1]:colors[Math.Min(1,colors.Length-1)];breathingWash.Color=Color.FromArgb((byte)(7+18*breath),c.R,c.G,c.B);dc.DrawRectangle(breathingWash,null,rect);
-                c.A=(byte)(30+40*breath);Point origin=new Point(.5+.36*Math.Cos(phase*Math.PI*2),.5+.22*Math.Sin(phase*Math.PI*2));innerBrush.GradientStops[0].Color=c;innerBrush.GradientStops[1].Color=Color.FromArgb(0,c.R,c.G,c.B);innerBrush.Center=origin;innerBrush.GradientOrigin=origin;dc.DrawRectangle(innerBrush,null,rect);
+                Color c=completion?colors[colors.Length-1]:colors[Math.Min(1,colors.Length-1)];breathingWash.Color=Color.FromArgb((byte)((7+18*breath)*strength),c.R,c.G,c.B);dc.DrawRectangle(breathingWash,null,rect);
+                c.A=(byte)((30+40*breath)*strength);Point origin=new Point(.5+.36*Math.Cos(phase*Math.PI*2),.5+.22*Math.Sin(phase*Math.PI*2));innerBrush.GradientStops[0].Color=c;innerBrush.GradientStops[1].Color=Color.FromArgb(0,c.R,c.G,c.B);innerBrush.Center=origin;innerBrush.GradientOrigin=origin;dc.DrawRectangle(innerBrush,null,rect);
             }
             dc.Pop();
             dc.PushClip(outline);DrawClassicContent(dc);dc.Pop();

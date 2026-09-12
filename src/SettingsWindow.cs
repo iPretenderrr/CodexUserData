@@ -91,6 +91,13 @@ namespace CodexUserData
             System.Windows.Automation.AutomationProperties.SetName(speed,"动画速率");System.Windows.Automation.AutomationProperties.SetAutomationId(speed,"AnimationSpeed");
             speed.ValueChanged+=delegate{draft.AnimationSpeed=speed.Value;speedLabel.Text=speed.Value.ToString("0.0",System.Globalization.CultureInfo.InvariantCulture)+"×";Theme.Apply(draft);};resetSpeed.Click+=delegate{speed.Value=1;};floating.Children.Add(speed);
             Note(floating,"0.5× 更舒缓，1× 默认，2× 更利落。控制吸附、展开、形态切换和窗口开关；帧率由上方动画档位决定。",Theme.Muted);
+            Label(floating,"悬浮球特效强度");
+            var strengthRow=new DockPanel();var strengthLabel=Theme.Text(draft.EffectStrength.ToString("0.0",System.Globalization.CultureInfo.InvariantCulture)+"×",12,Theme.Accent);
+            var resetStrength=Theme.Button("恢复 1×","恢复当前默认特效强度",90);DockPanel.SetDock(resetStrength,Dock.Right);strengthRow.Children.Add(resetStrength);strengthRow.Children.Add(strengthLabel);floating.Children.Add(strengthRow);
+            var strength=new Slider{Minimum=.5,Maximum=3,Value=draft.EffectStrength,TickFrequency=.1,IsSnapToTickEnabled=true,Margin=new Thickness(0,8,0,0)};
+            System.Windows.Automation.AutomationProperties.SetName(strength,"悬浮球特效强度");System.Windows.Automation.AutomationProperties.SetAutomationId(strength,"BallEffectIntensity");
+            strength.ValueChanged+=delegate{draft.BallEffectIntensity=strength.Value;strengthLabel.Text=strength.Value.ToString("0.0",System.Globalization.CultureInfo.InvariantCulture)+"×";};resetStrength.Click+=delegate{strength.Value=1;};floating.Children.Add(strength);
+            Note(floating,"0.5× 更柔和，1× 原有效果，3× 更醒目。调整所有悬浮形态运行中、完成待确认时的呼吸、流光与扭动幅度，不改变动画速率；保存后生效。",Theme.Muted);
             var completion=new CheckBox{Content="任务完成后闪烁提示",IsChecked=draft.CompletionFlash,Foreground=Theme.Ink,Margin=new Thickness(0,16,0,5)};floating.Children.Add(completion);completion.Checked+=delegate{draft.CompletionFlash=true;};completion.Unchecked+=delegate{draft.CompletionFlash=false;};
             Note(floating,"明确完成后持续闪烁，鼠标移入悬浮窗或托盘确认。任务状态仍可能受日志落盘延迟影响。",Theme.Muted);
             AddPage("floating",floating);

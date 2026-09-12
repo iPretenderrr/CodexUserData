@@ -59,6 +59,7 @@
 !/src/QuotaHistory.cs
 !/src/QuotaHistoryChart.cs
 !/tools/QuotaHistoryStabilityProbe.cs
+!/tools/FloatingEffectsStabilityProbe.cs
 !/src/QuotaStatus.cs
 !/src/SettingsWindow.cs
 !/src/ReleaseUpdate.cs
