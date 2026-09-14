@@ -25,6 +25,7 @@ namespace CodexUserData
     }
     internal sealed class LogCursor
     {
+        internal object MemberCopy(){return MemberwiseClone();}
         public string Id, Parent, Path, Model = "unknown", Effort="unknown", Previous, Head, Tail;
         public List<QuotaBucket> Quotas=new List<QuotaBucket>();
         public long Started, Offset, Length, Modified, Created;
@@ -50,17 +51,20 @@ namespace CodexUserData
     internal sealed class LocalCodexUsage
     {
         private readonly string root, cachePath;
-        private readonly Dictionary<string, LogCursor> cursors = new Dictionary<string, LogCursor>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, LogCursor> cursors;
         private readonly JavaScriptSerializer json = new JavaScriptSerializer { MaxJsonLength = 64 * 1024 * 1024, RecursionLimit = 100 };
         private DateTime saved;
         private bool dirty;
         private readonly bool readOnlyCache;
+        private readonly bool remoteCache;
         internal long LastBytesRead { get; private set; }
         private static readonly DateTime Epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
-        internal LocalCodexUsage(string directory, string cacheFile,bool readOnly=false)
+        internal LocalCodexUsage(string directory,string cacheFile,bool readOnly=false):this(directory,cacheFile,readOnly,false){}
+        internal LocalCodexUsage(string directory, string cacheFile,bool readOnly,bool remote)
         {
-            root = System.IO.Path.GetFullPath(directory); cachePath = cacheFile;readOnlyCache=readOnly;
+            root = System.IO.Path.GetFullPath(directory); cachePath = cacheFile;readOnlyCache=readOnly;remoteCache=remote;
+            cursors=new Dictionary<string,LogCursor>(remote?StringComparer.Ordinal:StringComparer.OrdinalIgnoreCase);
             LoadCache();
         }
         internal static long Unix(DateTime date) { return (long)(date.ToUniversalTime() - Epoch).TotalSeconds; }
@@ -155,18 +159,25 @@ namespace CodexUserData
             cursor.Events.Add(new LocalUsageEvent { Time = time, Signature = signature, Model = cursor.Model, Effort=cursor.Effort, Input = delta.Input, Cached = Math.Min(delta.Input, delta.Cached), CacheWrite = Math.Min(Math.Max(0,delta.Input-delta.Cached),delta.CacheWrite), Output = delta.Output, Reasoning = Math.Min(delta.Output, delta.Reasoning), Inferred = !duplicate && last == null });
         }
 
-        private static string Fingerprint(FileStream stream, long offset, int count)
+        internal static string Fingerprint(Stream stream, long offset, int count)
         {
-            stream.Position = Math.Max(0, offset); byte[] data = new byte[count]; int used = stream.Read(data,0,count);
+            stream.Position = Math.Max(0, offset); byte[] data = new byte[count]; int used=0,read;
+            while(used<count&&(read=stream.Read(data,used,count-used))>0)used+=read;
             using (SHA256 hash = SHA256.Create()) return Convert.ToBase64String(hash.ComputeHash(data,0,used));
         }
         private bool ReadFile(LogCursor cursor, FileInfo file, Func<bool> cancel)
         {
             using (FileStream stream = new FileStream(file.FullName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 65536, FileOptions.SequentialScan))
             {
-                long length = stream.Length;
+                ReadStream(cursor, new LogFile {Path=file.FullName,Length=stream.Length,Modified=file.LastWriteTimeUtc.Ticks,Created=file.CreationTimeUtc.Ticks},stream,cancel,Int64.MaxValue/2);
+            }
+            return true;
+        }
+        internal void ReadStream(LogCursor cursor, LogFile file, Stream stream, Func<bool> cancel, long budget)
+        {
+                long length = file.Length; long limit = Math.Min(length, Math.Max(cursor.Offset,cursor.SkippedOffset) + budget);
                 string head = Fingerprint(stream, 0, (int)Math.Min(512, length));
-                bool reset = cursor.Offset > length || (cursor.Head != null && cursor.Head != head) || (cursor.Path == file.FullName && cursor.Created != file.CreationTimeUtc.Ticks) || (cursor.Length == length && cursor.Modified != file.LastWriteTimeUtc.Ticks && cursor.Offset == length);
+                bool reset = cursor.Offset > length || (cursor.Head != null && cursor.Head != head && cursor.Length >= 512) || (cursor.Path == file.Path && cursor.Created != file.Created) || (cursor.Length == length && cursor.Modified != file.Modified && cursor.Offset == length);
                 if (!reset && cursor.Offset > 0 && cursor.Tail != null) reset = cursor.Tail != Fingerprint(stream, Math.Max(0,cursor.Offset-64), (int)Math.Min(64,cursor.Offset));
                 if(!reset&&cursor.SkippedOffset>cursor.Offset)reset=cursor.SkippedOffset>length||cursor.SkippedTail!=Fingerprint(stream,Math.Max(0,cursor.SkippedOffset-64),(int)Math.Min(64,cursor.SkippedOffset));
                 if (reset)
@@ -174,13 +185,14 @@ namespace CodexUserData
                     cursor.Events.Clear(); cursor.Lanes.Clear();cursor.Quotas.Clear();cursor.Effort="unknown"; cursor.Offset=0; cursor.High=null; cursor.Previous=null; cursor.Meta=false; cursor.Parent=null; cursor.Invalid=0; cursor.Model="unknown";cursor.TaskStarted=0;cursor.TaskEnded=0;cursor.TaskOrder=0;cursor.TaskTurn=cursor.TaskEndedTurn=null;cursor.TaskRunning=false;
                     cursor.SkippedOffset=0;cursor.SkippedTail=null;
                 }
-                cursor.Path=file.FullName; cursor.Created=file.CreationTimeUtc.Ticks; cursor.Head=head;
+                if(reset)limit=Math.Min(length,budget);
+                cursor.Path=file.Path; cursor.Created=file.Created; cursor.Head=head;
                 bool skip=cursor.SkippedOffset>cursor.Offset;long baseOffset=skip?cursor.SkippedOffset:cursor.Offset;
                 stream.Position=baseOffset;
                 byte[] buffer=new byte[65536]; var line=new MemoryStream();int bytes;
                 try
                 {
-                    while (stream.Position < length && (bytes=stream.Read(buffer,0,(int)Math.Min(buffer.Length,length-stream.Position)))>0)
+                    while (stream.Position < limit && (bytes=stream.Read(buffer,0,(int)Math.Min(buffer.Length,limit-stream.Position)))>0)
                     {
                         LastBytesRead+=bytes;
                         if (cancel != null && cancel()) throw new OperationCanceledException();
@@ -212,10 +224,9 @@ namespace CodexUserData
                     cursor.SkippedOffset=skip?baseOffset:0;
                     cursor.SkippedTail=skip?Fingerprint(stream,Math.Max(0,baseOffset-64),(int)Math.Min(64,baseOffset)):null;
                     line.Dispose(); cursor.Tail=Fingerprint(stream,Math.Max(0,cursor.Offset-64),(int)Math.Min(64,cursor.Offset));
-                    cursor.Length=length; cursor.Modified=file.LastWriteTimeUtc.Ticks;
+                    cursor.Length=length; cursor.Modified=file.Modified;
                 }
-            }
-            return true;
+            dirty=true;
         }
 
         private static void Enumerate(string path, List<FileInfo> files, ref int failures, int depth)
@@ -280,7 +291,20 @@ namespace CodexUserData
                 completed++;
                 if(progress!=null && (DateTime.UtcNow-reported).TotalMilliseconds>200) {progress("读取本地日志 "+completed+" / "+files.Count);reported=DateTime.UtcNow;}
             }
-            UsageSnapshot result=new UsageSnapshot {SourceName="本地 Codex",CostAvailable=false,CountLabel="用量记录",LatestRecord="暂无记录",CoverageFiles=files.Count};
+            SaveCache(false);return Aggregate(cursors,range,now,failed);
+        }
+        internal List<LogCursor> Export(){return cursors.Values.Select(CopyCursor).ToList();}
+        internal static LogCursor CopyCursor(LogCursor value)
+        {
+            var copy=(LogCursor)value.MemberCopy();copy.Events=new List<LocalUsageEvent>(value.Events);copy.Quotas=new List<QuotaBucket>(value.Quotas);return copy;
+        }
+        internal LogCursor RemoteCursor(string path)
+        {
+            LogCursor value;if(!cursors.TryGetValue(path,out value)){value=new LogCursor{Id=LogFile.SessionId(path),Path=path};cursors[path]=value;dirty=true;}return value;
+        }
+        internal static UsageSnapshot Aggregate(Dictionary<string,LogCursor> cursors,string range,DateTime now,int failed=0)
+        {
+            UsageSnapshot result=new UsageSnapshot {SourceName="本地 Codex",CostAvailable=false,CountLabel="用量记录",LatestRecord="暂无记录",CoverageFiles=cursors.Count};
             result.KnownModels=cursors.Values.SelectMany(c=>c.Events).Select(e=>e.Model).Where(m=>!String.IsNullOrWhiteSpace(m)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
             result.Quotas=cursors.Values.SelectMany(c=>c.Quotas).GroupBy(q=>q.Id).Select(g=>g.OrderByDescending(q=>q.ObservedAt).First()).ToList();
             result.Daily=DailyUsage.Empty(now,180);DateTime historyStart=now.Date.AddDays(-179);long historyFrom=Unix(historyStart);
@@ -348,7 +372,7 @@ namespace CodexUserData
             if(invalid>0)notices.Add(invalid+" 条记录无法解析或校验（格式、时间、会话标识或长度不符合要求）；其余可核验记录仍参与统计。");
             result.Warning=String.Join("\n",notices);
             if(result.InferredRecords>0)result.Warning+=(result.Warning.Length>0?"\n":"")+result.InferredRecords+" 条旧记录由累计计数差值还原。";
-            SaveCache(false);return result;
+            return result;
         }
         private void LoadCache()
         {
@@ -363,7 +387,7 @@ namespace CodexUserData
                     {
                         // Repair only previously rejected segment files; keep the multi-GB warm cache intact.
                         if(!file.Meta&&SegmentSessionId(file.Path,file.Id)!=null){file.Offset=Int64.MaxValue;file.Length=-1;}
-                        cursors[file.Id]=file;
+                        cursors[remoteCache?file.Path:file.Id]=file;
                     }
                 }
             }

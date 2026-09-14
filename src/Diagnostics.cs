@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Globalization;
 using System.Reflection;
 using System.Text;
@@ -22,6 +22,8 @@ namespace CodexUserData
 
             Add(report,"设置状态",preferences==null?"unavailable":"available");
             Add(report,"数据来源",Pick(preferences==null?null:preferences.Source,"local","ccswitch"));
+            Add(report,"远程统计",preferences==null?"unknown":Flag(preferences.Remote!=null&&preferences.Remote.Enabled));
+            Add(report,"查看端",Pick(preferences==null?null:preferences.UsageView,"combined","local","remote"));
             Add(report,"统计范围",Pick(preferences==null?null:preferences.Range,"today","week","month","all"));
             Add(report,"主题",Pick(preferences==null?null:preferences.ThemeMode,"dark","light","custom"));
             Add(report,"动画预设",Pick(preferences==null?null:preferences.OrbAnimation,"auto","smooth","eco","off"));

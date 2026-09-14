@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -29,6 +29,14 @@ namespace CodexUserData
         private StackPanel toolbar;
         private int revision;
         private UsageSnapshot snapshot;
+        private UsageSnapshot combinedSnapshot;
+        private RemoteMonitor remote;
+        private ActivityReport localActivityReport,remoteActivityReport;
+        private long mergedCompletionSerial;
+        private ActivityReport consumedLocal,consumedRemote;
+        private bool completionWaiting;
+        private readonly ChoiceButton usageView;
+        private readonly TextBlock remoteStatus;
         private LocalCodexUsage local;
         private string localRoot;
         private readonly DispatcherTimer timer=new DispatcherTimer();
@@ -103,6 +111,9 @@ namespace CodexUserData
             quota=new QuotaStatus(()=>prefs,()=>{if(!IsVisible||WindowState==WindowState.Minimized)RestoreWindow();else WindowInteraction.Hide(this);},RequestClose,preview,()=>RestoreWindowThen(RefreshData),()=>RestoreWindowThen(OpenHistory));filtersAndQuota.Children.Add(quota);quota.Changed+=UpdateBall;quota.HistoryChanged+=delegate{if(quotaHistoryPanel!=null)quotaHistoryPanel.Refresh();};
             source=new ChoiceButton(new Dictionary<string,string>{{"ccswitch","CC Switch"},{"local","本地 Codex"}},"数据来源");source.Select(prefs.Source);filters.Children.Add(source);
             app=new ChoiceButton(new Dictionary<string,string>{{"","全部应用"},{"claude","Claude"},{"codex","Codex"},{"gemini","Gemini"},{"opencode","OpenCode"},{"grokbuild","Grok"},{"hermes","Hermes"},{"pi","Pi"}},"应用筛选");app.Select(prefs.App);app.Margin=new Thickness(7,0,0,0);Grid.SetColumn(app,1);filters.Children.Add(app);
+            usageView=new ChoiceButton(new Dictionary<string,string>{{"combined","合计 · 本机 + 服务器"},{"local","本机"},{"remote","服务器"}},"用量查看范围");usageView.Select(prefs.UsageView);usageView.Margin=new Thickness(0,0,0,6);filtersAndQuota.Children.Add(usageView);
+            remoteStatus=Theme.Text("",10,Theme.Muted);remoteStatus.TextWrapping=TextWrapping.Wrap;remoteStatus.Margin=new Thickness(0,0,0,5);filtersAndQuota.Children.Add(remoteStatus);
+            usageView.Changed+=delegate(string v){prefs.UsageView=v;SelectionChanged();};
             source.Changed+=delegate(string v){prefs.Source=v;UpdateSource();SelectionChanged();};app.Changed+=delegate(string v){prefs.App=v;SelectionChanged();};
             scroll=new ScrollViewer{VerticalScrollBarVisibility=ScrollBarVisibility.Auto,HorizontalScrollBarVisibility=ScrollBarVisibility.Disabled,PanningMode=PanningMode.VerticalOnly};Grid.SetRow(scroll,2);grid.Children.Add(scroll);
             body=new StackPanel();scroll.Content=body;
@@ -132,7 +143,7 @@ namespace CodexUserData
             Loaded+=delegate{ready=true;if(!preview)AdaptToSize();ClampToMonitor();Persist();if(!preview){timer.Interval=TimeSpan.FromSeconds(prefs.RefreshSeconds);timer.Start();quota.CompletionChanged+=UpdateCompletionViews;PreviewMouseMove+=delegate{quota.AcknowledgeCompletion();};quota.Start();EnsureActivity();RefreshData();if(prefs.BallMode)OpenBall();}};
             timer.Tick+=delegate{RefreshData();};StateChanged+=delegate{if(WindowState==WindowState.Minimized&&prefs.MinimizeToTray){MinimizeWindow();return;}if(WindowState==WindowState.Normal){RestoreHistory();if(snapshot!=null)ApplySnapshot(snapshot);RefreshData();}};
             activityStatusClock.Tick+=delegate{UpdateActivityStatus();};IsVisibleChanged+=delegate{UpdateActivityClock();};StateChanged+=delegate{UpdateActivityClock();};
-            Closing+=delegate{closed=true;timer.Stop();activityStatusClock.Stop();if(activity!=null)activity.Dispose();if(ball!=null)ball.Dispose();quota.Dispose();Persist();if(historyWindow!=null)historyWindow.Close();if(coverageWindow!=null)coverageWindow.Close();};
+            Closing+=delegate{closed=true;timer.Stop();activityStatusClock.Stop();if(activity!=null)activity.Dispose();if(remote!=null)remote.Dispose();if(ball!=null)ball.Dispose();quota.Dispose();Persist();if(historyWindow!=null)historyWindow.Close();if(coverageWindow!=null)coverageWindow.Close();};
             BuildCards();UpdateButtons();UpdateSource();Reflow();
         }
         private void BuildCards()
@@ -148,7 +159,7 @@ namespace CodexUserData
         }
         private string PeriodName(){return prefs.Range=="today"?"今日":prefs.Range=="week"?"近 7 天":prefs.Range=="month"?"近 30 天":"全部时间";}
         private string LabelFor(string key){return key=="requests"?(prefs.Source=="local"?"用量记录":"请求数"):key=="cost"&&prefs.Source=="local"?"实际费用 · USD":Theme.MetricLabels[key];}
-        private void UpdateSource(){app.Visibility=prefs.Source=="local"?Visibility.Collapsed:Visibility.Visible;Grid.SetColumnSpan(source,prefs.Source=="local"?2:1);heroLabel.Text=PeriodName()+" · "+LabelFor(heroKey);}
+        private void UpdateSource(){usageView.Visibility=prefs.Source=="local"&&prefs.Remote.Enabled?Visibility.Visible:Visibility.Collapsed;remoteStatus.Visibility=prefs.Remote.Enabled?Visibility.Visible:Visibility.Collapsed;app.Visibility=prefs.Source=="local"?Visibility.Collapsed:Visibility.Visible;Grid.SetColumnSpan(source,prefs.Source=="local"?2:1);heroLabel.Text=PeriodName()+" · "+LabelFor(heroKey);}
         private void UpdateButtons()
         {
             string minimizeName=prefs.MinimizeToTray?"最小化到托盘":"最小化到任务栏";
@@ -202,12 +213,12 @@ namespace CodexUserData
             if(closed)return;
             if(accepted==true)
             {
-                bool newAccount=prefs.CodexHome!=settings.Result.CodexHome||prefs.QuotaCli!=settings.Result.QuotaCli;prefs=settings.Result;Program.Save(prefs);if(prefs.StartWithCodex)CodexLaunchWatcher.Ensure();quota.Configure(newAccount);EnsureActivity();Opacity=prefs.Opacity;source.Select(prefs.Source);app.Select(prefs.App);timer.Interval=TimeSpan.FromSeconds(prefs.RefreshSeconds);history.Configure(prefs.ShowHeatmap,prefs.ShowTrend,prefs.TrendDays);UpdateSource();BuildCards();UpdateButtons();SelectionChanged();
+                bool newAccount=prefs.CodexHome!=settings.Result.CodexHome||prefs.QuotaCli!=settings.Result.QuotaCli;prefs=settings.Result;usageView.Select(prefs.UsageView);Program.Save(prefs);if(prefs.StartWithCodex)CodexLaunchWatcher.Ensure();quota.Configure(newAccount);EnsureActivity();Opacity=prefs.Opacity;source.Select(prefs.Source);app.Select(prefs.App);timer.Interval=TimeSpan.FromSeconds(prefs.RefreshSeconds);history.Configure(prefs.ShowHeatmap,prefs.ShowTrend,prefs.TrendDays);UpdateSource();BuildCards();UpdateButtons();SelectionChanged();
             }
             else Opacity=original;
             Theme.Apply(prefs);quota.ApplyTheme();UpdateCompletionViews();
         }
-        private string Scope(){return prefs.Source=="local"?"本地 Codex": "CC Switch · "+(String.IsNullOrEmpty(prefs.App)?"全部应用":prefs.App);}
+        private string Scope(){return prefs.Source=="local"?(prefs.Remote.Enabled?(prefs.UsageView=="local"?"本机 Codex":prefs.UsageView=="remote"?"服务器 Codex":"Codex · 合计"):"本地 Codex"): "CC Switch · "+(String.IsNullOrEmpty(prefs.App)?"全部应用":prefs.App);}
         private void SetTrendRange(int value){prefs.TrendDays=value;history.SetRange(value);if(largeHistory!=null)largeHistory.SetRange(value);Persist();}
         private void RequestClose()
         {
@@ -257,12 +268,24 @@ namespace CodexUserData
         {
             if(closed)return;
             EnsureActivity();if(ball==null)return;
-            ball.Apply(snapshot,quota.MainBucket,Scope(),quota.StatusText);
+            ball.Apply(prefs.Remote.Enabled?combinedSnapshot:snapshot,quota.MainBucket,prefs.Remote.Enabled?"Codex · 合计":Scope(),quota.StatusText);
         }
         private void UpdateCompletionViews(){CompletionFeedback.Set(this,quota.CompletionPending);if(ball!=null)ball.SetCompletionPending(quota.CompletionPending);UpdateActivityStatus();}
         internal void ApplyActivityReport(ActivityReport report)
         {
-            if(closed)return;activityReport=report;quota.ApplyActivity(report);if(ball!=null)ball.ApplyActivity(report);UpdateCompletionViews();
+            if(closed)return;localActivityReport=report;PublishActivity();
+        }
+        private void PublishActivity()
+        {
+            if(closed)return;var other=remote==null?null:remoteActivityReport??remote.View.Activity;
+            var report=MergeActivity(ConsumeCompletion(localActivityReport,ref consumedLocal),ConsumeCompletion(other,ref consumedRemote),ref completionWaiting);
+            if(report.CompletedTasks>0)mergedCompletionSerial++;report.CompletionSerial=mergedCompletionSerial;activityReport=report;quota.ApplyActivity(report);if(ball!=null)ball.ApplyActivity(report);UpdateCompletionViews();
+        }
+        private static ActivityReport ConsumeCompletion(ActivityReport value,ref ActivityReport consumed)
+        {
+            if(value==null)return null;
+            bool fresh=!Object.ReferenceEquals(value,consumed);consumed=value;
+            return new ActivityReport{ActiveKeys=value.ActiveKeys,ActiveTasks=value.ActiveTasks,UncertainTasks=value.UncertainTasks,CompletedTasks=fresh?value.CompletedTasks:0,MonitoringUnavailable=value.MonitoringUnavailable,Until=value.Until,ObservedAt=value.ObservedAt};
         }
         private void UpdateActivityClock(){if(!preview&&!closed&&IsVisible&&WindowState!=WindowState.Minimized){activityStatusClock.Start();UpdateActivityStatus();}else activityStatusClock.Stop();}
         private void UpdateActivityStatus()
@@ -277,8 +300,36 @@ namespace CodexUserData
             if(activityObservedAt.Text!=observed)activityObservedAt.Text=observed;
             AutomationProperties.SetItemStatus(activityStatus,unavailable?"部分 Codex 日志无法读取，不能据此确认空闲或全部完成":fresh?"近期本地任务事件":"缺少近期任务事件，不能确认正在运行或已经结束");
         }
+        internal static ActivityReport MergeActivity(ActivityReport local,ActivityReport other,ref bool waiting)
+        {
+            long now=LocalCodexUsage.Unix(DateTime.UtcNow);var reports=new[]{local,other}.Where(r=>r!=null).ToArray();
+            if(reports.Any(r=>r.CompletedTasks>0))waiting=true;
+            var report=new ActivityReport{ObservedAt=now,ActiveTasks=reports.Where(r=>now-r.ObservedAt<=10).Sum(r=>r.ActiveTasks),UncertainTasks=reports.Sum(r=>r.UncertainTasks),MonitoringUnavailable=local==null||reports.Any(r=>r.MonitoringUnavailable||now-r.ObservedAt>10),Until=now+4};
+            var active=reports.Where(r=>now-r.ObservedAt<=10).ToArray();
+            report.ActiveTasks=active.SelectMany(r=>r.ActiveKeys).Distinct(StringComparer.Ordinal).Count()+active.Sum(r=>Math.Max(0,r.ActiveTasks-r.ActiveKeys.Count));
+            if(report.ActiveTasks>0)waiting=false;
+            if(waiting&&report.ActiveTasks==0&&report.UncertainTasks==0&&!report.MonitoringUnavailable){report.CompletedTasks=1;waiting=false;}
+            return report;
+        }
+        private void EnsureRemote()
+        {
+            if(preview)return;
+            string config=prefs.Remote.Enabled?prefs.Remote.Configuration:null;
+            if(remote==null&&config==null)return;
+            if(remote!=null&&remote.Configuration==config){remote.SetEco(prefs.OrbAnimation=="eco");return;}
+            if(remote!=null){remote.Dispose();remote=null;}remoteActivityReport=null;completionWaiting=false;combinedSnapshot=null;
+            if(config==null){remoteStatus.Text="";return;}
+            var current=new RemoteMonitor(prefs.Clone().Remote,Path.Combine(Program.DataFolder,"remote-cache",prefs.Remote.Identity),prefs.OrbAnimation=="eco");remote=current;
+            current.Changed+=state=>
+            {
+                if(closed)return;
+                try{Dispatcher.BeginInvoke(new Action(()=>{if(closed||remote!=current)return;remoteActivityReport=state.Activity;remoteStatus.Text=state.Status+(state.SyncedAt>0?" · "+DateTimeOffset.FromUnixTimeSeconds(state.SyncedAt).LocalDateTime.ToString("HH:mm:ss"):"");PublishActivity();}));}catch(InvalidOperationException){}
+            };
+            current.Start();
+        }
         private void EnsureActivity()
         {
+            EnsureRemote();
             if(!preview&&(activity==null||!String.Equals(activityRoot,prefs.CodexHome,StringComparison.OrdinalIgnoreCase)))
             {
                 if(activity!=null)activity.Dispose();activityRoot=prefs.CodexHome;
@@ -308,18 +359,30 @@ namespace CodexUserData
         }
         private async void RefreshData()
         {
-            if(preview||closed||busy)return;busy=true;int version=revision;string selected=prefs.Source,range=prefs.Range,application=prefs.App,db=prefs.Database,home=prefs.CodexHome;var priceOverrides=prefs.PriceOverrides;
+            if(preview||closed||busy)return;busy=true;int version=revision;string selected=prefs.Source,range=prefs.Range,application=prefs.App,db=prefs.Database,home=prefs.CodexHome,view=prefs.UsageView;var remoteReader=remote;var priceOverrides=prefs.PriceOverrides;UsageSnapshot total=null;
             status.Text=selected=="local"?"更新本地日志…":"读取数据库…";
             try
             {
                 UsageSnapshot result=await Task.Run(()=>
                 {
                     ApiPrices.Configure(priceOverrides);
-                    if(selected!="local")return UsageDatabase.Read(db,range,application,DateTime.Now);
+                    if(selected!="local"&&remoteReader==null)return UsageDatabase.Read(db,range,application,DateTime.Now);
                     if(local==null||localRoot!=home){local=new LocalCodexUsage(home,Path.Combine(Program.DataFolder,"local-codex-cache.json.gz"));localRoot=home;}
-                    return local.Read(range,DateTime.Now,message=>Dispatcher.BeginInvoke(new Action(()=>{if(!closed&&version==revision)status.Text=message;})),()=>closed||version!=revision);
+                    UsageSnapshot native=null;string localFailure=null;
+                    try{native=local.Read(range,DateTime.Now,message=>Dispatcher.BeginInvoke(new Action(()=>{if(!closed&&version==revision)status.Text=message;})),()=>closed||version!=revision);}
+                    catch(IOException){if(remoteReader==null)throw;localFailure="本机日志读取失败，保留上次数据。";}
+                    catch(UnauthorizedAccessException){if(remoteReader==null)throw;localFailure="本机日志没有读取权限，保留上次数据。";}
+                    if(remoteReader==null)return native;
+                    var localRecords=local.Export();var state=remoteReader.View;var now=DateTime.Now;
+                    total=UsageUnion.Snapshot(localRecords.Concat(state.Records),"today",now,"Codex · 合计");
+                    var records=view=="local"?localRecords:view=="remote"?state.Records:localRecords.Concat(state.Records).ToList();
+                    var merged=UsageUnion.Snapshot(records,range,now,view=="local"?"本机 Codex":view=="remote"?"服务器 Codex":"Codex · 合计");
+                    merged.DataUnavailable=view=="remote"&&!state.Records.Any(c=>c.Meta&&c.Events.Count>0)||view=="local"&&localFailure!=null&&localRecords.Count==0||view=="combined"&&localFailure!=null&&records.Count==0;
+                    if(localFailure!=null){merged.Warning+="\n"+localFailure;merged.CoverageWarnings++;}
+                    if(!state.Connected||state.Discovering||state.Records.Count==0){merged.Warning+="\n"+state.Status;merged.CoverageWarnings++;}
+                    return selected=="local"?merged:UsageDatabase.Read(db,range,application,now);
                 });
-                if(!closed&&version==revision){ApplySnapshot(result);status.Text="已更新 "+DateTime.Now.ToString("HH:mm:ss")+" · "+prefs.RefreshSeconds+" 秒";}
+                if(!closed&&version==revision){combinedSnapshot=total;if(total!=null)quota.AcceptRemote(total.Quotas);ApplySnapshot(result);status.Text="已更新 "+DateTime.Now.ToString("HH:mm:ss")+" · "+prefs.RefreshSeconds+" 秒";}
             }
             catch(OperationCanceledException){}
             catch(Exception ex)
@@ -330,6 +393,7 @@ namespace CodexUserData
         }
         private string Format(string key,UsageSnapshot s,bool full)
         {
+            if(s.DataUnavailable)return "—";
             long number;
             switch(key)
             {
@@ -344,9 +408,9 @@ namespace CodexUserData
         }
         internal void ApplySnapshot(UsageSnapshot s)
         {
-            snapshot=s;prefs.KnownModels=prefs.KnownModels.Concat(s.KnownModels).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();quota.Accept(s.Quotas);quota.AcceptUsage(s,Scope());UpdateBall();if(!preview&&(!IsVisible||WindowState==WindowState.Minimized))return;heroLabel.Text=PeriodName()+" · "+LabelFor(heroKey);heroValue.Text=Format(heroKey,s,false);heroValue.ToolTip=Format(heroKey,s,true);
-            heroExact.Text=heroKey=="tokens"?"("+TokenText.Exact(s.TotalTokens)+")":"";heroExact.Visibility=heroKey=="tokens"&&!prefs.Collapsed?Visibility.Visible:Visibility.Collapsed;
-            heroNote.Text="API 估算 "+ModelColors.Money(s.EquivalentUsd,s.UnpricedTokens,s.TotalTokens)+" · USD";
+            snapshot=s;prefs.KnownModels=prefs.KnownModels.Concat(s.KnownModels).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();quota.Accept(prefs.Remote.Enabled&&combinedSnapshot!=null?combinedSnapshot.Quotas:s.Quotas);quota.AcceptUsage(prefs.Remote.Enabled?combinedSnapshot:s,prefs.Remote.Enabled?"Codex · 合计":Scope());UpdateBall();if(!preview&&(!IsVisible||WindowState==WindowState.Minimized))return;heroLabel.Text=PeriodName()+" · "+LabelFor(heroKey);heroValue.Text=Format(heroKey,s,false);heroValue.ToolTip=Format(heroKey,s,true);
+            heroExact.Text=heroKey=="tokens"&&!s.DataUnavailable?"("+TokenText.Exact(s.TotalTokens)+")":"";heroExact.Visibility=heroKey=="tokens"&&!prefs.Collapsed&&!s.DataUnavailable?Visibility.Visible:Visibility.Collapsed;
+            heroNote.Text=s.DataUnavailable?"当前来源尚未读取成功":"API 估算 "+ModelColors.Money(s.EquivalentUsd,s.UnpricedTokens,s.TotalTokens)+" · USD";
             heroNote.ToolTip=ApiPrices.Basis+"\n估算基准，不代表订阅实际扣费。";
             hero.ToolTip=prefs.Source=="local"?"Token = 输入（包含缓存）+ 输出；推理包含在输出中。\n最新记录："+s.LatestRecord:"Token = 未缓存输入 + 输出 + 缓存读取 + 缓存创建。\n最新记录："+s.LatestRecord;
             foreach(var item in values){bool unavailable=item.Key=="cost"&&!s.CostAvailable;item.Value.Text=Format(item.Key,s,false);item.Value.FontSize=unavailable&&prefs.Source=="local"?13:19;item.Value.ToolTip=unavailable?"日志未提供实际费用；上方 API 估算按模型单价计算。":Format(item.Key,s,true);labels[item.Key].Text=LabelFor(item.Key);}

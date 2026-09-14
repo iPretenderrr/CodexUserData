@@ -1,4 +1,4 @@
-param([switch]$Offline)
+﻿param([switch]$Offline)
 $ErrorActionPreference='Stop'
 $root=[IO.Path]::GetFullPath($PSScriptRoot)
 Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -45,3 +45,16 @@ try{
  }
 }finally{$zip.Dispose()}
 Write-Output 'Pinned dependencies verified and restored. Ready for src/build.ps1 or pack.ps1.'
+
+# The dependency manifest pins package hashes and exact runtime assets.
+$remote=Get-Content -LiteralPath (Join-Path $root "tools/remote-packages.json") -Raw | ConvertFrom-Json
+foreach($item in $remote){
+ $file=$item.id+"."+$item.version+".nupkg"
+ $package=RestorePackage ("vendor/"+$file) ("https://api.nuget.org/v3-flatcontainer/"+$item.id+"/"+$item.version+"/"+$file) $item.sha256
+ $zip=[IO.Compression.ZipFile]::OpenRead($package)
+ try{foreach($entryName in $item.files){
+  $target=Join-Path $root ("vendor/ssh/"+[IO.Path]::GetFileName($entryName))
+  [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($target)) | Out-Null
+  [IO.Compression.ZipFileExtensions]::ExtractToFile($zip.GetEntry($entryName),$target,$true)
+ }}finally{$zip.Dispose()}
+}

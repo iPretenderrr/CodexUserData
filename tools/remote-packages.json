@@ -1,0 +1,98 @@
+[
+  {
+    "id": "bouncycastle.cryptography",
+    "version": "2.7.0",
+    "sha256": "F091FFCCAB4D03993E660BACE277659A79DEE0972F54D7F1F4BD46D680966241",
+    "files": [
+      "lib/net461/BouncyCastle.Cryptography.dll"
+    ]
+  },
+  {
+    "id": "microsoft.bcl.asyncinterfaces",
+    "version": "8.0.0",
+    "sha256": "F5A5A68B03092AB2ABF68843D4A4AEA25DFBCBE8DD0F13C625CB779B6FC1927C",
+    "files": [
+      "lib/net462/Microsoft.Bcl.AsyncInterfaces.dll"
+    ]
+  },
+  {
+    "id": "microsoft.bcl.cryptography",
+    "version": "10.0.10",
+    "sha256": "4B8EB4562DDC2066E352C0BE51325D5536DF2EE75A15C76DAF809B0B4B19B22D",
+    "files": [
+      "lib/net462/Microsoft.Bcl.Cryptography.dll"
+    ]
+  },
+  {
+    "id": "microsoft.extensions.dependencyinjection.abstractions",
+    "version": "8.0.2",
+    "sha256": "51F2DF1100245F10DA54F0BB7E813F277155117777D4FBBAB902214E27372606",
+    "files": [
+      "lib/net462/Microsoft.Extensions.DependencyInjection.Abstractions.dll"
+    ]
+  },
+  {
+    "id": "microsoft.extensions.logging.abstractions",
+    "version": "8.0.3",
+    "sha256": "E4C498D5A13051B4577A148F1D8C3470167215C507E2392069B75DC61322BB74",
+    "files": [
+      "lib/net462/Microsoft.Extensions.Logging.Abstractions.dll"
+    ]
+  },
+  {
+    "id": "ssh.net",
+    "version": "2026.0.0",
+    "sha256": "B2515DE616821198F5CF5530F5EA198912730BBE3504EF4C6AEE00A661FECAC2",
+    "files": [
+      "lib/net462/Renci.SshNet.dll"
+    ]
+  },
+  {
+    "id": "system.buffers",
+    "version": "4.6.1",
+    "sha256": "B00451E91D016FBEC091AD1E361F3A7015E1D91D4047F7E48A74455B2A673D79",
+    "files": [
+      "lib/net462/System.Buffers.dll"
+    ]
+  },
+  {
+    "id": "system.formats.asn1",
+    "version": "10.0.10",
+    "sha256": "21963AB1DFEE2B2B87E7B6348A3A23A4772AF500247E4401B0BBE3156CEDB29C",
+    "files": [
+      "lib/net462/System.Formats.Asn1.dll"
+    ]
+  },
+  {
+    "id": "system.memory",
+    "version": "4.6.3",
+    "sha256": "26078AEB758C9AE985E8BF851F973026061DA6A5EB4837204D0C2D2204C72955",
+    "files": [
+      "lib/net462/System.Memory.dll"
+    ]
+  },
+  {
+    "id": "system.numerics.vectors",
+    "version": "4.6.1",
+    "sha256": "2BC500A86DCB02F2032D6D877F9E2D6E9E4A79080E57239B4198679D4031F2C7",
+    "files": [
+      "lib/net462/System.Numerics.Vectors.dll"
+    ]
+  },
+  {
+    "id": "system.runtime.compilerservices.unsafe",
+    "version": "6.1.2",
+    "sha256": "5F6A7F53AF3465F92BEB6DA873EBE0E496206C313313B98BADEE4355A6B25937",
+    "files": [
+      "lib/net462/System.Runtime.CompilerServices.Unsafe.dll"
+    ]
+  },
+  {
+    "id": "system.threading.tasks.extensions",
+    "version": "4.5.4",
+    "sha256": "A304A963CC0796C5179F9C6B7D8022BBCE3B2FA7C029EB6196F631F7B462D678",
+    "files": [
+      "lib/net461/System.Threading.Tasks.Extensions.dll"
+    ]
+  }
+]

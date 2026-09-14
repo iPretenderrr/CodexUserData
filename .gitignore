@@ -77,3 +77,12 @@
 # Excluded: data, .build, private-backups, dist, vendor, binaries, settings, logs,
 # databases, secrets, screenshots, generated icons, export folders and local review manifests.
 # Ignore rules do not remove tracked history or protect manual website uploads.
+
+!/src/RemoteCodex.cs
+!/src/RemoteMonitor.cs
+!/src/RemoteSettings.cs
+!/tools/RemoteStabilityProbe.cs
+!/tools/SftpTransportProbe.cs
+!/tools/verify-sftp.ps1
+!/tools/sftp-fixture.py
+!/tools/remote-packages.json

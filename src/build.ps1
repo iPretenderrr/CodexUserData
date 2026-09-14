@@ -21,6 +21,7 @@ $icon = [System.Drawing.Icon]::FromHandle($bitmap.GetHicon())
 $iconStream = [System.IO.File]::Create((Join-Path $PSScriptRoot 'widget.ico'))
 try { $icon.Save($iconStream) } finally { $iconStream.Dispose(); $icon.Dispose(); $iconBrush.Dispose(); $graphics.Dispose(); $bitmap.Dispose() }
 
+$remoteDlls=@(Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot '..\vendor\ssh') -Filter '*.dll')
 $compilerArgs = @(
   '/nologo', '/target:winexe', '/platform:x64', '/optimize+', '/codepage:65001',
   ('/out:' + $OutputPath),
@@ -36,6 +37,7 @@ $compilerArgs = @(
   ('/r:' + (Join-Path $frameworkPath 'System.Drawing.dll')),
   ('/r:' + (Join-Path $PSScriptRoot '..\vendor\webview2\lib\net462\Microsoft.Web.WebView2.Core.dll')),
   ('/r:' + (Join-Path $PSScriptRoot '..\vendor\webview2\lib\net462\Microsoft.Web.WebView2.Wpf.dll')),
+  (Join-Path $PSScriptRoot 'RemoteCodex.cs'), (Join-Path $PSScriptRoot 'RemoteMonitor.cs'), (Join-Path $PSScriptRoot 'RemoteSettings.cs'),
   (Join-Path $PSScriptRoot 'CustomShape.cs'), (Join-Path $PSScriptRoot 'PortableServices.cs'),
   (Join-Path $PSScriptRoot 'Program.cs'), (Join-Path $PSScriptRoot 'Theme.cs'),
   (Join-Path $PSScriptRoot 'QuotaOrb.cs'),
@@ -48,9 +50,12 @@ $compilerArgs = @(
   (Join-Path $PSScriptRoot 'Dashboard.cs'), (Join-Path $PSScriptRoot 'QuotaReader.cs'), (Join-Path $PSScriptRoot 'QuotaStatus.cs')
   (Join-Path $PSScriptRoot 'DynamicIsland.cs'), (Join-Path $PSScriptRoot 'DynamicIsland.Glass.cs'), (Join-Path $PSScriptRoot 'FloatingBall.cs'), (Join-Path $PSScriptRoot 'DockTransition.cs'), (Join-Path $PSScriptRoot 'WindowInteraction.cs'), (Join-Path $PSScriptRoot 'PriceEditor.cs'), (Join-Path $PSScriptRoot 'UsageDetails.cs'), (Join-Path $PSScriptRoot 'TrayFlyout.cs')
 )
+$compilerArgs+=@($remoteDlls | ForEach-Object {'/r:'+$_.FullName})
+$compilerArgs+=('/r:'+(Join-Path $frameworkPath 'System.Security.dll'))
 & $compilerPath @compilerArgs
 if ($LASTEXITCODE -ne 0) { throw 'Widget compilation failed.' }
 $destination=Split-Path $OutputPath -Parent
+foreach($dll in $remoteDlls){Copy-Item -LiteralPath $dll.FullName -Destination $destination -Force}
 foreach($name in @('Microsoft.Web.WebView2.Core.dll','Microsoft.Web.WebView2.Wpf.dll')){Copy-Item -LiteralPath (Join-Path $PSScriptRoot ('..\vendor\webview2\lib\net462\'+$name)) -Destination $destination -Force}
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\vendor\webview2\runtimes\win-x64\native\WebView2Loader.dll') -Destination $destination -Force
 if([IO.Path]::GetFullPath($OutputPath+'.config') -ne [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\CodexUserData.exe.config'))){Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\CodexUserData.exe.config') -Destination ($OutputPath+'.config') -Force}

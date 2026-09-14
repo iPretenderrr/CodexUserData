@@ -100,6 +100,15 @@ namespace CodexUserData
             foreach(var b in buckets??new QuotaBucket[0]){if(b==null||String.IsNullOrWhiteSpace(b.Id))continue;QuotaBucket old;latest.TryGetValue(b.Id,out old);if(QuotaBucket.Prefer(old,b))latest[b.Id]=b;}Render();
         }
         internal void AcceptUsage(UsageSnapshot snapshot,string scope){usage=snapshot;usageScope=scope;if(flyout!=null&&flyout.IsVisible)UpdateFlyout();}
+        internal async void AcceptRemote(IEnumerable<QuotaBucket> buckets)
+        {
+            if(disposed||preview||buckets==null)return;
+            var accepted=buckets.Where(b=>b.Origin=="远程日志"&&QuotaBucket.Prefer(latest.ContainsKey(b.Id)?latest[b.Id]:null,b)).ToList();
+            if(accepted.Count==0)return;string home=preferences().CodexHome;int revision=accountRevision;Accept(accepted);
+            try{await HistoryStore.RecordAsync(QuotaHistoryStore.Scope(home),accepted);if(!disposed&&revision==accountRevision){HistoryError="";if(HistoryChanged!=null)HistoryChanged();}}
+            catch(System.IO.IOException){if(!disposed&&revision==accountRevision)HistoryError="额度已更新，但历史记录写入失败。";}
+            catch(UnauthorizedAccessException){if(!disposed&&revision==accountRevision)HistoryError="额度历史目录无法写入。";}
+        }
         private void UpdateFlyout(){flyout.Apply(latest.Values,usage,usageScope,note.Text);UpdateActivityText();if(flyout.IsVisible)flyout.PositionAt(anchor);}
         private bool CompletionVisible {get{return preferences().CompletionFlash&&completionPending;}}
         internal void ApplyActivity(ActivityReport report)

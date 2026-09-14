@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -10,8 +10,8 @@ using System.Windows;
 
 [assembly: System.Reflection.AssemblyTitle("CodexUserData")]
 [assembly: System.Reflection.AssemblyProduct("CodexUserData")]
-[assembly: System.Reflection.AssemblyVersion("1.8.5.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.8.5.0")]
+[assembly: System.Reflection.AssemblyVersion("1.9.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.9.0.0")]
 
 namespace CodexUserData
 {
@@ -27,6 +27,8 @@ namespace CodexUserData
     {
         public string App {get;set;} public string Range {get;set;} public string Database {get;set;}
         public bool Pinned {get;set;} public bool Collapsed {get;set;} public double Left {get;set;} public double Top {get;set;}
+        public RemoteOptions Remote {get;set;}
+        public string UsageView {get;set;}
         public string Source {get;set;} public string CodexHome {get;set;}
         public double Width {get;set;} public double Height {get;set;} public double Opacity {get;set;}
         public int RefreshSeconds {get;set;} public string[] Metrics {get;set;}
@@ -72,6 +74,7 @@ namespace CodexUserData
             App="";Range="today";Pinned=true;Left=Double.NaN;Top=Double.NaN;
             Database=Path.Combine(user,".cc-switch","cc-switch.db"); CodexHome=Environment.GetEnvironmentVariable("CODEX_HOME");
             if(String.IsNullOrWhiteSpace(CodexHome))CodexHome=Path.Combine(user,".codex");
+            Remote=new RemoteOptions();UsageView="combined";
             Source=File.Exists(Database)&&!Directory.Exists(Path.Combine(CodexHome,"sessions"))?"ccswitch":"local";Width=380;Height=440;Opacity=1;RefreshSeconds=5;
             Metrics=new[]{"tokens","requests","cacheRate","cost","input","output"};
             ShowHeatmap=true;ShowTrend=true;TrendDays=30;
@@ -90,6 +93,8 @@ namespace CodexUserData
             if(!new[]{"auto","smooth","eco","off"}.Contains(OrbAnimation))OrbAnimation="auto";
             OrbSize=Clamp(OrbSize,56,128,84);
             if(!new[]{"today","week","month","all"}.Contains(Range))Range="today";
+            if(Remote==null)Remote=new RemoteOptions();
+            if(UsageView!="local"&&UsageView!="remote")UsageView="combined";
             if(Source!="local")Source="ccswitch";
             if(String.IsNullOrWhiteSpace(Database))Database=new Preferences().Database;
             if(String.IsNullOrWhiteSpace(CodexHome))CodexHome=new Preferences().CodexHome;

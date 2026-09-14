@@ -22,9 +22,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\src\build.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\pack.ps1
 ```
 
-恢复脚本仅下载固定版本 Microsoft.Web.WebView2 1.0.3296.44 和 Obfuscar 2.2.50，不需要开发者的安装路径、账号或配置。缓存完整时可以用 `-Offline` 校验并恢复。版本或哈希不一致会停止。
+恢复脚本下载固定版本 Microsoft.Web.WebView2 1.0.3296.44、Obfuscar 2.2.50，以及 tools/remote-packages.json 中锁定 SHA-256 的 SSH.NET 2026.0.0 和运行依赖，不需要开发者的安装路径、账号或配置。缓存完整时可以用 `-Offline` 校验并恢复。版本或哈希不一致会停止。
 
-普通构建在根目录生成 EXE 和三个 WebView2 DLL，不启动程序。`pack.ps1` 使用独立 `.build` 目录重新构建并运行两组验证，需要已安装 WebView2 Runtime 的交互式 Windows 桌面；不会覆盖正在运行的根目录 EXE。成功后在 `dist` 生成 protected ZIP 与 SHA-256 文件。程序包包含 MIT 许可证、第三方声明和使用文档。
+普通构建在根目录生成 EXE 和WebView2 与 SSH.NET 运行依赖 DLL，不启动程序。`pack.ps1` 使用独立 `.build` 目录重新构建并运行两组验证，需要已安装 WebView2 Runtime 的交互式 Windows 桌面；不会覆盖正在运行的根目录 EXE。成功后在 `dist` 生成 protected ZIP 与 SHA-256 文件。程序包包含 MIT 许可证、第三方声明和使用文档。
 
 日常修改后可先运行源码回归：
 
@@ -53,3 +53,12 @@ Git 仓库备份代码、脚本、文档与示例，依赖可重新下载。仓�
 ## 额度历史验证
 
 `tools/verify-source.ps1 -QuotaOnly` 使用模拟查询与 180 天分钟记录验证持久化、重复采样、损坏尾行、保留期限、缺失时段、后台读取及曲线缓存。实际在线额度沿用一分钟查询，按 UTC 日保存到用户目录的 `quota-history`；按 Codex 数据目录的 SHA-256 摘要分目录，不保存路径原文或认证内容。历史读取和分组在后台，最近读取范围按文件长度与修改时间缓存，关闭图表后不主动读历史。
+
+
+## 远程相关验证
+
+`tools/verify-source.ps1 -RemoteOnly` 运行远程合并、增量、连接恢复及现有数据/任务状态检查；只用模拟日志。
+
+实际 SFTP 协议检查：在 `.build/sftp-fixture-deps` 安装测试依赖 `paramiko==4.0.0`，运行 `tools/verify-sftp.ps1 -Python <python.exe>`。临时服务器只监听 127.0.0.1，密钥和日志随机生成在 `.build`，完成后停止。不要提交该目录。
+
+`tools/remote-packages.json` 是发布依赖的唯一清单，恢复不依赖 dotnet SDK。新增依赖同时检查运行时绑定、第三方声明及程序包白名单。

@@ -27,7 +27,7 @@ namespace CodexUserData
         public long ObservedAt {get;set;} public QuotaWindow Primary {get;set;} public QuotaWindow Secondary {get;set;}
         internal bool IsFresh(long now){return ObservedAt>0&&ObservedAt<=now+5&&now-ObservedAt<=300;}
         internal bool IsOnline {get{return String.Equals(Origin,"在线查询",StringComparison.Ordinal);}}
-        internal string SourceLabel {get{return IsOnline?"在线额度":String.IsNullOrWhiteSpace(Origin)?"来源未知":"历史快照";}}
+        internal string SourceLabel {get{return IsOnline?"在线额度":String.IsNullOrWhiteSpace(Origin)?"来源未知":Origin=="远程日志"?"远程快照":"历史快照";}}
         internal string DescribeSource(long now)
         {
             string state=ObservedAt<=0||ObservedAt>now+5?"时间异常":!IsFresh(now)?"已过期":"";

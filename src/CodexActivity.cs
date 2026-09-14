@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
@@ -13,6 +13,7 @@ namespace CodexUserData
     // delay the orb's activity state. Keep identifiers/times only; never cache messages or tools.
     internal sealed class ActivityReport
     {
+        internal List<string> ActiveKeys=new List<string>();
         internal int ActiveTasks,UncertainTasks,CompletedTasks;
         internal long Until,ObservedAt,CompletionSerial;
         internal bool MonitoringUnavailable;
@@ -269,7 +270,7 @@ namespace CodexUserData
                 .GroupBy(t=>t.Key).Select(g=>g.OrderByDescending(t=>t.Order).ThenBy(t=>t.Running).First()).ToArray();
             foreach(var state in states)
             {
-                if(state.Active(now)){report.ActiveTasks++;report.Until=now+4;}
+                if(state.Active(now)){report.ActiveTasks++;report.ActiveKeys.Add(state.Session+"/"+state.Key);report.Until=now+4;}
                 else if(state.Running)report.UncertainTasks++;
             }
             // Match the UI's completed-state gate only after every concurrent task is known.

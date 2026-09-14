@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -22,6 +22,7 @@ namespace CodexUserData
         private readonly TextBox refresh,home,database,quotaCli;
         private readonly TextBlock error,opacityLabel;
         private readonly ThemeEditor themeEditor;
+        private readonly RemoteSettings remoteSettings;
         private string activePage;
         private bool closed;
         private CancellationTokenSource updateCheck;
@@ -141,6 +142,7 @@ namespace CodexUserData
             Note(data,"仅以只读方式访问原始数据。用量不代表套餐剩余额度或实际账单。",Theme.Muted);
             Label(data,"数据保存位置");Note(data,"%LOCALAPPDATA%\\CodexUserData：保存设置、价格、自定义形态和用量缓存，各新版共用。",Theme.Muted);
             var openData=Theme.Button("打开用户数据目录","打开设置与缓存保存位置",180);openData.HorizontalAlignment=HorizontalAlignment.Left;openData.Margin=new Thickness(0,8,0,0);data.Children.Add(openData);openData.Click+=delegate{try{Directory.CreateDirectory(Program.DataFolder);System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo{FileName=Program.DataFolder,UseShellExecute=true});}catch(Exception ex){error.Text="无法打开数据目录："+ex.Message;}};
+            Label(data,"远程服务器");remoteSettings=new RemoteSettings(draft.Remote);data.Children.Add(remoteSettings);
             AddPage("data",data);
 
             var behavior=Page("启动与行为","最小化方式和自动启动规则");
@@ -201,7 +203,7 @@ namespace CodexUserData
             };
             AddPage("about",about);
 
-            Closed+=delegate{closed=true;if(updateCheck!=null)updateCheck.Cancel();Theme.Apply(DialogResult==true&&Result!=null?Result:current);};
+            Closed+=delegate{closed=true;remoteSettings.Close();if(updateCheck!=null)updateCheck.Cancel();Theme.Apply(DialogResult==true&&Result!=null?Result:current);};
             var bottom=new StackPanel{Margin=new Thickness(0,12,0,0)};Grid.SetRow(bottom,1);outer.Children.Add(bottom);
             error=Theme.Text("",11,Theme.Warning);error.TextWrapping=TextWrapping.Wrap;bottom.Children.Add(error);
             var buttons=new StackPanel{Orientation=Orientation.Horizontal,HorizontalAlignment=HorizontalAlignment.Right,Margin=new Thickness(0,8,0,0)};bottom.Children.Add(buttons);
@@ -266,11 +268,12 @@ namespace CodexUserData
             if(!themeEditor.IsValid){SelectPage("appearance");error.Text="请检查自定义主题的颜色，使用 #RRGGBB 格式。";return;}
             int seconds;
             if(!Int32.TryParse(refresh.Text,out seconds)||seconds<2||seconds>3600){SelectPage("data");error.Text="刷新间隔请输入 2–3600 之间的整数。";return;}
+            try{draft.Remote=remoteSettings.Read();}catch(ArgumentException ex){SelectPage("data");error.Text=ex.Message;return;}
             string[] selected=fields.Where(x=>x.Value.IsChecked==true).Select(x=>x.Key).ToArray();
             if(selected.Length==0){SelectPage("display");error.Text="请至少选择一项显示数据。";return;}
             try{draft.CodexHome=Path.GetFullPath(home.Text.Trim());draft.Database=Path.GetFullPath(database.Text.Trim());draft.QuotaCli=String.IsNullOrWhiteSpace(quotaCli.Text)?"":Path.GetFullPath(quotaCli.Text.Trim());}
             catch(Exception){SelectPage("data");error.Text="请填写有效的本地路径。";return;}
-            if(draft.Source=="local"&&!Directory.Exists(Path.Combine(draft.CodexHome,"sessions"))&&!Directory.Exists(Path.Combine(draft.CodexHome,"archived_sessions"))){SelectPage("data");error.Text="这个目录中未找到 sessions 或 archived_sessions。";return;}
+            if(draft.Source=="local"&&!draft.Remote.Enabled&&!Directory.Exists(Path.Combine(draft.CodexHome,"sessions"))&&!Directory.Exists(Path.Combine(draft.CodexHome,"archived_sessions"))){SelectPage("data");error.Text="这个目录中未找到 sessions 或 archived_sessions。";return;}
             if(draft.Source=="ccswitch"&&!File.Exists(draft.Database)){SelectPage("data");error.Text="找不到 CC Switch 数据库文件。";return;}
             if(draft.BallStyle=="html")try{ShapeManifest.Read(ShapeManifest.Resolve(draft.CustomShape));}catch(Exception){SelectPage("floating");error.Text="请先导入有效的 HTML 形态，或选择内置形态。";return;}
             draft.RefreshSeconds=seconds;draft.Metrics=selected;draft.Validate();

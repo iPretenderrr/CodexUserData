@@ -79,6 +79,7 @@ namespace CodexUserData
     }
     internal sealed class UsageSnapshot
     {
+        internal bool DataUnavailable;
         public string[] KnownModels {get;set;}
         public List<ModelUsage> Models {get;set;}
         public List<QuotaBucket> Quotas {get;set;}
