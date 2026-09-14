@@ -55,7 +55,7 @@ namespace CodexUserData
         [DllImport("user32.dll")] private static extern bool DestroyIcon(IntPtr icon);
         internal QuotaStatus(Func<Preferences> getPreferences,Action toggle,Action exit,bool preview,Action show=null,Action charts=null)
         {
-            preferences=getPreferences;this.preview=preview;showWindow=show??toggle;showCharts=charts??showWindow;Margin=new Thickness(0,0,0,9);
+            preferences=getPreferences;HistoryStore.SetEco(preferences().OrbAnimation=="eco");this.preview=preview;showWindow=show??toggle;showCharts=charts??showWindow;Margin=new Thickness(0,0,0,9);
             var heading=new DockPanel();Children.Add(heading);
             title=Theme.Text("CODEX · 剩余额度",10,Theme.Muted);heading.Children.Add(title);
             var row=new Grid{Margin=new Thickness(0,5,0,0)};row.ColumnDefinitions.Add(new ColumnDefinition());row.ColumnDefinitions.Add(new ColumnDefinition());Children.Add(row);
@@ -90,6 +90,7 @@ namespace CodexUserData
         internal void Start(){clock.Start();Refresh();}
         internal void Configure(bool newAccount)
         {
+            HistoryStore.SetEco(preferences().OrbAnimation=="eco");
             if(newAccount){accountRevision++;latest.Clear();failure="";SetCompletion(false);}
             if((newAccount||!preferences().LiveQuota)&&queryCancellation!=null)queryCancellation.Cancel();
             Render();Refresh();if(HistoryChanged!=null)HistoryChanged();

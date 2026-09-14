@@ -86,3 +86,7 @@
 !/tools/verify-sftp.ps1
 !/tools/sftp-fixture.py
 !/tools/remote-packages.json
+
+!/tools/PeriodStabilityProbe.cs
+!/tools/PeriodPerformanceProbe.cs
+!/tools/measure-periods.ps1

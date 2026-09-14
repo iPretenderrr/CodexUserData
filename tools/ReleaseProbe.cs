@@ -305,12 +305,42 @@ internal static class ReleaseProbe
   }
   Console.WriteLine("FLOATING RELEASE CHECKS: "+checks);
  }
+ static void PeriodOnly(string dir)
+ {
+  Check(assembly.GetType("CodexUserData.WidgetWindow")==null,"implementation remains obfuscated");
+  var json=new JavaScriptSerializer();var prefs=New("Preferences");var clone=Call("Preferences",prefs,"Clone");
+  Check(Get(clone,"Range").Equals(Get(prefs,"Range")),"period preferences retain their persisted schema");
+  string home=Path.Combine(dir,"period-fixture"),logs=Path.Combine(home,"sessions");Directory.CreateDirectory(logs);
+  string id="00000000-0000-0000-0000-000000000123",file=Path.Combine(logs,"rollout-"+id+".jsonl");DateTime now=DateTime.Now;string at=now.AddSeconds(-10).ToString("o");
+  string header=json.Serialize(new{type="session_meta",timestamp=at,payload=new{id=id,timestamp=at}})+"\n";
+  string usage=json.Serialize(new{type="event_msg",timestamp=at,payload=new{type="token_count",info=new{last_token_usage=new{input_tokens=100,output_tokens=10}}}})+"\n";
+  File.WriteAllText(file,header+usage);var reader=New("LocalCodexUsage",home,Path.Combine(dir,"period-cache.gz"),false);
+  var data=Call("LocalCodexUsage",reader,"Read","today",now,null,null);Check((long)Get(data,"TotalTokens")==110,"protected reader parses a synthetic usage event");
+  foreach(string range in new[]{"week","month","all"})Check((long)Get(Call("LocalCodexUsage",reader,"Snapshot",range,now),"TotalTokens")==110,"protected cached range: "+range);
+  var records=Call("LocalCodexUsage",reader,"Export");var union=New("UsageUnionCache");
+  Check((long)Get(Call("UsageUnionCache",union,"Get",records,records,"combined","today",now,"combined"),"TotalTokens")==110,"protected cached remote union does not double copied logs");
+  long end=DateTimeOffset.UtcNow.ToUnixTimeSeconds();var store=New("QuotaHistoryStore",Path.Combine(dir,"quota-history"));string scope=(string)Call("QuotaHistoryStore",null,"Scope",home);
+  string folder=Path.Combine(dir,"quota-history",scope);Directory.CreateDirectory(folder);
+  foreach(int day in new[]{0,30,179}){long time=end-day*86400L;string quotaFile=Path.Combine(folder,DateTimeOffset.FromUnixTimeSeconds(time).UtcDateTime.ToString("yyyy-MM-dd")+".jsonl");File.WriteAllText(quotaFile,"{\"Time\":"+time+",\"Bucket\":\"codex\",\"Minutes\":300,\"Remaining\":76.5,\"Reset\":"+(time+3600)+"}\n");}
+  var read=(System.Threading.Tasks.Task)Call("QuotaHistoryStore",store,"ReadAsync",scope,end-180*86400L,end);read.GetAwaiter().GetResult();var rows=(Array)read.GetType().GetProperty("Result").GetValue(read,null);
+  Check(rows.Length==3&&(double)Get(rows.GetValue(0),"Remaining")==76.5,"protected quota parser retains numeric JSON names");
+  ((System.Threading.Tasks.Task)Call("QuotaHistoryStore",store,"ReadAsync",scope,end-86400L,end)).GetAwaiter().GetResult();
+  ((System.Threading.Tasks.Task)Call("QuotaHistoryStore",store,"ReadAsync",scope,end-180*86400L,end)).GetAwaiter().GetResult();
+  Check((long)Call("QuotaHistoryStore",store,"get_LastBytesRead")==0,"protected 180d return reuses cached dates");
+  new Application{ShutdownMode=ShutdownMode.OnExplicitShutdown};Call("Theme",null,"Apply",prefs);
+  var chart=(FrameworkElement)New("QuotaHistoryChart");var window=new Window{Content=chart,Width=800,Height=430,ShowActivated=false,ShowInTaskbar=false};
+  try{window.Show();Pump(50);var series=Call("QuotaHistorySeries",null,"Prepare",rows);var drawing=(System.Threading.Tasks.Task)Call("QuotaHistoryChart",chart,"SetSeriesAsync",series,end-180*86400L,end);Check(WaitForUi(()=>drawing.IsCompleted),"protected asynchronous curve completes");drawing.GetAwaiter().GetResult();Check((int)Call("QuotaHistoryChart",chart,"get_GeometryBuilds")>0,"protected chart publishes background geometry");}
+  finally{window.Close();}
+  var widget=(Window)New("WidgetWindow",prefs,true);try{Call("WidgetWindow",widget,"ApplySnapshot",data);var body=(FrameworkElement)widget.Content;body.Measure(new Size(600,700));body.Arrange(new Rect(0,0,600,700));body.UpdateLayout();Check(body.ActualHeight>0,"protected dashboard renders the cached usage snapshot");}finally{widget.Close();}
+  File.WriteAllText(Path.Combine(dir,"verification.json"),"{\"passed\":true,\"scope\":\"period\",\"checks\":"+checks+"}");Console.WriteLine("PERIOD RELEASE CHECKS: "+checks);
+ }
  [STAThread] static int Main(string[] args)
  {
   try{
    AppDomain.CurrentDomain.SetData("CodexUserData.TestDataFolder",Path.Combine(Path.GetFullPath(args[2]),"fixture-user"));
    assembly=Assembly.LoadFrom(Path.GetFullPath(args[0]));map=File.ReadAllText(args[1]);string dir=args[2];Directory.CreateDirectory(dir);
    if(args.Contains("--floating-only")){FloatingEffectsOnly(dir);return 0;}
+   if(args.Contains("--period-only")){PeriodOnly(dir);return 0;}
    Check(assembly.GetType("CodexUserData.WidgetWindow")==null&&Regex.Matches(map,@"^\[CodexUserData\].+ -> \[CodexUserData\]",RegexOptions.Multiline).Count>20,"implementation types are renamed");
    var json=new JavaScriptSerializer();var prefs=New("Preferences");Set(prefs,"MinimizeToTray",true);Set(prefs,"PriceOverrides",new Dictionary<string,decimal[]>{{"fixture-model",new[]{1m,.1m,0m,2m}}});
    string settings=json.Serialize(prefs);var clone=Call("Preferences",prefs,"Clone");Check(settings.Contains("\"MinimizeToTray\":true")&&(bool)Get(clone,"MinimizeToTray")&&((IDictionary)Get(clone,"PriceOverrides")).Contains("fixture-model"),"settings and custom-price schema survive obfuscation");

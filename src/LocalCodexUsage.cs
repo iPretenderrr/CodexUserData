@@ -48,6 +48,46 @@ namespace CodexUserData
         public string Root = "";
         public List<LogCursor> Files = new List<LogCursor>();
     }
+    // Range changes reuse the numeric ledger. Recompute only after a ledger/price
+    // change, a local hour boundary, or a timestamp that was not yet observable.
+    internal sealed class UsageSnapshotMemo
+    {
+        private readonly Dictionary<string,UsageSnapshot> ranges=new Dictionary<string,UsageSnapshot>();
+        private object prices;
+        private string hour;
+        private int version=-1,failures=-1;
+        private long readAt,nextChange=Int64.MaxValue;
+        internal UsageSnapshot Get(Dictionary<string,LogCursor> records,int dataVersion,string range,DateTime now,int failed=0)
+        {
+            if(now.Kind==DateTimeKind.Utc)now=now.ToLocalTime();
+            long at=LocalCodexUsage.Unix(now);string clock=now.ToString("yyyyMMddHH",CultureInfo.InvariantCulture)+"/"+TimeZoneInfo.Local.GetUtcOffset(now).Ticks;
+            if(version!=dataVersion||failures!=failed||prices!=ApiPrices.Version||hour!=clock||at<readAt||at>=nextChange)
+            {ranges.Clear();version=dataVersion;failures=failed;prices=ApiPrices.Version;hour=clock;nextChange=Int64.MaxValue;}
+            readAt=at;UsageSnapshot value;
+            if(!ranges.TryGetValue(range,out value))
+            {
+                UsageSnapshot all;
+                if(!ranges.TryGetValue("all",out all)){all=LocalCodexUsage.Aggregate(records,"all",now,failed);ranges["all"]=all;nextChange=all.NextChangeAt;}
+                value=Select(all,range,now);ranges[range]=value;
+            }
+            return value.Copy();
+        }
+        private static UsageSnapshot Select(UsageSnapshot all,string range,DateTime now)
+        {
+            if(range=="all")return all;
+            int count=range=="week"?7:range=="month"?30:1,index=count==1?0:count==7?1:2;
+            var result=all.Copy();var days=all.Daily.Skip(Math.Max(0,all.Daily.Length-count)).ToArray();
+            result.TotalTokens=days.Sum(d=>d.Tokens);result.InputTokens=days.Sum(d=>d.Input);result.OutputTokens=days.Sum(d=>d.Output);
+            result.CacheReadTokens=days.Sum(d=>d.CacheRead);result.CacheCreationTokens=days.Sum(d=>d.CacheWrite);result.ReasoningTokens=days.Sum(d=>d.Reasoning);result.Requests=days.Sum(d=>d.Requests);
+            result.Models=new List<ModelUsage>();foreach(var model in days.SelectMany(d=>d.Models))ModelUsage.Accumulate(result.Models,model.Model,model.Effort,model.Input,model.Output,model.CacheRead,model.CacheWrite,model.Requests);
+            result.EquivalentUsd=result.Models.Sum(m=>m.EquivalentUsd);result.UnpricedTokens=result.Models.Sum(m=>m.UnpricedTokens);
+            long input=result.InputTokens+result.CacheReadTokens+result.CacheCreationTokens;result.CacheHitRate=input>0?result.CacheReadTokens*100.0/input:0;
+            result.Sessions=all.PeriodSessions[index];result.InferredRecords=all.PeriodInferred[index];
+            result.LatestRecord=all.LatestUsageUnix>=LocalCodexUsage.Unix(now.Date.AddDays(1-count))?all.LatestRecord:"暂无记录";
+            result.Warning=all.CommonWarning;if(result.InferredRecords>0)result.Warning+=(result.Warning.Length>0?"\n":"")+result.InferredRecords+" 条旧记录由累计计数差值还原。";
+            return result;
+        }
+    }
     internal sealed class LocalCodexUsage
     {
         private readonly string root, cachePath;
@@ -58,6 +98,9 @@ namespace CodexUserData
         private readonly bool readOnlyCache;
         private readonly bool remoteCache;
         internal long LastBytesRead { get; private set; }
+        internal int DataVersion {get;private set;}
+        private readonly UsageSnapshotMemo snapshots=new UsageSnapshotMemo();
+        private int lastFailures;
         private static readonly DateTime Epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
         internal LocalCodexUsage(string directory,string cacheFile,bool readOnly=false):this(directory,cacheFile,readOnly,false){}
@@ -224,7 +267,7 @@ namespace CodexUserData
                     cursor.SkippedOffset=skip?baseOffset:0;
                     cursor.SkippedTail=skip?Fingerprint(stream,Math.Max(0,baseOffset-64),(int)Math.Min(64,baseOffset)):null;
                     line.Dispose(); cursor.Tail=Fingerprint(stream,Math.Max(0,cursor.Offset-64),(int)Math.Min(64,cursor.Offset));
-                    cursor.Length=length; cursor.Modified=file.Modified;
+                    cursor.Length=length; cursor.Modified=file.Modified;dirty=true;DataVersion++;
                 }
             dirty=true;
         }
@@ -260,15 +303,19 @@ namespace CodexUserData
 
         private static bool ActivityLine(string text){return text.Contains("\"task_started\"")||text.Contains("\"turn_started\"")||text.Contains("\"task_complete\"")||text.Contains("\"turn_completed\"")||text.Contains("\"turn_aborted\"")||text.Contains("\"task_failed\"");}
         internal UsageSnapshot Read(string range, DateTime now, Action<string> progress, Func<bool> cancel)
+        {Update(progress,cancel);return Snapshot(range,now);}
+        internal void Update(Action<string> progress,Func<bool> cancel)
         {
             if(!Directory.Exists(System.IO.Path.Combine(root,"sessions")) && !Directory.Exists(System.IO.Path.Combine(root,"archived_sessions"))) throw new DirectoryNotFoundException("找不到 Codex sessions 日志目录，可在设置中选择 Codex 数据目录。");
             int failed=0; List<FileInfo> found=new List<FileInfo>();
             Enumerate(System.IO.Path.Combine(root,"sessions"),found,ref failed,0); Enumerate(System.IO.Path.Combine(root,"archived_sessions"),found,ref failed,0);
-            return ReadEnumerated(range,now,found,failed,progress,cancel);
+            UpdateEnumerated(found,failed,progress,cancel);
         }
         // Keep enumeration completeness explicit through reconciliation and aggregation. Tests
         // can exercise partial listings without altering directory ACLs or reading user logs.
         internal UsageSnapshot ReadEnumerated(string range,DateTime now,List<FileInfo> found,int failed,Action<string> progress,Func<bool> cancel)
+        {UpdateEnumerated(found,failed,progress,cancel);return Snapshot(range,now);}
+        private void UpdateEnumerated(List<FileInfo> found,int failed,Action<string> progress,Func<bool> cancel)
         {
             LastBytesRead=0;
             // One ledger per thread: moving/duplicating a rollout in archived_sessions must not add its usage twice.
@@ -276,13 +323,13 @@ namespace CodexUserData
             var active=new HashSet<string>(files.Select(IdFor),StringComparer.OrdinalIgnoreCase);
             // Not seeing a file during a partial traversal is not evidence of deletion. Retain
             // its last numeric ledger until a complete traversal can authoritatively remove it.
-            if(failed==0)foreach(string deleted in cursors.Keys.Where(k=>!active.Contains(k)).ToArray()) {cursors.Remove(deleted);dirty=true;}
+            if(failed==0)foreach(string deleted in cursors.Keys.Where(k=>!active.Contains(k)).ToArray()) {cursors.Remove(deleted);dirty=true;DataVersion++;}
             int completed=0; DateTime reported=DateTime.MinValue;
             foreach(FileInfo file in files)
             {
                 if(cancel!=null && cancel()) { SaveCache(true); throw new OperationCanceledException(); }
                 string id=IdFor(file); LogCursor cursor;
-                if(!cursors.TryGetValue(id,out cursor)) { cursor=new LogCursor {Id=id};cursors[id]=cursor;dirty=true; }
+                if(!cursors.TryGetValue(id,out cursor)) { cursor=new LogCursor {Id=id};cursors[id]=cursor;dirty=true;DataVersion++; }
                 if(cursor.Path!=file.FullName || cursor.Created!=file.CreationTimeUtc.Ticks || cursor.Modified!=file.LastWriteTimeUtc.Ticks || cursor.Length!=file.Length || Math.Max(cursor.Offset,cursor.SkippedOffset)<file.Length)
                 {
                     try { ReadFile(cursor,file,cancel);dirty=true; }
@@ -291,8 +338,9 @@ namespace CodexUserData
                 completed++;
                 if(progress!=null && (DateTime.UtcNow-reported).TotalMilliseconds>200) {progress("读取本地日志 "+completed+" / "+files.Count);reported=DateTime.UtcNow;}
             }
-            SaveCache(false);return Aggregate(cursors,range,now,failed);
+            lastFailures=failed;SaveCache(false);
         }
+        internal UsageSnapshot Snapshot(string range,DateTime now){return snapshots.Get(cursors,DataVersion,range,now,lastFailures);}
         internal List<LogCursor> Export(){return cursors.Values.Select(CopyCursor).ToList();}
         internal static LogCursor CopyCursor(LogCursor value)
         {
@@ -304,11 +352,13 @@ namespace CodexUserData
         }
         internal static UsageSnapshot Aggregate(Dictionary<string,LogCursor> cursors,string range,DateTime now,int failed=0)
         {
-            UsageSnapshot result=new UsageSnapshot {SourceName="本地 Codex",CostAvailable=false,CountLabel="用量记录",LatestRecord="暂无记录",CoverageFiles=cursors.Count};
+            if(now.Kind==DateTimeKind.Utc)now=now.ToLocalTime();
+            UsageSnapshot result=new UsageSnapshot {SourceName="本地 Codex",CostAvailable=false,CountLabel="用量记录",LatestRecord="暂无记录",CoverageFiles=cursors.Count,PeriodSessions=new long[3],PeriodInferred=new long[3]};
             result.KnownModels=cursors.Values.SelectMany(c=>c.Events).Select(e=>e.Model).Where(m=>!String.IsNullOrWhiteSpace(m)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
             result.Quotas=cursors.Values.SelectMany(c=>c.Quotas).GroupBy(q=>q.Id).Select(g=>g.OrderByDescending(q=>q.ObservedAt).First()).ToList();
             result.Daily=DailyUsage.Empty(now,180);DateTime historyStart=now.Date.AddDays(-179);long historyFrom=Unix(historyStart);
             result.Hourly=DailyUsage.Hours(now);result.HourlyThrough=now.Hour+1;long todayFrom=Unix(now.Date);
+            long[] periodStarts={todayFrom,Unix(now.Date.AddDays(-6)),Unix(now.Date.AddDays(-29))};
             long from=range=="all"?Int64.MinValue:Unix(now.Date.AddDays(range=="week"?-6:range=="month"?-29:0)); long until=Unix(now);
             int deferred=0,invalid=0,missingMeta=0,missingParent=0,unverifiedParent=0;long latest=0;
             foreach(LogCursor cursor in cursors.Values)
@@ -319,7 +369,8 @@ namespace CodexUserData
                 // client or old cached start event must not leave an endlessly animated orb.
                 long touched=cursor.Modified>0?Unix(new DateTime(cursor.Modified,DateTimeKind.Utc)):0;
                 if(cursor.TaskRunning&&cursor.TaskStarted>0&&cursor.TaskStarted<=until&&touched<=until&&touched+180>until)
-                {result.ActiveTasks++;result.ActivityUntil=Math.Max(result.ActivityUntil,touched+180);}
+                {result.ActiveTasks++;result.ActivityUntil=Math.Max(result.ActivityUntil,touched+180);result.NextChangeAt=Math.Min(result.NextChangeAt,touched+180);}
+                if(cursor.TaskRunning){if(cursor.TaskStarted>until)result.NextChangeAt=Math.Min(result.NextChangeAt,cursor.TaskStarted);if(touched>until)result.NextChangeAt=Math.Min(result.NextChangeAt,touched);}
                 int inherited=0;
                 if(!String.IsNullOrEmpty(cursor.Parent))
                 {
@@ -333,10 +384,13 @@ namespace CodexUserData
                         int match=signatures.IndexOf(item.Signature,at); if(match<0)break;at=match+1;inherited++;
                     }
                 }
-                bool used=false;
+                bool used=false;long cursorLatest=0;
                 foreach(LocalUsageEvent item in cursor.Events.Skip(inherited))
                 {
-                    if(item.Time>until || item.Input+item.Output==0)continue;
+                    if(item.Time>until){result.NextChangeAt=Math.Min(result.NextChangeAt,item.Time);continue;}
+                    if(item.Input+item.Output==0)continue;
+                    cursorLatest=Math.Max(cursorLatest,item.Time);
+                    if(item.Inferred)for(int p=0;p<3;p++)if(item.Time>=periodStarts[p])result.PeriodInferred[p]++;
                     result.LatestUsageUnix=Math.Max(result.LatestUsageUnix,item.Time);
                     if(item.Time>=todayFrom)
                     {
@@ -358,6 +412,7 @@ namespace CodexUserData
                     latest=Math.Max(latest,item.Time);used=true;
                 }
                 if(used)result.Sessions++;
+                if(cursorLatest>0)for(int p=0;p<3;p++)if(cursorLatest>=periodStarts[p])result.PeriodSessions[p]++;
             }
             long allInput=result.InputTokens+result.CacheReadTokens+result.CacheCreationTokens;
             result.EquivalentUsd=result.Models.Sum(m=>m.EquivalentUsd);result.UnpricedTokens=result.Models.Sum(m=>m.UnpricedTokens);
@@ -371,6 +426,7 @@ namespace CodexUserData
             if(missingMeta>0)notices.Add(missingMeta+" 个会话日志缺少可核验的会话标识，暂未计入。");
             if(invalid>0)notices.Add(invalid+" 条记录无法解析或校验（格式、时间、会话标识或长度不符合要求）；其余可核验记录仍参与统计。");
             result.Warning=String.Join("\n",notices);
+            result.CommonWarning=result.Warning;
             if(result.InferredRecords>0)result.Warning+=(result.Warning.Length>0?"\n":"")+result.InferredRecords+" 条旧记录由累计计数差值还原。";
             return result;
         }

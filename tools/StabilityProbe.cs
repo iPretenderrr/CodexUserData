@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -28,7 +28,7 @@ namespace CodexUserData
             var app=new Application{ShutdownMode=ShutdownMode.OnExplicitShutdown};int result=0;
             app.Startup+=async delegate
             {
-                try{if(args.Contains("--remote-only")){await RemoteStabilityProbe.Run(root);DataStabilityProbe.Run(root);StatusStabilityProbe.Run(root);}else if(args.Contains("--html-only")){await HtmlStabilityProbe.Run(root);}else if(args.Contains("--floating-only")){await FloatingEffectsStabilityProbe.Run(root);await IslandStabilityProbe.Run(root);await HtmlStabilityProbe.Run(root);}else if(args.Contains("--quota-only")){await QuotaHistoryStabilityProbe.Run(root);}else if(args.Contains("--island-only")){await IslandStabilityProbe.Run(root);await WindowMotionStabilityProbe.Run(root);}else await Run(root);Console.WriteLine("SOURCE CHECKS: "+checks);}
+                try{if(args.Contains("--period-only")){await PeriodStabilityProbe.Run(root);await ChartStabilityProbe.Run(root);}else if(args.Contains("--remote-only")){await RemoteStabilityProbe.Run(root);DataStabilityProbe.Run(root);StatusStabilityProbe.Run(root);}else if(args.Contains("--html-only")){await HtmlStabilityProbe.Run(root);}else if(args.Contains("--floating-only")){await FloatingEffectsStabilityProbe.Run(root);await IslandStabilityProbe.Run(root);await HtmlStabilityProbe.Run(root);}else if(args.Contains("--quota-only")){await QuotaHistoryStabilityProbe.Run(root);}else if(args.Contains("--island-only")){await IslandStabilityProbe.Run(root);await WindowMotionStabilityProbe.Run(root);}else await Run(root);Console.WriteLine("SOURCE CHECKS: "+checks);}
                 catch(Exception ex){result=1;Console.Error.WriteLine(ex);}
                 finally{foreach(Window window in app.Windows.Cast<Window>().ToArray())window.Close();app.Shutdown();}
             };
@@ -79,7 +79,7 @@ namespace CodexUserData
                 if(pending!=null)await pending;
             }
             await HtmlStabilityProbe.Run(root);
-            foreach(string name in new[]{"PlacementStabilityProbe","StatusStabilityProbe","ChartStabilityProbe","QuotaHistoryStabilityProbe","DiagnosticStabilityProbe","UpdateStabilityProbe","IslandStabilityProbe","WindowMotionStabilityProbe"})
+            foreach(string name in new[]{"PlacementStabilityProbe","StatusStabilityProbe","PeriodStabilityProbe","ChartStabilityProbe","QuotaHistoryStabilityProbe","DiagnosticStabilityProbe","UpdateStabilityProbe","IslandStabilityProbe","WindowMotionStabilityProbe"})
             {
                 var probe=typeof(StabilityProbe).Assembly.GetType("CodexUserData."+name);
                 if(probe==null)throw new InvalidOperationException("Required verification component is missing: "+name);

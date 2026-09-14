@@ -148,10 +148,14 @@ namespace CodexUserData
         internal void SetData(DailyUsage[] days,int count,bool hourly=false,int availableHours=24,bool cost=false)
         {
             string hoveredDate=Hovered>=0&&Hovered<Days.Length?Days[Hovered].Date:null;
-            Days=days??new DailyUsage[0];IsHourly=hourly;IsCost=cost;through=hourly?Math.Max(0,Math.Min(Days.Length,availableHours)):Days.Length;string next=count+"/"+hourly+"/"+through+"/"+cost+"/"+Signature(Days);WindowDays=count;
-            if(next==signature)return;signature=next;cachedDrawing=null;series.Clear();layers.Clear();
-            foreach(string model in Days.SelectMany(d=>d.Models).Select(m=>m.Model).Distinct().OrderBy(m=>m))series[model]=new double[Days.Length];
-            for(int i=0;i<Days.Length;i++)foreach(var m in Days[i].Models)series[m.Model][i]+=cost?(double)m.EquivalentUsd:m.Tokens;
+            int oldCount=WindowDays;Days=days??new DailyUsage[0];IsHourly=hourly;IsCost=cost;through=hourly?Math.Max(0,Math.Min(Days.Length,availableHours)):Days.Length;string next=hourly+"/"+through+"/"+cost+"/"+Signature(Days);WindowDays=count;
+            bool dataChanged=next!=signature;if(!dataChanged&&oldCount==count)return;signature=next;cachedDrawing=null;layers.Clear();
+            // A different visible period does not change the underlying model series.
+            if(dataChanged)
+            {
+                series.Clear();foreach(string model in Days.SelectMany(d=>d.Models).Select(m=>m.Model).Distinct().OrderBy(m=>m))series[model]=new double[Days.Length];
+                for(int i=0;i<Days.Length;i++)foreach(var m in Days[i].Models)series[m.Model][i]+=cost?(double)m.EquivalentUsd:m.Tokens;
+            }
             AutomationProperties.SetName(this,IsHeatmap?(cost?"每日 API 估算费用热度图":"每日用量热度图"):(cost?"API 估算费用趋势 · USD":"Token 用量趋势"));
             if(Selected>=Days.Length)Selected=-1;Hovered=hoveredDate==null?-1:Array.FindIndex(Days,d=>d.Date==hoveredDate);if(Hovered<0)tip.IsOpen=false;else UpdateTip(Days[Hovered]);if(IsHeatmap&&ActualWidth>0)Height=HeatHeight(ActualWidth);InvalidateVisual();
         }
@@ -359,6 +363,7 @@ namespace CodexUserData
         private UsageSnapshot original,snapshot;
         private string modelKey="",viewSignature,pinnedModel;
         private int days=30;
+        private bool rangeInitialized;
         private bool cost;
         internal bool ShowCoverage=true;
         internal event Action<int> RangeChanged;
@@ -412,7 +417,7 @@ namespace CodexUserData
         }
         internal void SetRange(int count)
         {
-            int next=Periods.Contains(count)?count:30;if(days!=next)trendSelection.Reset();
+            int next=Periods.Contains(count)?count:30;if(rangeInitialized&&days==next)return;rangeInitialized=true;if(days!=next)trendSelection.Reset();
             days=next;foreach(var pair in ranges){pair.Value.Foreground=pair.Key==days?Theme.Accent:Theme.Muted;pair.Value.Background=pair.Key==days?Theme.Hover:Brushes.Transparent;}
             UpdateTrend();
         }

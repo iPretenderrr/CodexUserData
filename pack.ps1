@@ -1,4 +1,4 @@
-﻿param([string]$Version='1.9.0',[switch]$FloatingOnly)
+﻿param([string]$Version='1.9.1',[switch]$FloatingOnly,[switch]$PeriodOnly)
 # Keep this script UTF-8 with BOM: Windows PowerShell 5.1 must decode the Chinese allowlist paths correctly.
 $ErrorActionPreference='Stop'
 if($Version -notmatch '^\d+\.\d+\.\d+$'){throw 'Version must be major.minor.patch'}
@@ -34,9 +34,11 @@ $refs=@('WPF/PresentationCore.dll','WPF/PresentationFramework.dll','WPF/WindowsB
 $probe=Join-Path $run 'ReleaseProbe.exe'
 & (Join-Path $framework 'csc.exe') /nologo /target:exe /platform:x64 ('/out:'+$probe) @refs (Join-Path $root 'tools\ReleaseProbe.cs')
 if($LASTEXITCODE -ne 0){throw 'Release verifier compilation failed'}
-if($FloatingOnly){& $probe $binary $map (Join-Path $run 'verification') --floating-only}
+if($PeriodOnly){& $probe $binary $map (Join-Path $run 'verification') --period-only}
+elseif($FloatingOnly){& $probe $binary $map (Join-Path $run 'verification') --floating-only}
 else{& $probe $binary $map (Join-Path $run 'verification')}
 if($LASTEXITCODE -ne 0){throw 'Protected binary verification failed; no ZIP was generated'}
+if(-not $PeriodOnly){
 # HTML uses its own renderer process: smoke-test the protected bridge and host-owned menu.
 $htmlRefs=@($refs)+@(('/r:'+(Join-Path $protected 'Microsoft.Web.WebView2.Core.dll')),('/r:'+(Join-Path $protected 'Microsoft.Web.WebView2.Wpf.dll')))
 foreach($name in @('Microsoft.Web.WebView2.Core.dll','Microsoft.Web.WebView2.Wpf.dll','WebView2Loader.dll')){Copy-Item -LiteralPath (Join-Path $protected $name) -Destination $run -Force}
@@ -45,6 +47,7 @@ $htmlProbe=Join-Path $run 'HtmlReleaseProbe.exe'
 if($LASTEXITCODE -ne 0){throw 'HTML release verifier compilation failed'}
 & $htmlProbe $binary $map (Join-Path $run 'verification')
 if($LASTEXITCODE -ne 0){throw 'Protected HTML verification failed; install WebView2 Runtime and check the browser host before publishing'}
+}
 # Product-only allowlist. Source, mapping files, PDBs, tools and private data cannot enter this archive.
 $files=[ordered]@{'CodexUserData.exe'=$binary;'CodexUserData.exe.config'=(Join-Path $root 'CodexUserData.exe.config');'README.md'=(Join-Path $root 'README-release.md');'THIRD-PARTY-NOTICES.txt'=(Join-Path $root 'THIRD-PARTY-NOTICES.txt')}
 foreach($name in @('Microsoft.Web.WebView2.Core.dll','Microsoft.Web.WebView2.Wpf.dll','WebView2Loader.dll')){$files[$name]=Join-Path $protected $name}

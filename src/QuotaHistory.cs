@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 
@@ -21,6 +22,24 @@ namespace CodexUserData
         internal string Label {get{return new QuotaWindow{Minutes=Minutes}.Label;}}
         internal bool Supported {get{return Bucket=="codex"&&(Minutes==300||Minutes==10080);}}
         internal bool Valid {get{return Time>0&&Time<=253402300799&&Minutes>0&&Minutes<=525600&&Bucket!=null&&Bucket.Length<=120&&!Double.IsNaN(Remaining)&&!Double.IsInfinity(Remaining)&&Remaining>=0&&Remaining<=100&&Reset>=0&&Reset<=253402300799;}}
+        // Fast path for the numeric-only format written by RecordAsync. Imported/older
+        // JSON still uses the regular parser; accepting a prefix alone is never enough.
+        internal static QuotaSample Parse(string line,JavaScriptSerializer json)
+        {
+            const string bucket=",\"Bucket\":\"codex\",\"Minutes\":";
+            if(line.StartsWith("{\"Time\":",StringComparison.Ordinal)&&line.EndsWith("}",StringComparison.Ordinal))
+            {
+                int b=line.IndexOf(bucket,8,StringComparison.Ordinal),r=b<0?-1:line.IndexOf(",\"Remaining\":",b+bucket.Length,StringComparison.Ordinal);
+                int z=r<0?-1:line.IndexOf(",\"Reset\":",r+13,StringComparison.Ordinal);
+                long time,minutes,reset;double remaining;
+                if(b>8&&r>b&&z>r&&Int64.TryParse(line.Substring(8,b-8),NumberStyles.None,CultureInfo.InvariantCulture,out time)
+                    &&Int64.TryParse(line.Substring(b+bucket.Length,r-b-bucket.Length),NumberStyles.None,CultureInfo.InvariantCulture,out minutes)
+                    &&Double.TryParse(line.Substring(r+13,z-r-13),NumberStyles.Float,CultureInfo.InvariantCulture,out remaining)
+                    &&Int64.TryParse(line.Substring(z+9,line.Length-z-10),NumberStyles.None,CultureInfo.InvariantCulture,out reset))
+                    return new QuotaSample{Time=time,Bucket="codex",Minutes=minutes,Remaining=remaining,Reset=reset};
+            }
+            try{return json.Deserialize<QuotaSample>(line);}catch(ArgumentException){return null;}catch(InvalidOperationException){return null;}
+        }
     }
 
     // Daily append-only files bound range reads and retention work. They contain only
@@ -30,8 +49,13 @@ namespace CodexUserData
         private readonly string root;
         private readonly object gate=new object();
         private readonly Dictionary<string,long> lastMinute=new Dictionary<string,long>();
-        private sealed class CachedDay {internal long Length,Stamp;internal QuotaSample[] Rows;}
+        private sealed class CachedDay {internal long Length,Stamp,Created,Offset,Used;internal string Head,Tail;internal QuotaSample[] Rows;}
         private readonly Dictionary<string,CachedDay> cache=new Dictionary<string,CachedDay>();
+        private long useClock;
+        private int sampleLimit=600000;
+        internal long LastBytesRead {get;private set;}
+        internal int CachedSamples {get{lock(gate)return cache.Values.Sum(d=>d.Rows.Length);}}
+        internal void SetEco(bool eco){lock(gate){sampleLimit=eco?160000:600000;TrimCache();}}
         private DateTime cleaned;
         internal QuotaHistoryStore(string directory){root=directory;}
         internal static string Scope(string home)
@@ -75,35 +99,86 @@ namespace CodexUserData
             });
         }
         internal Task<QuotaSample[]> ReadAsync(string scope,long from,long to)
+        {return ReadAsync(scope,from,to,CancellationToken.None);}
+        internal Task<QuotaSample[]> ReadAsync(string scope,long from,long to,CancellationToken cancel)
         {
             return Task.Run(()=>
             {
-                var rows=new Dictionary<string,QuotaSample>();var json=new JavaScriptSerializer{MaxJsonLength=4096};var visited=new HashSet<string>();
-                lock(gate)
+                var rows=new List<QuotaSample>();var json=new JavaScriptSerializer{MaxJsonLength=4096};bool misplaced=false;
+                string directory=Folder(scope);LastBytesRead=0;
+                for(DateTime day=DateTimeOffset.FromUnixTimeSeconds(from).UtcDateTime.Date;day<=DateTimeOffset.FromUnixTimeSeconds(to).UtcDateTime.Date;day=day.AddDays(1))
                 {
-                    string directory=Folder(scope);
-                    for(DateTime day=DateTimeOffset.FromUnixTimeSeconds(from).UtcDateTime.Date;day<=DateTimeOffset.FromUnixTimeSeconds(to).UtcDateTime.Date;day=day.AddDays(1))
+                    cancel.ThrowIfCancellationRequested();
+                    string file=Path.Combine(directory,day.ToString("yyyy-MM-dd",CultureInfo.InvariantCulture)+".jsonl");
+                    // Release the gate between days: a long history read must not delay
+                    // the minute writer or a newer selection for the whole 180-day scan.
+                    lock(gate)
                     {
-                        string file=Path.Combine(directory,day.ToString("yyyy-MM-dd",CultureInfo.InvariantCulture)+".jsonl");if(!File.Exists(file))continue;
-                        visited.Add(file);var info=new FileInfo(file);CachedDay cached;
-                        if(!cache.TryGetValue(file,out cached)||cached.Length!=info.Length||cached.Stamp!=info.LastWriteTimeUtc.Ticks)
+                        cancel.ThrowIfCancellationRequested();var info=new FileInfo(file);
+                        if(!info.Exists){cache.Remove(file);continue;}
+                        CachedDay cached;cache.TryGetValue(file,out cached);
+                        if(cached==null||cached.Length!=info.Length||cached.Stamp!=info.LastWriteTimeUtc.Ticks||cached.Created!=info.CreationTimeUtc.Ticks)
                         {
-                            var loaded=new List<QuotaSample>();
-                            foreach(string line in File.ReadLines(file))
-                            {
-                                if(String.IsNullOrWhiteSpace(line)||line.Length>4096)continue;
-                                QuotaSample sample;try{sample=json.Deserialize<QuotaSample>(line);}catch(ArgumentException){continue;}catch(InvalidOperationException){continue;}
-                                if(sample!=null&&sample.Valid&&sample.Supported)loaded.Add(sample);
-                            }
-                            cached=new CachedDay{Length=info.Length,Stamp=info.LastWriteTimeUtc.Ticks,Rows=loaded.ToArray()};cache[file]=cached;
+                            cached=ReadDay(info,cached,json,cancel);cache[file]=cached;
                         }
-                        foreach(var sample in cached.Rows)if(sample.Time>=from&&sample.Time<=to)rows[sample.Key+"/"+sample.Time/60]=sample;
+                        cached.Used=++useClock;
+                        long dayStart=LocalCodexUsage.Unix(day);
+                        foreach(var sample in cached.Rows)if(sample.Time>=from&&sample.Time<=to){rows.Add(sample);misplaced|=sample.Time<dayStart||sample.Time>=dayStart+86400;}
+                        TrimCache();
                     }
-                    // Cache only the requested period; old months are never retained in RAM.
-                    foreach(string file in cache.Keys.Where(k=>!visited.Contains(k)).ToArray())cache.Remove(file);
                 }
-                return rows.Values.OrderBy(s=>s.Time).ThenBy(s=>s.Key).ToArray();
-            });
+                cancel.ThrowIfCancellationRequested();
+                // Normally each file is already sorted/deduplicated for its UTC day.
+                // Preserve the old behavior for manually moved or imported records too.
+                if(misplaced){var unique=new Dictionary<long,QuotaSample>();foreach(var sample in rows)unique[sample.Time/60*2+(sample.Minutes==300?0:1)]=sample;return unique.Values.OrderBy(s=>s.Time).ThenBy(s=>s.Minutes).ToArray();}
+                return rows.ToArray();
+            },cancel);
+        }
+        private void TrimCache()
+        {
+            int count=cache.Values.Sum(d=>d.Rows.Length);
+            if(count<=sampleLimit&&cache.Count<=182)return;
+            foreach(var pair in cache.OrderBy(p=>p.Value.Used).ToArray())
+            {if(count<=sampleLimit&&cache.Count<=182)break;count-=pair.Value.Rows.Length;cache.Remove(pair.Key);}
+        }
+        private CachedDay ReadDay(FileInfo info,CachedDay previous,JavaScriptSerializer json,CancellationToken cancel)
+        {
+            using(var input=new FileStream(info.FullName,FileMode.Open,FileAccess.Read,FileShare.ReadWrite|FileShare.Delete,65536,FileOptions.SequentialScan))
+            {
+                long length=input.Length;int headCount=(int)Math.Min(128,length);
+                string head=LocalCodexUsage.Fingerprint(input,0,headCount);
+                bool append=previous!=null&&previous.Created==info.CreationTimeUtc.Ticks&&length>previous.Length
+                    &&(previous.Length<128||head==previous.Head)
+                    &&LocalCodexUsage.Fingerprint(input,Math.Max(0,previous.Offset-64),(int)Math.Min(64,previous.Offset))==previous.Tail;
+                var unique=new Dictionary<long,QuotaSample>();
+                if(append)foreach(var sample in previous.Rows)unique[sample.Time/60*2+(sample.Minutes==300?0:1)]=sample;
+                long offset=append?previous.Offset:0,position=offset;input.Position=offset;
+                byte[] buffer=new byte[65536],line=new byte[4096];int used=0;bool oversized=false;int read;
+                while(position<length&&(read=input.Read(buffer,0,(int)Math.Min(buffer.Length,length-position)))>0)
+                {
+                    LastBytesRead+=read;cancel.ThrowIfCancellationRequested();
+                    int at=0;while(at<read)
+                    {
+                        int newline=Array.IndexOf(buffer,(byte)10,at,read-at),end=newline<0?read:newline;
+                        int take=Math.Min(line.Length-used,end-at);if(take>0){Buffer.BlockCopy(buffer,at,line,used,take);used+=take;}oversized|=take<end-at;
+                        if(newline>=0)
+                        {
+                            if(!oversized&&used>0)
+                            {
+                                var sample=QuotaSample.Parse(Encoding.UTF8.GetString(line,0,used).TrimStart('\uFEFF').TrimEnd('\r'),json);
+                                if(sample!=null&&sample.Valid&&sample.Supported){sample.Bucket="codex";unique[sample.Time/60*2+(sample.Minutes==300?0:1)]=sample;}
+                            }
+                            used=0;oversized=false;offset=position+newline+1;
+                        }
+                        at=newline<0?read:newline+1;
+                    }
+                    position+=read;
+                }
+                cancel.ThrowIfCancellationRequested();
+                // Commit only complete lines, so an interrupted append is retried next time.
+                return new CachedDay{Length=length,Stamp=info.LastWriteTimeUtc.Ticks,Created=info.CreationTimeUtc.Ticks,Offset=offset,Head=head,
+                    Tail=LocalCodexUsage.Fingerprint(input,Math.Max(0,offset-64),(int)Math.Min(64,offset)),Rows=unique.Values.OrderBy(s=>s.Time).ThenBy(s=>s.Minutes).ToArray()};
+            }
         }
     }
 }

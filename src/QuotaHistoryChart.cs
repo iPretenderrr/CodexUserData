@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Automation;
@@ -16,8 +17,18 @@ namespace CodexUserData
         internal string Key;
         internal QuotaSample[] Points;
         internal static QuotaHistorySeries[] Prepare(QuotaSample[] samples)
+        {return Prepare(samples,CancellationToken.None);}
+        internal static QuotaHistorySeries[] Prepare(QuotaSample[] samples,CancellationToken cancel)
         {
-            return samples.Where(s=>s.Supported).GroupBy(s=>s.Key).OrderBy(g=>g.First().Minutes).Select(g=>new QuotaHistorySeries{Key=g.Key,Points=g.OrderBy(s=>s.Time).ToArray()}).ToArray();
+            var hours=new List<QuotaSample>();var days=new List<QuotaSample>();long previous=0;bool sorted=true;
+            for(int i=0;i<samples.Length;i++)
+            {
+                if((i&1023)==0)cancel.ThrowIfCancellationRequested();var s=samples[i];if(!s.Supported)continue;
+                sorted&=s.Time>=previous;previous=s.Time;(s.Minutes==300?hours:days).Add(s);
+            }
+            var result=new List<QuotaHistorySeries>();
+            foreach(var group in new[]{hours,days})if(group.Count>0)result.Add(new QuotaHistorySeries{Key=group[0].Key,Points=sorted?group.ToArray():group.OrderBy(s=>s.Time).ToArray()});
+            return result.ToArray();
         }
     }
     // Cached drawing plus logarithmic hit testing: pointer movement never rebuilds curves.
@@ -31,13 +42,22 @@ namespace CodexUserData
         private int revision=-1;
         private long from,to,hover=-1,selected=-1;
         private Rect plot;
+        private sealed class CurvePath {internal string Key;internal long Minutes;internal StreamGeometry Geometry;internal Point Last;}
+        private CurvePath[] curves=new CurvePath[0];
+        private QuotaHistorySeries[] requestedSeries=new QuotaHistorySeries[0];
+        private long requestedFrom,requestedTo;
+        private Size geometrySize;
+        private int frameVersion;
+        private CancellationTokenSource geometryCancellation;
         internal int GeometryBuilds {get;private set;}
         internal event Action<QuotaSample[]> Pick;
         internal QuotaHistoryChart()
         {
             Height=340;Focusable=true;ClipToBounds=true;AutomationProperties.SetAutomationId(this,"QuotaHistoryChart");
             MouseMove+=delegate(object sender,MouseEventArgs e){long time=Hit(e.GetPosition(this));if(time==hover)return;hover=time;tip.IsOpen=false;if(time>=0){var points=At(time);if(points.Length>0){tip.Background=Theme.Surface;tip.Foreground=Theme.Ink;tip.BorderBrush=Theme.Line;tip.Content=Describe(points,false);tip.PlacementTarget=this;tip.IsOpen=true;}}InvalidateVisual();};
-            MouseLeave+=delegate{ClearHover();};IsVisibleChanged+=delegate{if(!IsVisible)ClearHover();};Unloaded+=delegate{ClearHover();};
+            MouseLeave+=delegate{ClearHover();};IsVisibleChanged+=delegate{if(!IsVisible)ClearHover();};
+            Unloaded+=delegate{ClearHover();frameVersion++;if(geometryCancellation!=null)geometryCancellation.Cancel();};
+            Loaded+=async delegate{await PrepareDrawing();};SizeChanged+=async delegate{await PrepareDrawing();};
             MouseLeftButtonDown+=delegate(object sender,MouseButtonEventArgs e){Focus();long time=Hit(e.GetPosition(this));Select(time==selected?-1:time);e.Handled=true;};
             KeyDown+=delegate(object sender,KeyEventArgs e){if(e.Key==Key.Escape){Select(-1);e.Handled=true;}};
         }
@@ -46,10 +66,71 @@ namespace CodexUserData
         private void Select(long time){selected=time;InvalidateVisual();if(Pick!=null)Pick(time<0?new QuotaSample[0]:At(time));}
         internal void SetData(QuotaSample[] samples,long start,long end)
         {SetSeries(QuotaHistorySeries.Prepare(samples),start,end);}
-        internal void SetSeries(QuotaHistorySeries[] prepared,long start,long end)
+        internal async void SetSeries(QuotaHistorySeries[] prepared,long start,long end)
+        {await SetSeriesAsync(prepared,start,end);}
+        internal Task SetSeriesAsync(QuotaHistorySeries[] prepared,long start,long end)
         {
-            from=start;to=Math.Max(start+1,end);series=prepared;
-            drawing=null;ClearHover();if(selected>=0&&Pick!=null)Pick(At(selected));InvalidateVisual();
+            requestedFrom=start;requestedTo=Math.Max(start+1,end);requestedSeries=prepared;
+            if(prepared.Length==0)
+            {
+                CancelDrawing();series=prepared;from=requestedFrom;to=requestedTo;curves=new CurvePath[0];geometrySize=RenderSize;
+                plot=new Rect(38,16,Math.Max(1,ActualWidth-52),Math.Max(1,ActualHeight-47));drawing=null;InvalidateVisual();return Task.FromResult(true);
+            }
+            return PrepareDrawing();
+        }
+        internal void CancelDrawing(){frameVersion++;if(geometryCancellation!=null)geometryCancellation.Cancel();}
+        private async Task PrepareDrawing()
+        {
+            Size size=RenderSize;if(size.Width<100||size.Height<80)return;
+            if(Object.ReferenceEquals(series,requestedSeries)&&from==requestedFrom&&to==requestedTo&&geometrySize==size)return;
+            int version=++frameVersion;if(geometryCancellation!=null)geometryCancellation.Cancel();
+            var cancellation=new CancellationTokenSource();geometryCancellation=cancellation;
+            var data=requestedSeries;long start=requestedFrom,end=requestedTo;
+            var area=new Rect(38,16,Math.Max(1,size.Width-52),size.Height-47);
+            ClearHover();
+            CurvePath[] paths=null;
+            try
+            {
+                paths=await Task.Run(()=>BuildPaths(data,start,end,area,cancellation.Token),cancellation.Token);
+            }
+            catch(OperationCanceledException){}
+            finally
+            {
+                // Offscreen previews can start before a SynchronizationContext exists.
+                // Publish and dispose the UI-owned cancellation handle on its dispatcher.
+                if(Dispatcher.HasShutdownStarted)cancellation.Dispose();
+                else try
+                {
+                    Dispatcher.Invoke(new Action(()=>
+                    {
+                        try
+                        {
+                            if(paths==null||version!=frameVersion)return;
+                            series=data;from=start;to=end;plot=area;geometrySize=size;curves=paths;
+                            drawing=null;GeometryBuilds++;if(selected>=0&&Pick!=null)Pick(At(selected));InvalidateVisual();
+                        }
+                        finally{if(Object.ReferenceEquals(geometryCancellation,cancellation))geometryCancellation=null;cancellation.Dispose();}
+                    }));
+                }
+                catch(OperationCanceledException){cancellation.Dispose();}
+            }
+        }
+        private static CurvePath[] BuildPaths(QuotaHistorySeries[] data,long start,long end,Rect area,CancellationToken cancel)
+        {
+            var paths=new List<CurvePath>();
+            foreach(var s in data)
+            {
+                cancel.ThrowIfCancellationRequested();var points=Reduce(s.Points,start,end,(int)area.Width,cancel);
+                var gaps=new bool[points.Length];var jumps=new bool[points.Length];var positions=new Point[points.Length];
+                for(int i=0;i<points.Length;i++)
+                {
+                    if((i&1023)==0)cancel.ThrowIfCancellationRequested();
+                    positions[i]=new Point(area.Left+(points[i].Time-start)*area.Width/(end-start),area.Bottom-points[i].Remaining/100*area.Height);
+                    if(i>0){int raw=Nearest(s.Points,points[i].Time);gaps[i]=raw>0&&s.Points[raw].Time-s.Points[raw-1].Time>90;jumps[i]=points[i].Reset!=points[i-1].Reset;}
+                }
+                if(points.Length>0)paths.Add(new CurvePath{Key=s.Key,Minutes=points[0].Minutes,Geometry=SmoothCurve(positions,gaps,jumps),Last=positions[positions.Length-1]});
+            }
+            cancel.ThrowIfCancellationRequested();return paths.ToArray();
         }
         internal static Brush Color(long minutes)
         {
@@ -84,11 +165,14 @@ namespace CodexUserData
         // Keep first/last and extrema per pixel column. Gap boundaries and quota resets
         // are retained explicitly, so decimation cannot draw a false continuous balance.
         internal static QuotaSample[] Reduce(QuotaSample[] points,long start,long end,int width)
+        {return Reduce(points,start,end,width,CancellationToken.None);}
+        private static QuotaSample[] Reduce(QuotaSample[] points,long start,long end,int width,CancellationToken cancel)
         {
             if(points.Length<=width*4)return points;
             var keep=new SortedSet<int>();int first=0,min=0,max=0;long column=-1;
             for(int i=0;i<points.Length;i++)
             {
+                if((i&1023)==0)cancel.ThrowIfCancellationRequested();
                 long x=(points[i].Time-start)*Math.Max(1,width)/Math.Max(1,end-start);
                 if(x!=column){if(i>0){keep.Add(first);keep.Add(i-1);keep.Add(min);keep.Add(max);}first=min=max=i;column=x;}
                 if(points[i].Remaining<points[min].Remaining)min=i;if(points[i].Remaining>points[max].Remaining)max=i;
@@ -125,23 +209,16 @@ namespace CodexUserData
             dc.DrawRectangle(Brushes.Transparent,null,new Rect(RenderSize));
             if(drawing==null||drawingSize!=RenderSize||revision!=Theme.Revision)
             {
-                revision=Theme.Revision;drawingSize=RenderSize;GeometryBuilds++;plot=new Rect(38,16,Math.Max(1,ActualWidth-52),ActualHeight-47);
+                revision=Theme.Revision;drawingSize=RenderSize;
+                if(to<=from||geometrySize.Width<100)return;
                 drawing=new DrawingGroup();using(var c=drawing.Open())
                 {
                     for(int n=0;n<=4;n++){double y=plot.Bottom-n*plot.Height/4;c.DrawLine(new Pen(Theme.Line,.6),new Point(plot.Left,y),new Point(plot.Right,y));c.DrawText(Text((n*25)+"%",Theme.Muted),new Point(0,y-7));}
                     int ticks=ActualWidth<440?2:4;for(int n=0;n<=ticks;n++){long time=from+(to-from)*n/ticks;var label=Text(DateTimeOffset.FromUnixTimeSeconds(time).ToLocalTime().ToString(to-from<=90000?"HH:mm":"MM-dd"),Theme.Muted);c.DrawText(label,new Point(Math.Max(plot.Left,Math.Min(plot.Right-label.Width,plot.Left+plot.Width*n/ticks-label.Width/2)),plot.Bottom+10));}
-                    foreach(var s in series)
+                    foreach(var path in curves)
                     {
-                        Brush color=Color(s.Points[0].Minutes);if(hidden.Contains(s.Key))continue;var points=Reduce(s.Points,from,to,(int)plot.Width);
-                        var gaps=new bool[points.Length];var jumps=new bool[points.Length];
-                        for(int i=1;i<points.Length;i++)
-                        {
-                            // Decimation retains raw samples on both sides of gaps / resets.
-                            int raw=Nearest(s.Points,points[i].Time);gaps[i]=raw>0&&s.Points[raw].Time-s.Points[raw-1].Time>90;
-                            jumps[i]=points[i].Reset!=points[i-1].Reset;
-                        }
-                        var geometry=SmoothCurve(points.Select(Position).ToArray(),gaps,jumps);var pen=new Pen(color,2){LineJoin=PenLineJoin.Round};c.DrawGeometry(null,pen,geometry);
-                        if(points.Length>0)c.DrawEllipse(color,null,Position(points[points.Length-1]),2.5,2.5);
+                        Brush color=Color(path.Minutes);if(hidden.Contains(path.Key))continue;
+                        var pen=new Pen(color,2){LineJoin=PenLineJoin.Round};c.DrawGeometry(null,pen,path.Geometry);c.DrawEllipse(color,null,path.Last,2.5,2.5);
                     }
                     if(series.Length==0)c.DrawText(Text("暂无记录 · 在线额度查询成功后自动记录",Theme.Muted),new Point(plot.Left+8,plot.Top+20));
                 }
@@ -164,6 +241,7 @@ namespace CodexUserData
         private int hours=24,generation;
         private double viewportHeight;
         private bool loading,pending;
+        private CancellationTokenSource readCancellation;
         private string legendKey="",shownScope;
         internal QuotaHistoryPanel(QuotaHistoryStore history,Func<string> getScope,Func<string> getError=null)
         {
@@ -173,27 +251,31 @@ namespace CodexUserData
             var clear=Theme.Button("清除选择","清除额度时间选择",84);clear.HorizontalAlignment=HorizontalAlignment.Right;clear.VerticalAlignment=VerticalAlignment.Top;
             DockPanel.SetDock(clear,Dock.Right);clear.Click+=delegate{chart.Clear();};toolbar.Children.Add(clear);AutomationProperties.SetAutomationId(clear,"QuotaClearSelection");
             var buttons=new WrapPanel{Margin=new Thickness(0,0,8,0)};toolbar.Children.Add(buttons);
-            foreach(int count in PeriodHours){int n=count;var b=Theme.Button(n<24?n+"h":n/24+"d","查看最近 "+(n<24?n+" 小时":n/24+" 天"),42);b.Margin=new Thickness(0,0,3,6);b.FontSize=11;b.Click+=delegate{if(hours==n)return;hours=n;chart.Clear();generation++;StyleRanges();Refresh();};ranges[n]=b;buttons.Children.Add(b);}
+            foreach(int count in PeriodHours){int n=count;var b=Theme.Button(n<24?n+"h":n/24+"d","查看最近 "+(n<24?n+" 小时":n/24+" 天"),42);b.Margin=new Thickness(0,0,3,6);b.FontSize=11;b.Click+=delegate{if(hours==n)return;hours=n;chart.Clear();CancelRead();StyleRanges();Refresh();};ranges[n]=b;buttons.Children.Add(b);}
             legend.Margin=new Thickness(0,4,0,8);Children.Add(legend);Children.Add(chart);detail.TextWrapping=TextWrapping.Wrap;detail.Margin=new Thickness(0,12,0,0);detail.Visibility=Visibility.Collapsed;Children.Add(detail);
             chart.Pick+=rows=>{detail.Text=QuotaHistoryChart.Describe(rows,true);detail.Visibility=rows.Length==0?Visibility.Collapsed:Visibility.Visible;};
-            IsVisibleChanged+=delegate{if(IsVisible)Refresh();else{generation++;chart.ClearHover();}};Unloaded+=delegate{generation++;};
+            IsVisibleChanged+=delegate{if(IsVisible)Refresh();else{CancelRead();chart.ClearHover();}};Unloaded+=delegate{CancelRead();};
             PreviewMouseWheel+=delegate{chart.ClearHover();};SizeChanged+=delegate{UpdateHeight();};StyleRanges();
         }
         internal static long RangeStart(long end,int hours){return end-hours*3600L;}
         internal void SetViewportHeight(double height){viewportHeight=height;UpdateHeight();}
         private void UpdateHeight(){chart.Height=Math.Max(ActualWidth<420?280:ActualWidth<760?330:380,viewportHeight-160);}
         private void StyleRanges(){foreach(var pair in ranges){pair.Value.Background=pair.Key==hours?Theme.Hover:Brushes.Transparent;pair.Value.Foreground=pair.Key==hours?Theme.Accent:Theme.Muted;}}
+        private void CancelRead(){generation++;if(readCancellation!=null)readCancellation.Cancel();chart.CancelDrawing();}
         internal async void Refresh()
         {
-            if(!IsVisible)return;if(loading){pending=true;return;}loading=true;int version=generation;string current=scope();
+            if(!IsVisible)return;if(loading){pending=true;if(shownScope!=scope())CancelRead();return;}loading=true;int version=generation;string current=scope();
+            var cancellation=new CancellationTokenSource();readCancellation=cancellation;
             long to=LocalCodexUsage.Unix(DateTime.UtcNow),from=RangeStart(to,hours);
             try
             {
-                if(shownScope!=current){chart.Clear();chart.SetSeries(new QuotaHistorySeries[0],from,to);legend.Children.Clear();legendKey="";shownScope=current;}
-                var data=await store.ReadAsync(current,from,to);
-                var prepared=await Task.Run(()=>QuotaHistorySeries.Prepare(data));
+                if(shownScope!=current){chart.Clear();chart.SetSeries(new QuotaHistorySeries[0],from,to);legend.Children.Clear();legendKey="";shownScope=current;note.Text="每分钟记录 · 保留 180 天";}
+                var data=await store.ReadAsync(current,from,to,cancellation.Token);
+                cancellation.Token.ThrowIfCancellationRequested();
+                var prepared=await Task.Run(()=>QuotaHistorySeries.Prepare(data,cancellation.Token),cancellation.Token);
                 if(!IsVisible||version!=generation||current!=scope()){pending=IsVisible;return;}
-                chart.SetSeries(prepared,from,to);
+                await chart.SetSeriesAsync(prepared,from,to);
+                if(!IsVisible||version!=generation||current!=scope()){pending=IsVisible;return;}
                 string key=Theme.Revision+"/"+String.Join("|",prepared.Select(g=>g.Key));
                 if(key!=legendKey)
                 {
@@ -202,9 +284,10 @@ namespace CodexUserData
                 }
                 note.Text=(String.IsNullOrEmpty(error())?"":"历史记录写入失败，请检查磁盘空间与目录权限。\n")+"每分钟记录 · 保留 180 天 · 点击图例显隐曲线"+(data.Length==0?"":"\n最近记录 "+DateTimeOffset.FromUnixTimeSeconds(data[data.Length-1].Time).ToLocalTime().ToString("MM-dd HH:mm"));
             }
-            catch(System.IO.IOException){note.Text="额度记录暂时无法读取，请稍后重新打开。";}
-            catch(UnauthorizedAccessException){note.Text="额度记录目录无法访问，请检查目录权限。";}
-            finally{loading=false;if(pending){pending=false;Refresh();}}
+            catch(OperationCanceledException){}
+            catch(System.IO.IOException){if(version==generation)note.Text="额度记录暂时无法读取，请稍后重新打开。";}
+            catch(UnauthorizedAccessException){if(version==generation)note.Text="额度记录目录无法访问，请检查目录权限。";}
+            finally{readCancellation=null;cancellation.Dispose();loading=false;if(pending){pending=false;Refresh();}}
         }
     }
 }

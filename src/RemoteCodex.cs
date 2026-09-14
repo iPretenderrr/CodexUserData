@@ -115,6 +115,27 @@ namespace CodexUserData
             }
         }
     }
+    internal sealed class UsageUnionCache
+    {
+        private List<LogCursor> local,remote;
+        private readonly Dictionary<string,Dictionary<string,LogCursor>> records=new Dictionary<string,Dictionary<string,LogCursor>>();
+        private readonly Dictionary<string,UsageSnapshotMemo> snapshots=new Dictionary<string,UsageSnapshotMemo>();
+        private readonly Dictionary<string,int> conflicts=new Dictionary<string,int>();
+        internal void Clear(){local=remote=null;records.Clear();snapshots.Clear();conflicts.Clear();}
+        internal UsageSnapshot Get(List<LogCursor> native,List<LogCursor> server,string view,string range,DateTime now,string label)
+        {
+            if(!Object.ReferenceEquals(local,native)||!Object.ReferenceEquals(remote,server))
+            {Clear();local=native;remote=server;}
+            if(!records.ContainsKey(view))
+            {
+                int count;records[view]=UsageUnion.Merge(view=="local"?native:view=="remote"?server:native.Concat(server),out count);
+                snapshots[view]=new UsageSnapshotMemo();conflicts[view]=count;
+            }
+            var result=snapshots[view].Get(records[view],0,range,now);result.SourceName=label;
+            if(conflicts[view]>0){result.CoverageWarnings+=conflicts[view];result.Warning+="\n部分跨端会话身份冲突，保留较完整记录，其余待核对。";}
+            return result;
+        }
+    }
     internal static class UsageUnion
     {
         private static string EventKey(LocalUsageEvent e){return e.Time.ToString(CultureInfo.InvariantCulture)+"|"+e.Model+"|"+e.Effort+"|"+e.Signature;}

@@ -37,6 +37,7 @@ namespace CodexUserData
             {"gpt-5.4",new[]{2.5m,.25m,-1m,15m}}, {"gpt-5.3-codex",new[]{1.75m,.175m,-1m,14m}}
         };
         private static volatile Dictionary<string,decimal[]> overrides=new Dictionary<string,decimal[]>(StringComparer.OrdinalIgnoreCase);
+        internal static object Version {get{return overrides;}}
         internal static Dictionary<string,decimal[]> Clean(Dictionary<string,decimal[]> values)
         {
             var result=new Dictionary<string,decimal[]>(StringComparer.OrdinalIgnoreCase);
@@ -44,7 +45,12 @@ namespace CodexUserData
             return result;
         }
         // Publish a copied, immutable lookup; one worker applies it before a complete aggregation.
-        internal static void Configure(Dictionary<string,decimal[]> values){overrides=Clean(values);}
+        internal static void Configure(Dictionary<string,decimal[]> values)
+        {
+            var clean=Clean(values);var old=overrides;
+            if(old.Count==clean.Count&&clean.All(p=>old.ContainsKey(p.Key)&&old[p.Key].SequenceEqual(p.Value)))return;
+            overrides=clean;
+        }
         internal static IEnumerable<string> DefaultModels {get{return rates.Keys;}}
         internal static decimal[] Default(string model){decimal[] value;return model!=null&&rates.TryGetValue(model,out value)?(decimal[])value.Clone():new[]{-1m,-1m,-1m,-1m};}
         internal static decimal Estimate(string model,long input,long output,long cached,long write,out long unknown)
@@ -79,6 +85,10 @@ namespace CodexUserData
     }
     internal sealed class UsageSnapshot
     {
+        internal long NextChangeAt=Int64.MaxValue;
+        internal long[] PeriodSessions,PeriodInferred;
+        internal string CommonWarning;
+        internal UsageSnapshot Copy(){return (UsageSnapshot)MemberwiseClone();}
         internal bool DataUnavailable;
         public string[] KnownModels {get;set;}
         public List<ModelUsage> Models {get;set;}
