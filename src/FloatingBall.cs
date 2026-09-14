@@ -181,13 +181,15 @@ namespace CodexUserData
         {
             if(disposing||dragging||!IsIsland||IslandExpanded==value)return;CancelIslandClick();CancelDockMotion();preferences().BallExpanded=value;Build();QueueIslandSave();
         }
-        internal void SetCompletionPending(bool value){if(disposing)return;bool changed=completionPending!=value;completionPending=value;if(island!=null)island.SetCompletionPending(value);if(custom!=null)custom.SetCompletionPending(value);UpdateCompletionFeedback();if(changed&&island!=null)Build();}
+        internal void SetCompletionPending(bool value){if(disposing)return;bool changed=completionPending!=value;completionPending=value;if(island!=null)island.SetCompletionPending(value);UpdateCompletionFeedback();if(changed&&island!=null)Build();}
         private void UpdateCompletionFeedback()
         {
-            // HTML content also receives host-owned breathing, so existing third-party shapes
-            // need no script changes. Animate the inner host without touching transition clocks.
-            bool htmlRunning=IsCustom&&activity!=null&&activity.ActiveTasks>0&&activity.Until>LocalCodexUsage.Unix(DateTime.Now);
-            CompletionFeedback.Set(this,!IsIsland&&(completionPending||htmlRunning),preferences().EffectStrength);
+            // A new task always wins over an unacknowledged completion. Native forms display
+            // continuous flow while running and switch to the host's double flash only when idle.
+            bool running=activity!=null&&activity.ActiveTasks>0&&activity.Until>LocalCodexUsage.Unix(DateTime.Now);
+            bool pending=completionPending&&!running;
+            CompletionFeedback.SetFloating(this,!IsIsland&&pending,IsCustom&&running,preferences().EffectStrength);
+            if(custom!=null)custom.SetCompletionPending(pending);
         }
         internal void SetOrb(){if(disposing||dragging)return;CancelIslandClick();CancelIslandResize(true);CancelDockMotion();WindowInteraction.ChangeShape(this,delegate{preferences().BallStyle="orb";preferences().BallExpanded=false;dock="";Build();Clamp();SavePosition();});}
         internal void SetCustom(){if(disposing||dragging)return;CancelIslandClick();CancelIslandResize(true);CancelDockMotion();WindowInteraction.ChangeShape(this,delegate{preferences().BallStyle="html";preferences().BallExpanded=false;dock="";builtShape=null;Build();Clamp();SavePosition();});}
@@ -313,7 +315,7 @@ namespace CodexUserData
                 tokens.Children.Add(new Viewbox{Child=tokenText,Stretch=Stretch.Uniform,StretchDirection=StretchDirection.DownOnly,HorizontalAlignment=HorizontalAlignment.Left,Height=24});AutomationProperties.SetAutomationId(tokenText,"BallTodayTokens");
                 if(large){quotaRows=new StackPanel{VerticalAlignment=VerticalAlignment.Center};row.Children.Add(quotaRows);}
             }
-            UpdateValues();UpdateActivityMotion();if(animateIsland)AnimateIslandResize(islandFromWidth,islandFromHeight,islandTargetWidth,islandTargetHeight);UpdateCompletionFeedback();if(custom!=null)custom.SetCompletionPending(completionPending);
+            UpdateValues();UpdateActivityMotion();if(animateIsland)AnimateIslandResize(islandFromWidth,islandFromHeight,islandTargetWidth,islandTargetHeight);UpdateCompletionFeedback();
         }
         private void AnimateIslandResize(double fromWidth,double fromHeight,double toWidth,double toHeight)
         {

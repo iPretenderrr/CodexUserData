@@ -291,8 +291,12 @@ internal static class ReleaseProbe
    {
     ball.ShowActivated=false;ball.Show();Call("FloatingBall",ball,"ApplyActivity",activity);Pump(400);
     Check(ball.IsVisible&&ball.Width>0&&ball.Height>0,"protected running form renders at 3x: "+form);
-    Call("FloatingBall",ball,"ApplyActivity",New("ActivityReport"));Call("FloatingBall",ball,"SetCompletionPending",true);Pump(80);ball.Hide();
     var target=((Decorator)ball.Content).Child;
+    Call("FloatingBall",ball,"SetCompletionPending",true);Pump(80);
+    if(!(bool)Call("FloatingBall",ball,"get_IsIsland"))Check(!DependencyPropertyHelper.GetValueSource(target,UIElement.OpacityProperty).IsAnimated,"protected running state suppresses completion flash: "+form);
+    Call("FloatingBall",ball,"ApplyActivity",New("ActivityReport"));Pump(80);
+    if(!(bool)Call("FloatingBall",ball,"get_IsIsland"))Check(DependencyPropertyHelper.GetValueSource(target,UIElement.OpacityProperty).IsAnimated,"protected idle pending state starts completion flash: "+form);
+    ball.Hide();
     Check(!DependencyPropertyHelper.GetValueSource(target,UIElement.OpacityProperty).IsAnimated,"protected hidden completion has no opacity clock: "+form);
     ball.Show();Call("FloatingBall",ball,"SetCompletionPending",false);
     Check(!DependencyPropertyHelper.GetValueSource(target,UIElement.OpacityProperty).IsAnimated,"protected completion acknowledgement restores opacity: "+form);

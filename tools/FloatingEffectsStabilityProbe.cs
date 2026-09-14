@@ -70,11 +70,21 @@ namespace CodexUserData
                     double width=ball.Width,height=ball.Height;
                     Render((FrameworkElement)ball.Content,Path.Combine(output,form+"-running-3x.png"));
                     p.BallEffectIntensity=.5;ball.Apply(data,data.Quotas[0],"Fixture","");await Task.Delay(60);
+                    var runningPixels=Render((FrameworkElement)ball.Content,Path.Combine(output,form+"-running.png"));
                     StabilityProbe.Check(ball.Width==width&&ball.Height==height,"strength preserves window geometry: "+form);
                     if(form=="small"||form=="large")StabilityProbe.Check(StabilityProbe.Field<double>(StabilityProbe.Field<CapsuleActivityChrome>(ball,"capsuleChrome"),"strength")==.5,"saved intensity refreshes cached capsule paint without new usage data: "+form);
-                    ball.ApplyActivity(new ActivityReport());ball.SetCompletionPending(true);await Task.Delay(100);
                     var target=((Decorator)ball.Content).Child;
-                    if(!ball.IsIsland)StabilityProbe.Check(Animated(target),"pending completion breathes: "+form);
+                    ball.SetCompletionPending(true);await Task.Delay(60);
+                    if(!ball.IsIsland)StabilityProbe.Check(!Animated(target),"running motion wins over an older pending completion: "+form);
+                    ball.ApplyActivity(new ActivityReport());await Task.Delay(100);
+                    var pendingPixels=Render((FrameworkElement)ball.Content,Path.Combine(output,form+"-pending.png"));
+                    StabilityProbe.Check(!pendingPixels.SequenceEqual(runningPixels),"running and pending render as visibly different states: "+form);
+                    if(!ball.IsIsland)StabilityProbe.Check(Animated(target),"idle pending completion uses the distinct double flash: "+form);
+                    else
+                    {
+                        var island=StabilityProbe.Field<DynamicIsland>(ball,"island");
+                        StabilityProbe.Check(!DependencyPropertyHelper.GetValueSource(island,DynamicIsland.PhaseProperty).IsAnimated&&DependencyPropertyHelper.GetValueSource(island,DynamicIsland.BreathProperty).IsAnimated,"island completion stops flowing and uses a pulse clock: "+form);
+                    }
                     ball.Hide();await Task.Delay(50);
                     StabilityProbe.Check(!Animated(target)&&StabilityProbe.Field<int>(ball,"activityMotionFps")==0,"hidden form stops host animation: "+form);
                     ball.Show();ball.SetCompletionPending(false);
@@ -91,7 +101,7 @@ namespace CodexUserData
                 feedbackBall.Show();await Task.Delay(300);var target=((Decorator)feedbackBall.Content).Child;double previous=1;
                 foreach(double strength in new[]{.5,1,3})
                 {
-                    feedbackPrefs.BallEffectIntensity=strength;feedbackBall.SetCompletionPending(true);await Task.Delay(1080);
+                    feedbackPrefs.BallEffectIntensity=strength;feedbackBall.SetCompletionPending(true);await Task.Delay(115);
                     StabilityProbe.Check(target.Opacity<previous-.1,"completion breathing is stronger at "+strength+"x");previous=target.Opacity;
                     feedbackBall.SetCompletionPending(false);
                 }

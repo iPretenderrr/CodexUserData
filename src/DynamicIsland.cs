@@ -105,9 +105,21 @@ namespace CodexUserData
             double speed=preferences==null?1:Theme.Bound(preferences.AnimationSpeed,.5,2,1);
             if(!need){StopClocks();currentFps=fps;return;}if(animated&&currentFps==fps&&clockCompletion==completion&&clockSpeed==speed)return;
             StopClocks();animated=true;currentFps=fps;clockCompletion=completion;clockSpeed=speed;
-            var phase=new DoubleAnimation(0,1,TimeSpan.FromSeconds(3.2/speed)){RepeatBehavior=RepeatBehavior.Forever};
-            var breath=new DoubleAnimation(0,1,TimeSpan.FromSeconds((completion?1.35:1.4)/speed)){AutoReverse=true,RepeatBehavior=RepeatBehavior.Forever,EasingFunction=new SineEase{EasingMode=EasingMode.EaseInOut}};
-            Timeline.SetDesiredFrameRate(phase,fps);Timeline.SetDesiredFrameRate(breath,fps);BeginAnimation(PhaseProperty,phase);BeginAnimation(BreathProperty,breath);
+            AnimationTimeline breath;
+            if(completion)
+            {
+                // Completion holds the rim position and flashes twice; running keeps flowing.
+                SetValue(PhaseProperty,.78);var pulse=new DoubleAnimationUsingKeyFrames{Duration=TimeSpan.FromSeconds(1.5/speed),RepeatBehavior=RepeatBehavior.Forever};
+                pulse.KeyFrames.Add(new LinearDoubleKeyFrame(0,TimeSpan.Zero));pulse.KeyFrames.Add(new LinearDoubleKeyFrame(1,TimeSpan.FromSeconds(.11/speed)));
+                pulse.KeyFrames.Add(new LinearDoubleKeyFrame(0,TimeSpan.FromSeconds(.22/speed)));pulse.KeyFrames.Add(new LinearDoubleKeyFrame(.72,TimeSpan.FromSeconds(.35/speed)));
+                pulse.KeyFrames.Add(new LinearDoubleKeyFrame(0,TimeSpan.FromSeconds(.48/speed)));pulse.KeyFrames.Add(new LinearDoubleKeyFrame(0,TimeSpan.FromSeconds(1.5/speed)));breath=pulse;
+            }
+            else
+            {
+                var phase=new DoubleAnimation(0,1,TimeSpan.FromSeconds(3.2/speed)){RepeatBehavior=RepeatBehavior.Forever};Timeline.SetDesiredFrameRate(phase,fps);BeginAnimation(PhaseProperty,phase);
+                breath=new DoubleAnimation(0,1,TimeSpan.FromSeconds(1.4/speed)){AutoReverse=true,RepeatBehavior=RepeatBehavior.Forever,EasingFunction=new SineEase{EasingMode=EasingMode.EaseInOut}};
+            }
+            Timeline.SetDesiredFrameRate(breath,fps);BeginAnimation(BreathProperty,breath);
         }
         private void StopClocks(){if(!animated)return;animated=false;BeginAnimation(PhaseProperty,null);BeginAnimation(BreathProperty,null);InvalidateVisual();}
         protected override void OnRender(DrawingContext dc)
@@ -130,7 +142,7 @@ namespace CodexUserData
             // The body subtly swells at the moving light position; the text is painted later
             // in fixed coordinates and therefore remains perfectly stable.
             // Keep deformation inside the existing transparent margin at maximum strength.
-            double flex=(running||completion)?Math.Min(2.8,(.8+1.1*breath)*Math.Sqrt(strength)):0;double wave=Math.Sin(phase*Math.PI*2);
+            double flex=running?Math.Min(2.8,(.8+1.1*breath)*Math.Sqrt(strength)):0;double wave=Math.Sin(phase*Math.PI*2);
             using(var g=outline.Open()){double l=pad+1,r=RenderWidth-pad-1,t=pad+1-flex*Math.Max(0,wave),b=RenderHeight-pad-1-flex*Math.Max(0,-wave);g.BeginFigure(new Point(l+radius,t),true,true);g.LineTo(new Point(r-radius,t),true,false);g.ArcTo(new Point(r,t+radius),new Size(radius,radius),0,false,SweepDirection.Clockwise,true,false);g.LineTo(new Point(r,b-radius),true,false);g.ArcTo(new Point(r-radius,b),new Size(radius,radius),0,false,SweepDirection.Clockwise,true,false);g.LineTo(new Point(l+radius,b),true,false);g.ArcTo(new Point(l,b-radius),new Size(radius,radius),0,false,SweepDirection.Clockwise,true,false);g.LineTo(new Point(l,t+radius),true,false);g.ArcTo(new Point(l+radius,t),new Size(radius,radius),0,false,SweepDirection.Clockwise,true,false);}dc.DrawGeometry(IsMouseOver?bodyHover:body,linePen,outline);
             dc.PushClip(outline);dc.DrawRectangle(sheen,null,rect);
             if(running||completion)

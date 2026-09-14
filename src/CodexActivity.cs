@@ -320,14 +320,19 @@ namespace CodexUserData
     {
         private sealed class State
         {
-            internal bool Pending,Animating;
+            internal bool Pending,Running,Floating;
+            internal int Effect;
             internal double Strength=1;
             internal System.Windows.UIElement Target;
         }
         private static readonly System.Windows.DependencyProperty StateProperty=System.Windows.DependencyProperty.RegisterAttached("State",typeof(State),typeof(CompletionFeedback),new System.Windows.PropertyMetadata(null));
         internal static void Set(System.Windows.Window window,bool pending)
-        {Set(window,pending,1);}
+        {Configure(window,pending,false,1,false);}
         internal static void Set(System.Windows.Window window,bool pending,double strength)
+        {Configure(window,pending,false,strength,false);}
+        internal static void SetFloating(System.Windows.Window window,bool pending,bool running,double strength)
+        {Configure(window,pending,running,strength,true);}
+        private static void Configure(System.Windows.Window window,bool pending,bool running,double strength,bool floating)
         {
             var state=window.GetValue(StateProperty) as State;
             if(state==null)
@@ -337,8 +342,10 @@ namespace CodexUserData
                 window.Closed+=delegate{state.Pending=false;Render(window,state);};
             }
             strength=Theme.Bound(strength,.5,3,1);
-            if(state.Strength!=strength){if(state.Target!=null&&state.Animating)state.Target.BeginAnimation(System.Windows.UIElement.OpacityProperty,null);state.Strength=strength;state.Animating=false;}
-            state.Pending=pending;Render(window,state);
+            bool changed=state.Strength!=strength||state.Pending!=pending||state.Running!=running||state.Floating!=floating;
+            if(changed&&state.Target!=null&&state.Effect!=0)state.Target.BeginAnimation(System.Windows.UIElement.OpacityProperty,null);
+            if(changed)state.Effect=0;
+            state.Strength=strength;state.Pending=pending;state.Running=running;state.Floating=floating;Render(window,state);
         }
         private static void Render(System.Windows.Window window,State state)
         {
@@ -348,18 +355,37 @@ namespace CodexUserData
             var content=host==null?null:host.Child;
             if(!Object.ReferenceEquals(content,state.Target))
             {
-                if(state.Target!=null&&state.Animating)state.Target.BeginAnimation(System.Windows.UIElement.OpacityProperty,null);
-                state.Target=content;state.Animating=false;
+                if(state.Target!=null&&state.Effect!=0)state.Target.BeginAnimation(System.Windows.UIElement.OpacityProperty,null);
+                state.Target=content;state.Effect=0;
             }
-            bool animate=content!=null&&state.Pending&&window.IsVisible&&window.WindowState!=System.Windows.WindowState.Minimized&&Theme.MotionAllowed;
+            bool available=content!=null&&window.IsVisible&&window.WindowState!=System.Windows.WindowState.Minimized&&Theme.MotionAllowed;
+            int effect=!available?0:state.Floating?(state.Pending?2:state.Running?1:0):(state.Pending?1:0);
             // Polls frequently repeat the same pending value. Reevaluate motion policy, while
             // retaining the existing clock whenever nothing changed instead of restarting it.
-            if(animate==state.Animating)return;state.Animating=animate;
-            if(!animate){if(content!=null)content.BeginAnimation(System.Windows.UIElement.OpacityProperty,null);return;}
-            // A slow breath persists until acknowledged. Hidden/minimized windows consume no frames.
-            var animation=new System.Windows.Media.Animation.DoubleAnimation(1,Math.Pow(.5,state.Strength),TimeSpan.FromMilliseconds(1100)){
+            if(effect==state.Effect)return;
+            if(content!=null)content.BeginAnimation(System.Windows.UIElement.OpacityProperty,null);state.Effect=effect;
+            if(effect==0)return;
+            if(effect==2)
+            {
+                // Completion is a recognisable double flash followed by a quiet gap. Running
+                // shapes use continuous motion, so users can tell the two states at a glance.
+                double first=Math.Max(.12,Math.Pow(.3,state.Strength)),second=Math.Max(.2,Math.Pow(.55,state.Strength));
+                var pulse=new System.Windows.Media.Animation.DoubleAnimationUsingKeyFrames{
+                    Duration=TimeSpan.FromMilliseconds(1500),RepeatBehavior=System.Windows.Media.Animation.RepeatBehavior.Forever};
+                pulse.KeyFrames.Add(new System.Windows.Media.Animation.LinearDoubleKeyFrame(1,TimeSpan.Zero));
+                pulse.KeyFrames.Add(new System.Windows.Media.Animation.LinearDoubleKeyFrame(first,TimeSpan.FromMilliseconds(110)));
+                pulse.KeyFrames.Add(new System.Windows.Media.Animation.LinearDoubleKeyFrame(1,TimeSpan.FromMilliseconds(220)));
+                pulse.KeyFrames.Add(new System.Windows.Media.Animation.LinearDoubleKeyFrame(second,TimeSpan.FromMilliseconds(350)));
+                pulse.KeyFrames.Add(new System.Windows.Media.Animation.LinearDoubleKeyFrame(1,TimeSpan.FromMilliseconds(480)));
+                pulse.KeyFrames.Add(new System.Windows.Media.Animation.LinearDoubleKeyFrame(1,TimeSpan.FromMilliseconds(1500)));
+                System.Windows.Media.Animation.Timeline.SetDesiredFrameRate(pulse,Math.Min(30,Theme.MotionFrameRate));
+                content.BeginAnimation(System.Windows.UIElement.OpacityProperty,pulse);return;
+            }
+            // Running HTML and the main-window completion indicator retain a slow breath.
+            double floor=state.Floating?Math.Max(.48,Math.Pow(.82,state.Strength)):Math.Max(.12,Math.Pow(.5,state.Strength));
+            var animation=new System.Windows.Media.Animation.DoubleAnimation(1,floor,TimeSpan.FromMilliseconds(1100)){
                 AutoReverse=true,RepeatBehavior=System.Windows.Media.Animation.RepeatBehavior.Forever,FillBehavior=System.Windows.Media.Animation.FillBehavior.Stop};
-            System.Windows.Media.Animation.Timeline.SetDesiredFrameRate(animation,30);
+            System.Windows.Media.Animation.Timeline.SetDesiredFrameRate(animation,Math.Min(30,Theme.MotionFrameRate));
             content.BeginAnimation(System.Windows.UIElement.OpacityProperty,animation);
         }
     }

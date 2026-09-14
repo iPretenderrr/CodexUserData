@@ -46,7 +46,9 @@ namespace CodexUserData
             // WPF applies a new animation clock on the next dispatcher/render tick.
             await Task.Delay(60);var effectHost=((System.Windows.Controls.Decorator)ball.Content).Child;
             StabilityProbe.Check(DependencyPropertyHelper.GetValueSource(effectHost,UIElement.OpacityProperty).IsAnimated,"existing HTML receives host-owned running breathing (custom="+ball.IsCustom+", visible="+ball.IsVisible+", motion="+Theme.MotionAllowed+", host="+effectHost.GetType().Name+")");
-            ball.ApplyActivity(new ActivityReport());ball.SetCompletionPending(true);
+            ball.SetCompletionPending(true);string runningData=(string)StabilityProbe.Call(custom,"SerializeData");
+            StabilityProbe.Check(runningData.Contains("\"completionPending\":false"),"HTML running state suppresses an older pending completion");
+            ball.ApplyActivity(new ActivityReport());
             string effectData=(string)StabilityProbe.Call(custom,"SerializeData");
             StabilityProbe.Check(effectData.Contains("\"effectIntensity\":3")&&effectData.Contains("\"completionPending\":true"),"HTML data contract includes persisted strength and pending acknowledgement");
             ball.SetCompletionPending(false);
