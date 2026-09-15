@@ -344,7 +344,12 @@ WHERE r.date >= ?1 AND r.date <= ?2
             long startSeconds=ToUnixSeconds(localFrom),endSeconds=ToUnixSeconds(localTo);
             int dayCount=checked((localTo.Date-localFrom.Date).Days+1);
             var result=new UsageSnapshot{Daily=DailyUsage.Empty(localTo,dayCount),Hourly=DailyUsage.Hours(localTo),HourlyThrough=24,LatestRecord="暂无记录"};
-            DateTime firstFull=localFrom.Date.AddDays(1),lastFull=localTo.Date.AddDays(-1);
+            // A rollup can answer a whole calendar day, but it cannot preserve a
+            // partial day's second-level boundary. Include a boundary day only when
+            // the selected interval covers it from midnight through 23:59:59.
+            bool startsAtMidnight=localFrom.TimeOfDay==TimeSpan.Zero;
+            bool endsAtDayEnd=localTo.TimeOfDay>=new TimeSpan(23,59,59);
+            DateTime firstFull=localFrom.Date.AddDays(startsAtMidnight?0:1),lastFull=localTo.Date.AddDays(endsAtDayEnd?0:-1);
             string firstRollup=firstFull<=lastFull?firstFull.ToString("yyyy-MM-dd",CultureInfo.InvariantCulture):"9999-12-31";
             string lastRollup=firstFull<=lastFull?lastFull.ToString("yyyy-MM-dd",CultureInfo.InvariantCulture):"0001-01-01";
             double detailCost=0,archivedCost=0;long? latestDetail=null;string latestArchive=null;
