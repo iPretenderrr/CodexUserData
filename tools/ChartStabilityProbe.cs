@@ -1,11 +1,14 @@
 using System;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
 
 namespace CodexUserData
 {
@@ -42,6 +45,22 @@ namespace CodexUserData
             comparison=ChartComparison.Calculate(DailyUsage.Empty(today.AddDays(-1),14),7,today,false,false);
             StabilityProbe.Check(comparison.Available&&!comparison.ChangePercent.HasValue&&comparison.Message.Contains("均为 0"),"two observed zero periods remain zero rather than an undefined percentage");
             StabilityProbe.Check(ChartValue.Money(.0000001m)!="$0.00"&&ChartValue.Axis(.0000001,true)!=ChartValue.Axis(.0000002,true)&&ChartValue.Axis(2000,false)==TokenText.Axis(2000),"very small positive estimates remain readable and token axes keep token units");
+
+            var picker=new DateTimeRangePicker(DateTime.Now.AddDays(-2).Date.AddHours(9).AddMinutes(15).AddSeconds(20),DateTime.Now.AddMinutes(-1));
+            var pickerWindow=new StyledWindow{Width=760,Height=430,ShowActivated=false,ShowInTaskbar=false};pickerWindow.SetBody(picker,"选择日期和时间","CUSTOM RANGE",false);
+            try
+            {
+                pickerWindow.Show();await Task.Delay(35);pickerWindow.UpdateLayout();DateTime selectedFrom,selectedTo;
+                var calendar=StabilityProbe.Field<RangeMonthCalendar>(picker,"calendar");var cells=StabilityProbe.Field<System.Collections.Generic.List<Button>>(calendar,"dayButtons");
+                StabilityProbe.Check(cells.Count==42&&calendar.ActualWidth>300&&picker.ActualWidth>700,"custom date-time picker keeps a two-column month layout with reusable day cells");
+                StabilityProbe.Check(picker.TryRead(out selectedFrom,out selectedTo)&&selectedFrom.Second==20&&selectedTo<=DateTime.Now,"custom date-time picker preserves second precision and validates its initial range");
+                var startInput=StabilityProbe.Field<TextBox>(picker,"startTime");startInput.Text="08:04:03";StabilityProbe.Call(picker,"Activate",false);
+                StabilityProbe.Check(startInput.Text=="08:04:03","switching date cards does not discard a typed time");
+                var follow=StabilityProbe.Field<CheckBox>(picker,"followNow");follow.IsChecked=true;await Task.Delay(20);
+                StabilityProbe.Check(picker.TryRead(out selectedFrom,out selectedTo)&&selectedFrom.Hour==8&&selectedFrom.Second==3&&Math.Abs((DateTime.Now-selectedTo).TotalSeconds)<3,"custom date-time picker can keep its end bound at the current time without changing the start time");
+                var rendered=(FrameworkElement)pickerWindow.Content;var image=new RenderTargetBitmap((int)Math.Ceiling(rendered.ActualWidth),(int)Math.Ceiling(rendered.ActualHeight),96,96,PixelFormats.Pbgra32);image.Render(rendered);var png=new PngBitmapEncoder();png.Frames.Add(BitmapFrame.Create(image));using(var file=File.Create(Path.Combine(root,"date-time-picker.png")))png.Save(file);
+            }
+            finally{pickerWindow.Close();}
 
             var panel=new HistoryPanel{Margin=new Thickness(12)};panel.Configure(false,true,7);panel.Apply(data,"Generated chart fixture");
             var window=new Window{Width=340,Height=780,Content=new ScrollViewer{Content=panel,VerticalScrollBarVisibility=ScrollBarVisibility.Auto},ShowActivated=false,ShowInTaskbar=false};

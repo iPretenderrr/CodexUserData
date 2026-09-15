@@ -343,6 +343,130 @@ namespace CodexUserData
         }
     }
 
+    // Reuses 42 day buttons and only repaints when the visible month or selected
+    // dates change. This keeps the picker responsive on low-performance devices.
+    internal sealed class RangeMonthCalendar : Grid
+    {
+        private readonly TextBlock monthLabel;
+        private readonly List<Button> dayButtons=new List<Button>();
+        private DateTime month,from,to,active;
+        internal event Action<DateTime> Picked;
+        internal RangeMonthCalendar(DateTime start,DateTime end,DateTime selected)
+        {
+            RowDefinitions.Add(new RowDefinition{Height=GridLength.Auto});RowDefinitions.Add(new RowDefinition{Height=GridLength.Auto});RowDefinitions.Add(new RowDefinition());
+            var header=new Grid{Margin=new Thickness(0,0,0,7)};header.ColumnDefinitions.Add(new ColumnDefinition{Width=GridLength.Auto});header.ColumnDefinitions.Add(new ColumnDefinition());header.ColumnDefinitions.Add(new ColumnDefinition{Width=GridLength.Auto});Children.Add(header);
+            var previous=Theme.Button("‹","上个月",34);previous.Height=30;previous.FontSize=18;previous.Padding=new Thickness(0);header.Children.Add(previous);
+            monthLabel=Theme.Text("",15,Theme.Ink);monthLabel.FontWeight=FontWeights.SemiBold;monthLabel.HorizontalAlignment=HorizontalAlignment.Center;Grid.SetColumn(monthLabel,1);header.Children.Add(monthLabel);
+            var next=Theme.Button("›","下个月",34);next.Height=30;next.FontSize=18;next.Padding=new Thickness(0);Grid.SetColumn(next,2);header.Children.Add(next);
+            previous.Click+=delegate{month=month.AddMonths(-1);Render();};next.Click+=delegate{month=month.AddMonths(1);Render();};
+            var weekdays=new UniformGrid{Columns=7,Margin=new Thickness(0,0,0,3)};Grid.SetRow(weekdays,1);Children.Add(weekdays);
+            foreach(string name in new[]{"日","一","二","三","四","五","六"}){var label=Theme.Text(name,10,Theme.Muted);label.Height=24;label.TextAlignment=TextAlignment.Center;weekdays.Children.Add(label);}
+            var days=new UniformGrid{Columns=7,Rows=6};Grid.SetRow(days,2);Children.Add(days);
+            for(int i=0;i<42;i++)
+            {
+                var day=Theme.Button("","选择日期",32);day.Height=34;day.Margin=new Thickness(2);day.Padding=new Thickness(0);day.FontSize=11;day.FocusVisualStyle=null;
+                day.Click+=delegate(object sender,RoutedEventArgs e){var value=(DateTime)((Button)sender).Tag;if(Picked!=null)Picked(value);};
+                dayButtons.Add(day);days.Children.Add(day);
+            }
+            AutomationProperties.SetAutomationId(this,"CustomRangeCalendar");SetState(start,end,selected,true);
+        }
+        internal void SetState(DateTime start,DateTime end,DateTime selected,bool reveal)
+        {
+            start=start.Date;end=end.Date;selected=selected.Date;
+            bool changed=start!=from||end!=to||selected!=active;from=start;to=end;active=selected;
+            if(month==default(DateTime)||reveal&&(month.Year!=selected.Year||month.Month!=selected.Month)){month=new DateTime(selected.Year,selected.Month,1);changed=true;}
+            if(changed)Render();
+        }
+        private void Render()
+        {
+            monthLabel.Text=month.ToString("yyyy年M月",CultureInfo.CurrentCulture);
+            DateTime first=new DateTime(month.Year,month.Month,1),begin=first.AddDays(-(int)first.DayOfWeek);DateTime low=from<=to?from:to,high=from<=to?to:from;
+            for(int i=0;i<dayButtons.Count;i++)
+            {
+                DateTime date=begin.AddDays(i);Button button=dayButtons[i];bool inMonth=date.Month==month.Month&&date.Year==month.Year,selected=date==active,endpoint=date==from||date==to,inside=date>=low&&date<=high;
+                button.Tag=date;button.Content=date.Day.ToString(CultureInfo.InvariantCulture);button.Opacity=inMonth?1:.38;button.Foreground=selected?Theme.OnAccent:inMonth?Theme.Ink:Theme.Muted;button.Background=selected?Theme.Accent:inside?Theme.Hover:Brushes.Transparent;
+                button.BorderBrush=endpoint||date==DateTime.Today?Theme.Accent:Theme.Line;button.BorderThickness=selected?new Thickness(0):endpoint||date==DateTime.Today?new Thickness(1):new Thickness(0);button.Resources["ThemeHover"]=selected?Theme.Accent:Theme.Hover;
+                AutomationProperties.SetName(button,date.ToString("yyyy年M月d日",CultureInfo.CurrentCulture));
+            }
+        }
+    }
+
+    internal sealed class DateTimeRangePicker : Grid
+    {
+        private readonly Border startCard,endCard;
+        private readonly TextBlock startTitle,endTitle,startDate,endDate,error;
+        private readonly TextBox startTime,endTime;
+        private readonly CheckBox followNow;
+        private readonly RangeMonthCalendar calendar;
+        private readonly DispatcherTimer clock=new DispatcherTimer{Interval=TimeSpan.FromSeconds(1)};
+        private DateTime from,to;
+        private bool editingStart=true;
+        internal readonly Button CancelButton,ApplyButton;
+        internal DateTimeRangePicker(DateTime initialFrom,DateTime initialTo)
+        {
+            from=Second(initialFrom);to=Second(initialTo);Margin=new Thickness(18,0,18,18);
+            ColumnDefinitions.Add(new ColumnDefinition{Width=new GridLength(304)});ColumnDefinitions.Add(new ColumnDefinition{Width=new GridLength(18)});ColumnDefinitions.Add(new ColumnDefinition());
+            var left=new StackPanel();Children.Add(left);var guide=Theme.Text("支持日期与时间 · 精确到秒",11,Theme.Muted);guide.Margin=new Thickness(0,0,0,9);left.Children.Add(guide);
+            startCard=TimeCard("开始时间",true,out startTitle,out startDate,out startTime);left.Children.Add(startCard);
+            endCard=TimeCard("结束时间",false,out endTitle,out endDate,out endTime);endCard.Margin=new Thickness(0,9,0,0);left.Children.Add(endCard);
+            followNow=new CheckBox{Content="结束时间跟随当前时刻",Foreground=Theme.Muted,FontSize=11,Margin=new Thickness(0,11,0,0),Cursor=Cursors.Hand};left.Children.Add(followNow);AutomationProperties.SetAutomationId(followNow,"CustomRangeFollowNow");
+            error=Theme.Text("",10,Theme.Warning);error.TextWrapping=TextWrapping.Wrap;error.MinHeight=34;error.Margin=new Thickness(0,8,0,0);left.Children.Add(error);AutomationProperties.SetAutomationId(error,"CustomRangeError");
+            var actions=new Grid{Margin=new Thickness(0,8,0,0)};actions.ColumnDefinitions.Add(new ColumnDefinition());actions.ColumnDefinitions.Add(new ColumnDefinition{Width=new GridLength(152)});left.Children.Add(actions);
+            CancelButton=Theme.Button("取消","取消自定义时间范围",82);CancelButton.Height=38;CancelButton.Margin=new Thickness(0,0,9,0);actions.Children.Add(CancelButton);
+            ApplyButton=Theme.Button("确定","应用自定义时间范围",152);ApplyButton.Height=38;ApplyButton.Background=Theme.Accent;ApplyButton.Foreground=Theme.OnAccent;ApplyButton.Resources["ThemeHover"]=Theme.Accent;Grid.SetColumn(ApplyButton,1);actions.Children.Add(ApplyButton);
+            calendar=new RangeMonthCalendar(from,to,from);calendar.Picked+=Pick;var calendarCard=new Border{Background=Theme.Surface,BorderBrush=Theme.Line,BorderThickness=new Thickness(1),CornerRadius=new CornerRadius(13),Padding=new Thickness(12),Child=calendar};Grid.SetColumn(calendarCard,2);Children.Add(calendarCard);
+            startCard.PreviewMouseLeftButtonDown+=delegate{Activate(true);};endCard.PreviewMouseLeftButtonDown+=delegate{if(followNow.IsChecked!=true)Activate(false);};startTime.GotKeyboardFocus+=delegate{Activate(true);};endTime.GotKeyboardFocus+=delegate{if(followNow.IsChecked!=true)Activate(false);};
+            followNow.Checked+=delegate{editingStart=true;to=Second(DateTime.Now);endTime.Text=to.ToString("HH:mm:ss",CultureInfo.InvariantCulture);endTime.IsReadOnly=true;clock.Start();Refresh(true);};
+            followNow.Unchecked+=delegate{clock.Stop();endTime.IsReadOnly=false;Refresh(false);};
+            clock.Tick+=delegate{DateTime previous=to;to=Second(DateTime.Now);endDate.Text=to.ToString("yyyy/MM/dd",CultureInfo.InvariantCulture);endTime.Text=to.ToString("HH:mm:ss",CultureInfo.InvariantCulture);if(previous.Date!=to.Date)calendar.SetState(from,to,from,false);};
+            Unloaded+=delegate{clock.Stop();};Refresh(true);
+        }
+        private Border TimeCard(string caption,bool start,out TextBlock title,out TextBlock date,out TextBox time)
+        {
+            var card=new Border{Background=Theme.Surface,BorderBrush=Theme.Line,BorderThickness=new Thickness(1),CornerRadius=new CornerRadius(11),Padding=new Thickness(12,10,12,11),Cursor=Cursors.Hand};var stack=new StackPanel();card.Child=stack;
+            title=Theme.Text(caption,11,Theme.Muted);title.FontWeight=FontWeights.SemiBold;stack.Children.Add(title);
+            var row=new Grid{Margin=new Thickness(0,8,0,0)};row.ColumnDefinitions.Add(new ColumnDefinition{Width=GridLength.Auto});row.ColumnDefinitions.Add(new ColumnDefinition());row.ColumnDefinitions.Add(new ColumnDefinition{Width=GridLength.Auto});row.ColumnDefinitions.Add(new ColumnDefinition{Width=new GridLength(92)});stack.Children.Add(row);
+            var calendarIcon=Icon(false);calendarIcon.Margin=new Thickness(0,0,7,0);row.Children.Add(calendarIcon);date=Theme.Text("",13,Theme.Ink);Grid.SetColumn(date,1);row.Children.Add(date);
+            var clockIcon=Icon(true);clockIcon.Margin=new Thickness(9,0,6,0);Grid.SetColumn(clockIcon,2);row.Children.Add(clockIcon);
+            time=Theme.Input((start?from:to).ToString("HH:mm:ss",CultureInfo.InvariantCulture));time.Height=29;time.Padding=new Thickness(6,4,6,4);time.TextAlignment=TextAlignment.Center;time.Background=Theme.Background;Grid.SetColumn(time,3);row.Children.Add(time);
+            AutomationProperties.SetAutomationId(card,start?"CustomRangeStart":"CustomRangeEnd");AutomationProperties.SetName(card,caption);return card;
+        }
+        private static FrameworkElement Icon(bool clockIcon)
+        {
+            string data=clockIcon?"M 8,2 A 6,6 0 1 1 7.99,2 M 8,5 L 8,8 L 11,10":"M 2,4 L 14,4 L 14,14 L 2,14 Z M 2,7 L 14,7 M 5,2 L 5,5 M 11,2 L 11,5";
+            var geometry=Geometry.Parse(data);geometry.Freeze();return new System.Windows.Shapes.Path{Data=geometry,Stroke=Theme.Muted,StrokeThickness=1.4,StrokeStartLineCap=PenLineCap.Round,StrokeEndLineCap=PenLineCap.Round,StrokeLineJoin=PenLineJoin.Round,Width=16,Height=16,Stretch=Stretch.Uniform,VerticalAlignment=VerticalAlignment.Center};
+        }
+        private static DateTime Second(DateTime value)
+        {
+            if(value.Kind==DateTimeKind.Utc)value=value.ToLocalTime();return new DateTime(value.Year,value.Month,value.Day,value.Hour,value.Minute,value.Second,DateTimeKind.Local);
+        }
+        private void Activate(bool start){editingStart=start;Refresh(true);}
+        private void Pick(DateTime date)
+        {
+            TimeSpan time;if(editingStart){time=ReadClock(startTime,from.TimeOfDay);from=DateTime.SpecifyKind(date.Date.Add(time),DateTimeKind.Local);}else{time=ReadClock(endTime,to.TimeOfDay);to=DateTime.SpecifyKind(date.Date.Add(time),DateTimeKind.Local);}Refresh(true);
+        }
+        private void Refresh(bool reveal)
+        {
+            startDate.Text=from.ToString("yyyy/MM/dd",CultureInfo.InvariantCulture);endDate.Text=to.ToString("yyyy/MM/dd",CultureInfo.InvariantCulture);
+            startCard.BorderBrush=editingStart?Theme.Accent:Theme.Line;startCard.BorderThickness=new Thickness(1);startTitle.Foreground=editingStart?Theme.Accent:Theme.Muted;
+            endCard.BorderBrush=!editingStart&&followNow.IsChecked!=true?Theme.Accent:Theme.Line;endCard.BorderThickness=new Thickness(1);endTitle.Foreground=!editingStart&&followNow.IsChecked!=true?Theme.Accent:Theme.Muted;endCard.Opacity=followNow.IsChecked==true?.58:1;
+            calendar.SetState(from,to,editingStart?from:to,reveal);error.Text="";
+        }
+        private static TimeSpan ReadClock(TextBox box,TimeSpan fallback)
+        {
+            DateTime parsed;return DateTime.TryParseExact(box.Text.Trim(),new[]{"H:mm:ss","HH:mm:ss","H:mm","HH:mm"},CultureInfo.InvariantCulture,DateTimeStyles.None,out parsed)?parsed.TimeOfDay:fallback;
+        }
+        internal bool TryRead(out DateTime selectedFrom,out DateTime selectedTo)
+        {
+            selectedFrom=from;selectedTo=to;DateTime clockFrom,clockTo;string[] formats={"H:mm:ss","HH:mm:ss","H:mm","HH:mm"};
+            if(!DateTime.TryParseExact(startTime.Text.Trim(),formats,CultureInfo.InvariantCulture,DateTimeStyles.None,out clockFrom)){error.Text="开始时间格式应为 HH:mm:ss，例如 09:30:00。";return false;}
+            if(followNow.IsChecked==true)selectedTo=Second(DateTime.Now);else if(!DateTime.TryParseExact(endTime.Text.Trim(),formats,CultureInfo.InvariantCulture,DateTimeStyles.None,out clockTo)){error.Text="结束时间格式应为 HH:mm:ss，例如 18:00:00。";return false;}else selectedTo=DateTime.SpecifyKind(to.Date.Add(clockTo.TimeOfDay),DateTimeKind.Local);
+            selectedFrom=DateTime.SpecifyKind(from.Date.Add(clockFrom.TimeOfDay),DateTimeKind.Local);
+            if(selectedTo<selectedFrom){error.Text="结束时间不能早于开始时间。";return false;}if(selectedTo>DateTime.Now.AddSeconds(5)){error.Text="结束时间不能晚于当前时间。";return false;}
+            from=selectedFrom;to=selectedTo;error.Text="";return true;
+        }
+    }
+
     internal sealed class HistoryPanel : StackPanel
     {
         internal static readonly int[] Periods={1,7,14,30,60,90,180};
@@ -523,27 +647,11 @@ namespace CodexUserData
         private void OpenCustomRange()
         {
             DateTime now=DateTime.Now;DateTime initialFrom=customRange==null?now.AddHours(-1):customRange.From;DateTime initialTo=customRange==null?now:customRange.To;
-            var fromDate=new DatePicker{SelectedDate=initialFrom.Date,SelectedDateFormat=DatePickerFormat.Short,Background=Theme.Surface,Foreground=Theme.Ink,BorderBrush=Theme.Line,BorderThickness=new Thickness(1),Padding=new Thickness(5)};
-            var toDate=new DatePicker{SelectedDate=initialTo.Date,SelectedDateFormat=DatePickerFormat.Short,Background=Theme.Surface,Foreground=Theme.Ink,BorderBrush=Theme.Line,BorderThickness=new Thickness(1),Padding=new Thickness(5)};
-            var fromTime=Theme.Input(initialFrom.ToString("HH:mm:ss",CultureInfo.InvariantCulture));var toTime=Theme.Input(initialTo.ToString("HH:mm:ss",CultureInfo.InvariantCulture));
-            var error=Theme.Text("",10,Theme.Warning);error.TextWrapping=TextWrapping.Wrap;error.Margin=new Thickness(0,9,0,0);
-            var body=new StackPanel{Margin=new Thickness(18,0,18,16)};var note=Theme.Text("选择起止日期和时间，边界精确到秒。",11,Theme.Muted);note.Margin=new Thickness(0,0,0,12);note.TextWrapping=TextWrapping.Wrap;body.Children.Add(note);
-            var grid=new Grid();grid.ColumnDefinitions.Add(new ColumnDefinition{Width=new GridLength(1,GridUnitType.Star)});grid.ColumnDefinitions.Add(new ColumnDefinition{Width=new GridLength(112)});grid.RowDefinitions.Add(new RowDefinition{Height=GridLength.Auto});grid.RowDefinitions.Add(new RowDefinition{Height=GridLength.Auto});
-            var fromLabel=Theme.Text("开始时间",11,Theme.Ink);fromLabel.Margin=new Thickness(0,0,8,5);grid.Children.Add(fromLabel);var toLabel=Theme.Text("结束时间",11,Theme.Ink);toLabel.Margin=new Thickness(0,0,8,5);Grid.SetRow(toLabel,1);grid.Children.Add(toLabel);
-            var fromRow=new Grid();fromRow.ColumnDefinitions.Add(new ColumnDefinition());fromRow.ColumnDefinitions.Add(new ColumnDefinition{Width=new GridLength(112)});fromDate.Margin=new Thickness(0,0,8,6);fromTime.Margin=new Thickness(0,0,0,6);fromRow.Children.Add(fromDate);Grid.SetColumn(fromTime,1);fromRow.Children.Add(fromTime);Grid.SetRow(fromRow,0);Grid.SetColumn(fromRow,1);grid.Children.Add(fromRow);
-            var toRow=new Grid();toRow.ColumnDefinitions.Add(new ColumnDefinition());toRow.ColumnDefinitions.Add(new ColumnDefinition{Width=new GridLength(112)});toDate.Margin=new Thickness(0,0,8,0);toRow.Children.Add(toDate);Grid.SetColumn(toTime,1);toRow.Children.Add(toTime);Grid.SetRow(toRow,1);Grid.SetColumn(toRow,1);grid.Children.Add(toRow);body.Children.Add(grid);body.Children.Add(error);
-            var actions=new StackPanel{Orientation=Orientation.Horizontal,HorizontalAlignment=HorizontalAlignment.Right,Margin=new Thickness(0,14,0,0)};var cancel=Theme.Button("取消","取消自定义时间范围",72);var apply=Theme.Button("应用","应用自定义时间范围",72);cancel.Margin=new Thickness(0,0,8,0);actions.Children.Add(cancel);actions.Children.Add(apply);body.Children.Add(actions);
-            var dialog=new StyledWindow{Title="自定义时间范围",Width=500,Height=300,MinWidth=460,MinHeight=280,ResizeMode=ResizeMode.NoResize,Owner=Window.GetWindow(this),ShowInTaskbar=false,WindowStartupLocation=WindowStartupLocation.CenterOwner};dialog.SetBody(body,"自定义时间范围","CUSTOM RANGE",false);
+            var picker=new DateTimeRangePicker(initialFrom,initialTo);
+            var dialog=new StyledWindow{Title="自定义时间范围",Width=760,Height=430,MinWidth=720,MinHeight=410,ResizeMode=ResizeMode.NoResize,Owner=Window.GetWindow(this),ShowInTaskbar=false,WindowStartupLocation=WindowStartupLocation.CenterOwner};dialog.SetBody(picker,"选择日期和时间","CUSTOM RANGE",false);
             DateTime selectedFrom=initialFrom,selectedTo=initialTo;
-            Func<bool> read=delegate
-            {
-                if(!fromDate.SelectedDate.HasValue||!toDate.SelectedDate.HasValue){error.Text="请选择开始和结束日期。";return false;}
-                DateTime clockFrom,clockTo;string[] formats={"H:mm:ss","HH:mm:ss","H:mm","HH:mm"};
-                if(!DateTime.TryParseExact(fromTime.Text.Trim(),formats,CultureInfo.InvariantCulture,DateTimeStyles.None,out clockFrom)||!DateTime.TryParseExact(toTime.Text.Trim(),formats,CultureInfo.InvariantCulture,DateTimeStyles.None,out clockTo)){error.Text="时间格式应为 HH:mm:ss，例如 09:30:00。";return false;}
-                selectedFrom=DateTime.SpecifyKind(fromDate.SelectedDate.Value.Date.Add(clockFrom.TimeOfDay),DateTimeKind.Local);selectedTo=DateTime.SpecifyKind(toDate.SelectedDate.Value.Date.Add(clockTo.TimeOfDay),DateTimeKind.Local);
-                if(selectedTo<selectedFrom){error.Text="结束时间不能早于开始时间。";return false;}if(selectedTo>DateTime.Now.AddSeconds(5)){error.Text="结束时间不能晚于当前时间。";return false;}return true;
-            };
-            cancel.Click+=delegate{WindowInteraction.Close(dialog);};apply.Click+=delegate{WindowInteraction.CompleteDialog(dialog,true,read);};
+            Func<bool> read=delegate{return picker.TryRead(out selectedFrom,out selectedTo);};
+            picker.CancelButton.Click+=delegate{WindowInteraction.Close(dialog);};picker.ApplyButton.Click+=delegate{WindowInteraction.CompleteDialog(dialog,true,read);};
             bool? result=dialog.ShowDialog();if(result==true){BeginCustomRange(selectedFrom,selectedTo,sourceLabel.Tag as string);if(CustomRangeRequested!=null)CustomRangeRequested(selectedFrom,selectedTo);else if(original!=null)ApplyCustomRange(original,sourceLabel.Tag as string,selectedFrom,selectedTo);}
         }
         private void Highlight(string model){trend.Highlight(model);foreach(var pair in legendItems)pair.Value.Opacity=model==null||pair.Key==model?1:.45;}
