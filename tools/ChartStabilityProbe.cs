@@ -45,6 +45,10 @@ namespace CodexUserData
             comparison=ChartComparison.Calculate(DailyUsage.Empty(today.AddDays(-1),14),7,today,false,false);
             StabilityProbe.Check(comparison.Available&&!comparison.ChangePercent.HasValue&&comparison.Message.Contains("均为 0"),"two observed zero periods remain zero rather than an undefined percentage");
             StabilityProbe.Check(ChartValue.Money(.0000001m)!="$0.00"&&ChartValue.Axis(.0000001,true)!=ChartValue.Axis(.0000002,true)&&ChartValue.Axis(2000,false)==TokenText.Axis(2000),"very small positive estimates remain readable and token axes keep token units");
+            var modeSource=data.Daily.Skip(data.Daily.Length-14).ToArray();var weekly=UsageTrendSeries.Build(modeSource,"weekly");var cumulative=UsageTrendSeries.Build(modeSource,"cumulative");
+            StabilityProbe.Check(weekly.Length>=2&&weekly.All(d=>DateTime.ParseExact(d.Date,"yyyy-MM-dd",CultureInfo.InvariantCulture).DayOfWeek==DayOfWeek.Sunday)&&weekly.Sum(d=>d.Tokens)==modeSource.Sum(d=>d.Tokens),"weekly trend buckets start on Sunday and preserve the selected range total");
+            StabilityProbe.Check(cumulative.Length==modeSource.Length&&cumulative.Last().Tokens==modeSource.Sum(d=>d.Tokens)&&cumulative.Zip(cumulative.Skip(1),(a,b)=>b.Tokens>=a.Tokens).All(v=>v),"cumulative trend keeps each date and grows to the selected range total");
+            var modePreferences=new Preferences{TrendAggregation="weekly"};modePreferences.Validate();StabilityProbe.Check(modePreferences.Clone().TrendAggregation=="weekly","the selected trend aggregation survives settings persistence");
 
             var picker=new DateTimeRangePicker(DateTime.Now.AddDays(-2).Date.AddHours(9).AddMinutes(15).AddSeconds(20),DateTime.Now.AddMinutes(-1));
             var pickerWindow=new StyledWindow{Width=760,Height=430,ShowActivated=false,ShowInTaskbar=false};pickerWindow.SetBody(picker,"选择日期和时间","CUSTOM RANGE",false);
@@ -71,9 +75,13 @@ namespace CodexUserData
                 DateTime customFrom=today.AddHours(8),customTo=today.AddHours(9);long customStart=LocalCodexUsage.Unix(customFrom);var customDays=DailyUsage.Empty(customTo,1);var customTimeline=UsageTimeline.Empty(customStart,LocalCodexUsage.Unix(customTo),300);
                 Add(customDays[0],"fixture-alpha",1000,1);Add(customTimeline[0],"fixture-alpha",300,.3m);Add(customTimeline.Last(),"fixture-alpha",700,.7m);
                 var customSnapshot=new UsageSnapshot{Daily=customDays,Hourly=DailyUsage.Hours(customTo),Timeline=customTimeline,TimelineStepSeconds=300,HourlyThrough=24,SourceName="Generated custom fixture"};
-                panel.BeginCustomRange(customFrom,customTo,"Generated chart fixture");panel.ApplyCustomRange(customSnapshot,"Generated chart fixture",customFrom,customTo);await Task.Delay(35);window.UpdateLayout();
+                panel.BeginCustomRange(customFrom,customTo,"Generated chart fixture");var rangeButtons=StabilityProbe.Field<System.Collections.Generic.Dictionary<int,Button>>(panel,"ranges");var customButton=StabilityProbe.Field<Button>(panel,"customRangeButton");
+                StabilityProbe.Check(rangeButtons.Values.All(b=>AutomationProperties.GetItemStatus(b)=="未选中")&&AutomationProperties.GetItemStatus(customButton)=="已选中"&&heat.Days.Length==180,"selecting a custom curve clears preset highlights without replacing the 180-day heatmap");
+                panel.ApplyCustomRange(customSnapshot,"Generated chart fixture",customFrom,customTo);await Task.Delay(35);window.UpdateLayout();
                 StabilityProbe.Check(trend.Days.Length==customTimeline.Length&&trend.Days[0].Date.Length==19&&trend.Days.Sum(d=>d.Tokens)==1000,"custom trend renders the selected timestamp buckets instead of reusing daily aggregates");
-                StabilityProbe.Check(heat.Days.Length==1&&heat.HeatHeight(Math.Max(180,panel.ActualWidth-24))<250,"a short custom range keeps compact daily heatmap cells");
+                StabilityProbe.Check(heat.Days.Length==180&&heat.Days[0].Date==data.Daily[0].Date&&AutomationProperties.GetItemStatus(customButton)=="已选中","the completed custom curve leaves heatmap dates and custom selection state unchanged");
+                panel.SetAggregation("weekly");StabilityProbe.Check(trend.Days.Length==1&&DateTime.ParseExact(trend.Days[0].Date,"yyyy-MM-dd",CultureInfo.InvariantCulture).DayOfWeek==DayOfWeek.Sunday&&trend.Days[0].Tokens==1000,"weekly mode groups a custom interval into Sunday-based buckets");
+                panel.SetAggregation("cumulative");StabilityProbe.Check(trend.Days.Length==customTimeline.Length&&trend.Days.Last().Tokens==1000,"cumulative mode ends at the exact custom interval total");panel.SetAggregation("daily");
                 panel.SetRange(7);await Task.Delay(25);window.UpdateLayout();
                 var costButton=(Button)GuideStabilityProbe.Find(panel,"ChartMetricCost");costButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));await Task.Delay(35);
                 StabilityProbe.Check(trend.IsCost&&heat.IsCost&&trend.Selected==-1&&detail.Heading.Contains("未选择"),"clicking the cost metric switches both charts without automatically selecting a trend period");

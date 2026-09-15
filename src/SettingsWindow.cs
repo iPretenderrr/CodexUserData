@@ -117,7 +117,7 @@ namespace CodexUserData
             Note(display,"保存模型价格后，全部历史用量会按新价格重新估算。",Theme.Muted);
             Label(display,"主页图表");
             var heatmap=new CheckBox{Content="每日用量热度图",IsChecked=draft.ShowHeatmap,Foreground=Theme.Ink,Margin=new Thickness(0,5,0,8)};display.Children.Add(heatmap);heatmap.Checked+=delegate{draft.ShowHeatmap=true;};heatmap.Unchecked+=delegate{draft.ShowHeatmap=false;};
-            var trend=new CheckBox{Content="每日用量趋势",IsChecked=draft.ShowTrend,Foreground=Theme.Ink,Margin=new Thickness(0,5,0,8)};display.Children.Add(trend);trend.Checked+=delegate{draft.ShowTrend=true;};trend.Unchecked+=delegate{draft.ShowTrend=false;};
+            var trend=new CheckBox{Content="用量趋势",IsChecked=draft.ShowTrend,Foreground=Theme.Ink,Margin=new Thickness(0,5,0,8)};display.Children.Add(trend);trend.Checked+=delegate{draft.ShowTrend=true;};trend.Unchecked+=delegate{draft.ShowTrend=false;};
             Note(display,"顶部图表按钮可在独立大窗口查看完整热度图和趋势。",Theme.Muted);
             AddPage("display",display);
 

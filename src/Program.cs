@@ -32,7 +32,7 @@ namespace CodexUserData
         public string Source {get;set;} public string CodexHome {get;set;}
         public double Width {get;set;} public double Height {get;set;} public double Opacity {get;set;}
         public int RefreshSeconds {get;set;} public string[] Metrics {get;set;}
-        public bool ShowHeatmap {get;set;} public bool ShowTrend {get;set;} public int TrendDays {get;set;}
+        public bool ShowHeatmap {get;set;} public bool ShowTrend {get;set;} public int TrendDays {get;set;} public string TrendAggregation {get;set;}
         public bool ShowQuota {get;set;} public bool LiveQuota {get;set;} public bool ShowModels {get;set;} public string QuotaCli {get;set;}
         public Dictionary<string,decimal[]> PriceOverrides {get;set;}
         public string[] KnownModels {get;set;}
@@ -77,7 +77,7 @@ namespace CodexUserData
             Remote=new RemoteOptions();UsageView="combined";
             Source=File.Exists(Database)&&!Directory.Exists(Path.Combine(CodexHome,"sessions"))?"ccswitch":"local";Width=380;Height=440;Opacity=1;RefreshSeconds=5;
             Metrics=new[]{"tokens","requests","cacheRate","cost","input","output"};
-            ShowHeatmap=true;ShowTrend=true;TrendDays=30;
+            ShowHeatmap=true;ShowTrend=true;TrendDays=30;TrendAggregation="daily";
             ShowQuota=true;LiveQuota=true;ShowModels=true;QuotaCli=QuotaReader.DefaultExe;
         }
         internal Preferences Clone(){return Program.Json.Deserialize<Preferences>(Program.Json.Serialize(this));}
@@ -107,6 +107,7 @@ namespace CodexUserData
             Metrics=(Metrics??new string[0]).Where(k=>Theme.MetricLabels.ContainsKey(k)).Distinct().ToArray();
             if(Metrics.Length==0)Metrics=new[]{"tokens"};
             if(!new[]{1,7,14,30,60,90,180}.Contains(TrendDays))TrendDays=30;
+            if(TrendAggregation!="weekly"&&TrendAggregation!="cumulative")TrendAggregation="daily";
         }
         private static double Clamp(double v,double min,double max,double fallback){return Double.IsNaN(v)||Double.IsInfinity(v)?fallback:Math.Max(min,Math.Min(max,v));}
         internal static string ShapeSizeKey(string relative)
