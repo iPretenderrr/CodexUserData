@@ -82,9 +82,11 @@ namespace CodexUserData
             Same(combined,UsageUnion.Snapshot(local.Concat(server),"today",now,"combined"),"cross-source duplicated sessions");
             Check(Object.ReferenceEquals(combined.Daily,union.Get(local,server,"combined","month",now,"combined").Daily),"remote union shares merged summaries across periods");
             DateTime customFrom=now.Date.AddDays(-2).AddHours(12).AddSeconds(3),customTo=now.Date.AddDays(-1).AddHours(12).AddSeconds(4);string customKey=UsageRangeSpec.Encode(customFrom,customTo);
+            c1.Events.Add(new LocalUsageEvent{Time=LocalCodexUsage.Unix(customFrom.AddMinutes(7)),Signature="custom-window",Model="gpt-5.6-sol",Effort="high",Input=123,Cached=20,CacheWrite=3,Output=7});
             long expected=records.Values.SelectMany(c=>c.Events).Where(e=>e.Time>=LocalCodexUsage.Unix(customFrom)&&e.Time<=LocalCodexUsage.Unix(customTo)).Sum(e=>e.Input+e.Output);
             var custom=memo.Get(records,2,customKey,now);var projected=memo.Get(records,2,customKey,now);UsageRangeSpec parsedRange;Check(UsageRangeSpec.TryParse(customKey,out parsedRange)&&parsedRange.From==customFrom&&parsedRange.To==customTo,"custom range keys round-trip local seconds");
             Check(custom.TotalTokens==expected&&custom.Daily.Length==2&&custom.Daily[0].Date==customFrom.ToString("yyyy-MM-dd",CultureInfo.InvariantCulture)&&custom.Daily[1].Date==customTo.ToString("yyyy-MM-dd",CultureInfo.InvariantCulture),"custom local range filters event timestamps and keeps boundary dates");
+            Check(custom.TimelineStepSeconds<86400&&custom.Timeline.Length>2&&custom.Timeline.Sum(d=>d.Tokens)==expected&&custom.Timeline[0].Date.Length==19,"custom curves use timestamp buckets whose sum matches the exact selected interval");
             Check(projected.TotalTokens==custom.TotalTokens&&projected.Daily.Length==custom.Daily.Length,"repeated custom range reads reuse the numeric ledger memo");
         }
         private static string Header(string id,DateTime at){return Json.Serialize(new{type="session_meta",timestamp=at.ToString("o"),payload=new{id=id,timestamp=at.ToString("o")}})+"\n";}

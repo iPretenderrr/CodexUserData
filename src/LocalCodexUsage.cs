@@ -375,6 +375,12 @@ namespace CodexUserData
             long[] periodStarts={todayFrom,Unix(now.Date.AddDays(-6)),Unix(now.Date.AddDays(-29))};
             long from=customRange?Unix(custom.From):range=="all"?Int64.MinValue:Unix(now.Date.AddDays(range=="week"?-6:range=="month"?-29:0));
             long until=customRange?Unix(custom.To):Unix(now);
+            long timelineStep=0;
+            if(customRange)
+            {
+                timelineStep=UsageTimeline.StepSeconds(custom.From,custom.To);result.TimelineStepSeconds=timelineStep;
+                result.Timeline=timelineStep>=86400?result.Daily:UsageTimeline.Empty(from,until,timelineStep);
+            }
             int deferred=0,invalid=0,missingMeta=0,missingParent=0,unverifiedParent=0;long latest=0;
             foreach(LogCursor cursor in cursors.Values)
             {
@@ -422,6 +428,16 @@ namespace CodexUserData
                         if(index>=0&&index<result.Daily.Length)ModelUsage.Accumulate(result.Daily[index].Models,item.Model,item.Effort,item.Input-item.Cached-item.CacheWrite,item.Output,item.Cached,item.CacheWrite,1);
                     }
                     if(item.Time<from)continue;
+                    if(customRange&&timelineStep<86400)
+                    {
+                        int timelineIndex=(int)((item.Time-from)/timelineStep);
+                        if(timelineIndex>=0&&timelineIndex<result.Timeline.Length)
+                        {
+                            var bucket=result.Timeline[timelineIndex];
+                            bucket.Add(item.Input-item.Cached-item.CacheWrite,item.Output,item.Cached,item.CacheWrite,1,item.Reasoning,0);
+                            ModelUsage.Accumulate(bucket.Models,item.Model,item.Effort,item.Input-item.Cached-item.CacheWrite,item.Output,item.Cached,item.CacheWrite,1);
+                        }
+                    }
                     checked {result.TotalTokens+=item.Input+item.Output;result.InputTokens+=item.Input-item.Cached-item.CacheWrite;result.CacheReadTokens+=item.Cached;result.CacheCreationTokens+=item.CacheWrite;result.OutputTokens+=item.Output;result.ReasoningTokens+=item.Reasoning;result.Requests++;}
                     ModelUsage.Accumulate(result.Models,item.Model,item.Effort,item.Input-item.Cached-item.CacheWrite,item.Output,item.Cached,item.CacheWrite,1);
                     if(item.Inferred)result.InferredRecords++;

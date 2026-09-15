@@ -62,12 +62,19 @@ namespace CodexUserData
             }
             finally{pickerWindow.Close();}
 
-            var panel=new HistoryPanel{Margin=new Thickness(12)};panel.Configure(false,true,7);panel.Apply(data,"Generated chart fixture");
+            var panel=new HistoryPanel{Margin=new Thickness(12)};panel.Configure(true,true,7);panel.Apply(data,"Generated chart fixture");
             var window=new Window{Width=340,Height=780,Content=new ScrollViewer{Content=panel,VerticalScrollBarVisibility=ScrollBarVisibility.Auto},ShowActivated=false,ShowInTaskbar=false};
             try
             {
                 window.Show();await Task.Delay(60);window.UpdateLayout();
                 var trend=StabilityProbe.Field<UsageChart>(panel,"trend");var heat=StabilityProbe.Field<UsageChart>(panel,"heat");var detail=StabilityProbe.Field<UsageDetails>(panel,"trendDetail");
+                DateTime customFrom=today.AddHours(8),customTo=today.AddHours(9);long customStart=LocalCodexUsage.Unix(customFrom);var customDays=DailyUsage.Empty(customTo,1);var customTimeline=UsageTimeline.Empty(customStart,LocalCodexUsage.Unix(customTo),300);
+                Add(customDays[0],"fixture-alpha",1000,1);Add(customTimeline[0],"fixture-alpha",300,.3m);Add(customTimeline.Last(),"fixture-alpha",700,.7m);
+                var customSnapshot=new UsageSnapshot{Daily=customDays,Hourly=DailyUsage.Hours(customTo),Timeline=customTimeline,TimelineStepSeconds=300,HourlyThrough=24,SourceName="Generated custom fixture"};
+                panel.BeginCustomRange(customFrom,customTo,"Generated chart fixture");panel.ApplyCustomRange(customSnapshot,"Generated chart fixture",customFrom,customTo);await Task.Delay(35);window.UpdateLayout();
+                StabilityProbe.Check(trend.Days.Length==customTimeline.Length&&trend.Days[0].Date.Length==19&&trend.Days.Sum(d=>d.Tokens)==1000,"custom trend renders the selected timestamp buckets instead of reusing daily aggregates");
+                StabilityProbe.Check(heat.Days.Length==1&&heat.HeatHeight(Math.Max(180,panel.ActualWidth-24))<250,"a short custom range keeps compact daily heatmap cells");
+                panel.SetRange(7);await Task.Delay(25);window.UpdateLayout();
                 var costButton=(Button)GuideStabilityProbe.Find(panel,"ChartMetricCost");costButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));await Task.Delay(35);
                 StabilityProbe.Check(trend.IsCost&&heat.IsCost&&trend.Selected==-1&&detail.Heading.Contains("未选择"),"clicking the cost metric switches both charts without automatically selecting a trend period");
                 panel.SetModel("fixture-alpha");await Task.Delay(25);

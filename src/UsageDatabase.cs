@@ -83,6 +83,29 @@ namespace CodexUserData
             return Enumerable.Range(0,24).Select(h=>new DailyUsage{Date=today.Date.AddHours(h).ToString("yyyy-MM-dd HH:mm",CultureInfo.InvariantCulture)}).ToArray();
         }
     }
+    internal static class UsageTimeline
+    {
+        private const long Day=86400;
+        internal static long StepSeconds(DateTime from,DateTime to)
+        {
+            long span=Math.Max(0,(long)Math.Floor((to.ToUniversalTime()-from.ToUniversalTime()).TotalSeconds));
+            // Fine-grained curves stay under roughly one hundred points. Longer
+            // selections use daily buckets so archived daily rollups remain usable.
+            if(span>48*3600)return Day;long inclusive=span+1;
+            foreach(long step in new long[]{60,300,900,1800,3600})if((inclusive+step-1)/step<=96)return step;
+            return 3600;
+        }
+        internal static DailyUsage[] Empty(long from,long to,long step)
+        {
+            int count=checked((int)(Math.Max(0,to-from)/Math.Max(1,step)+1));var result=new DailyUsage[count];
+            for(int i=0;i<count;i++)result[i]=new DailyUsage{Date=DateTimeOffset.FromUnixTimeSeconds(from+i*step).LocalDateTime.ToString("yyyy-MM-dd HH:mm:ss",CultureInfo.InvariantCulture)};
+            return result;
+        }
+        internal static string Caption(long step)
+        {
+            if(step>=Day)return "按日分组";if(step>=3600)return step/3600+" 小时分组";if(step>=60)return step/60+" 分钟分组";return step+" 秒分组";
+        }
+    }
     // A custom range is kept as a compact cache key. The values are local wall-clock
     // timestamps; readers convert them to Unix seconds at the storage boundary.
     // Keeping this separate from preset strings leaves the existing quick periods intact.
@@ -124,6 +147,8 @@ namespace CodexUserData
         public decimal EquivalentUsd {get;set;} public long UnpricedTokens {get;set;}
         public DailyUsage[] Daily {get;set;}
         public DailyUsage[] Hourly {get;set;}
+        public DailyUsage[] Timeline {get;set;}
+        public long TimelineStepSeconds {get;set;}
         public int HourlyThrough {get;set;}
         public long HourlyUnallocatedTokens {get;set;}
         public string SourceName { get; set; }
@@ -135,7 +160,7 @@ namespace CodexUserData
         public int CoverageFiles { get; set; }
         public int CoverageWarnings { get; set; }
         public string Warning { get; set; }
-        public UsageSnapshot() { KnownModels=new string[0]; SourceName="CC Switch"; CountLabel="请求数"; CostAvailable=true; Warning=""; Daily=new DailyUsage[0];Hourly=new DailyUsage[0];Models=new List<ModelUsage>();Quotas=new List<QuotaBucket>(); }
+        public UsageSnapshot() { KnownModels=new string[0]; SourceName="CC Switch"; CountLabel="请求数"; CostAvailable=true; Warning=""; Daily=new DailyUsage[0];Hourly=new DailyUsage[0];Timeline=new DailyUsage[0];Models=new List<ModelUsage>();Quotas=new List<QuotaBucket>(); }
         public long TotalTokens { get; set; }
         public long Requests { get; set; }
         public long InputTokens { get; set; }
@@ -344,6 +369,7 @@ WHERE r.date >= ?1 AND r.date <= ?2
             long startSeconds=ToUnixSeconds(localFrom),endSeconds=ToUnixSeconds(localTo);
             int dayCount=checked((localTo.Date-localFrom.Date).Days+1);
             var result=new UsageSnapshot{Daily=DailyUsage.Empty(localTo,dayCount),Hourly=DailyUsage.Hours(localTo),HourlyThrough=24,LatestRecord="暂无记录"};
+            result.TimelineStepSeconds=UsageTimeline.StepSeconds(localFrom,localTo);result.Timeline=result.TimelineStepSeconds>=86400?result.Daily:UsageTimeline.Empty(startSeconds,endSeconds,result.TimelineStepSeconds);
             // A rollup can answer a whole calendar day, but it cannot preserve a
             // partial day's second-level boundary. Include a boundary day only when
             // the selected interval covers it from midnight through 23:59:59.
@@ -371,12 +397,17 @@ WHERE r.date >= ?1 AND r.date <= ?2
                             checked{result.Requests+=result.ArchivedRequests;result.InputTokens+=statement.Int64(1);result.OutputTokens+=statement.Int64(2);result.CacheReadTokens+=statement.Int64(3);result.CacheCreationTokens+=statement.Int64(4);result.SuccessCount+=statement.Int64(6);}archivedCost=statement.Double(5);latestArchive=statement.Text(7);
                         }
                     }
-                    ReadDailyCustom(db,result.Daily,startSeconds,endSeconds,firstRollup,lastRollup,app);ReadModels(db,result,startSeconds,endSeconds,firstRollup,lastRollup,app);
+                    ReadDailyCustom(db,result.Daily,startSeconds,endSeconds,firstRollup,lastRollup,app);
+                    if(result.TimelineStepSeconds<86400)ReadTimeline(db,result.Timeline,startSeconds,endSeconds,result.TimelineStepSeconds,app);
+                    ReadModels(db,result,startSeconds,endSeconds,firstRollup,lastRollup,app);
                 }
                 finally{db.Execute("ROLLBACK");}
             }
             long cacheableInput;checked{cacheableInput=result.InputTokens+result.CacheReadTokens+result.CacheCreationTokens;result.TotalTokens=cacheableInput+result.OutputTokens;}
             result.CacheHitRate=cacheableInput>0?100.0*result.CacheReadTokens/cacheableInput:0.0;result.HourlyUnallocatedTokens=0;result.SuccessRate=result.Requests>0?100.0*result.SuccessCount/result.Requests:0.0;
+            // Archived rows carry only a date. Falling back to the exact-boundary
+            // daily buckets is more honest than drawing a partly empty sub-day curve.
+            if(result.ArchivedRequests>0){result.Timeline=result.Daily;result.TimelineStepSeconds=86400;}
             result.CostUsd=Decimal.Parse((detailCost+archivedCost).ToString("F6",CultureInfo.InvariantCulture),CultureInfo.InvariantCulture);
             if(latestDetail.HasValue)result.LatestRecord=Epoch.AddSeconds(latestDetail.Value).ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss",CultureInfo.InvariantCulture);else if(!String.IsNullOrEmpty(latestArchive))result.LatestRecord=latestArchive+"（历史汇总）";
             return result;
@@ -446,6 +477,21 @@ FROM usage_daily_rollups r WHERE r.date>=?1 AND r.date<=?2
 AND (?3='' OR (CASE WHEN r.app_type='claude-desktop' THEN 'claude' ELSE r.app_type END)=?3) GROUP BY 1,r.model";
             using(var rows=db.Prepare(detail)){rows.Bind(1,from);rows.Bind(2,until);rows.Bind(3,app??"");AddDailyRows(rows,byDate);}
             if(String.CompareOrdinal(firstRollup,lastRollup)<=0)using(var rows=db.Prepare(rollup)){rows.Bind(1,firstRollup);rows.Bind(2,lastRollup);rows.Bind(3,app??"");AddDailyRows(rows,byDate);}
+        }
+        private static void ReadTimeline(ReadConnection db,DailyUsage[] buckets,long from,long until,long step,string app)
+        {
+            string sql=@"SELECT CAST((l.created_at-?1)/?3 AS INTEGER),COUNT(*),SUM("+FreshInput("l")+@"),SUM(l.output_tokens),SUM(l.cache_read_tokens),SUM(l.cache_creation_tokens),SUM(CAST(l.total_cost_usd AS REAL)),l.model
+FROM proxy_request_logs l WHERE l.created_at>=?1 AND l.created_at<=?2
+AND (?4='' OR (CASE WHEN l.app_type='claude-desktop' THEN 'claude' ELSE l.app_type END)=?4) AND "+EffectiveLogFilter+" GROUP BY 1,l.model";
+            using(var rows=db.Prepare(sql))
+            {
+                rows.Bind(1,from);rows.Bind(2,until);rows.Bind(3,step);rows.Bind(4,app??"");
+                while(rows.Next())
+                {
+                    int index=(int)rows.Int64(0);if(index<0||index>=buckets.Length)continue;var bucket=buckets[index];
+                    bucket.Add(rows.Int64(2),rows.Int64(3),rows.Int64(4),rows.Int64(5),rows.Int64(1),0,(decimal)rows.Double(6));ModelUsage.Accumulate(bucket.Models,rows.Text(7),"unknown",rows.Int64(2),rows.Int64(3),rows.Int64(4),rows.Int64(5),rows.Int64(1));
+                }
+            }
         }
         private static void AddDailyRows(ReadStatement rows,Dictionary<string,DailyUsage> days)
         {
