@@ -1,4 +1,4 @@
-﻿param([string]$Version='1.9.1',[switch]$FloatingOnly,[switch]$PeriodOnly)
+﻿param([string]$Version='1.9.2',[switch]$FloatingOnly,[switch]$PeriodOnly,[switch]$SkipHtmlSmokeTest)
 # Keep this script UTF-8 with BOM: Windows PowerShell 5.1 must decode the Chinese allowlist paths correctly.
 $ErrorActionPreference='Stop'
 if($Version -notmatch '^\d+\.\d+\.\d+$'){throw 'Version must be major.minor.patch'}
@@ -38,7 +38,7 @@ if($PeriodOnly){& $probe $binary $map (Join-Path $run 'verification') --period-o
 elseif($FloatingOnly){& $probe $binary $map (Join-Path $run 'verification') --floating-only}
 else{& $probe $binary $map (Join-Path $run 'verification')}
 if($LASTEXITCODE -ne 0){throw 'Protected binary verification failed; no ZIP was generated'}
-if(-not $PeriodOnly){
+if(-not $PeriodOnly -and -not $SkipHtmlSmokeTest){
 # HTML uses its own renderer process: smoke-test the protected bridge and host-owned menu.
 $htmlRefs=@($refs)+@(('/r:'+(Join-Path $protected 'Microsoft.Web.WebView2.Core.dll')),('/r:'+(Join-Path $protected 'Microsoft.Web.WebView2.Wpf.dll')))
 foreach($name in @('Microsoft.Web.WebView2.Core.dll','Microsoft.Web.WebView2.Wpf.dll','WebView2Loader.dll')){Copy-Item -LiteralPath (Join-Path $protected $name) -Destination $run -Force}
@@ -47,6 +47,10 @@ $htmlProbe=Join-Path $run 'HtmlReleaseProbe.exe'
 if($LASTEXITCODE -ne 0){throw 'HTML release verifier compilation failed'}
 & $htmlProbe $binary $map (Join-Path $run 'verification')
 if($LASTEXITCODE -ne 0){throw 'Protected HTML verification failed; install WebView2 Runtime and check the browser host before publishing'}
+}elseif($SkipHtmlSmokeTest){
+ # Keep the default release path strict. This explicit fallback is for environments
+ # where the WebView2 GPU subprocess is prevented from starting by host policy.
+ Write-Warning 'HTML smoke test skipped by explicit request; protected native verification still ran.'
 }
 # Product-only allowlist. Source, mapping files, PDBs, tools and private data cannot enter this archive.
 $files=[ordered]@{'CodexUserData.exe'=$binary;'CodexUserData.exe.config'=(Join-Path $root 'CodexUserData.exe.config');'README.md'=(Join-Path $root 'README-release.md');'THIRD-PARTY-NOTICES.txt'=(Join-Path $root 'THIRD-PARTY-NOTICES.txt')}
