@@ -67,6 +67,8 @@ namespace CodexUserData
         public List<ModelUsage> Models {get;set;}
         public DailyUsage(){Models=new List<ModelUsage>();}
         public string Date {get;set;}
+        // UI-only caption for grouped chart points. Internal keeps it out of persisted usage caches.
+        internal string DisplayLabel {get;set;}
         public long Tokens {get;set;} public long Input {get;set;} public long Output {get;set;}
         public long CacheRead {get;set;} public long CacheWrite {get;set;} public long Reasoning {get;set;} public long Requests {get;set;}
         public decimal CostUsd {get;set;}

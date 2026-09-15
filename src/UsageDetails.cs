@@ -34,9 +34,9 @@ namespace CodexUserData
         {
             string next=UsageChart.Signature(new[]{day})+"/"+pinned+"/"+countLabel;if(next==signature)return;signature=next;body.Children.Clear();
             if(caption.Length>0){var title=Theme.Text(caption,11,Theme.Muted);title.Margin=new Thickness(0,0,0,9);body.Children.Add(title);}
-            Heading=day.Date+(pinned?" · 已选中":"");
+            string display=String.IsNullOrEmpty(day.DisplayLabel)?day.Date:day.DisplayLabel;Heading=display+(pinned?" · 已选中":"");
             var heading=new DockPanel();var badge=Theme.Text(pinned?"已选中":"用量明细",10,pinned?Theme.Accent:Theme.Muted);DockPanel.SetDock(badge,Dock.Right);heading.Children.Add(badge);
-            var date=Theme.Text(day.Date,13,Theme.Ink);date.FontWeight=FontWeights.SemiBold;AutomationProperties.SetAutomationId(date,idPrefix+"DailyUsageDetail");AutomationProperties.SetName(date,Heading);heading.Children.Add(date);body.Children.Add(heading);
+            var date=Theme.Text(display,13,Theme.Ink);date.FontWeight=FontWeights.SemiBold;date.TextWrapping=TextWrapping.Wrap;AutomationProperties.SetAutomationId(date,idPrefix+"DailyUsageDetail");AutomationProperties.SetName(date,Heading);heading.Children.Add(date);body.Children.Add(heading);
             var totals=new UniformGrid{Columns=2,Margin=new Thickness(-3,10,-3,0)};body.Children.Add(totals);
             Metric(totals,"TOKENS",TokenText.Compact(day.Tokens),Theme.Ink,idPrefix+"SelectedDayTokens");
             Metric(totals,"API 估算 · USD",ModelColors.Money(day.Models.Sum(m=>m.EquivalentUsd),day.Models.Sum(m=>m.UnpricedTokens),day.Tokens),Theme.Ink,idPrefix+"SelectedDayValue");

@@ -144,7 +144,7 @@ namespace CodexUserData
             foreach(var entry in new Dictionary<string,string>{{"today","今日"},{"week","7 天"},{"month","30 天"},{"all","全部"}}){string key=entry.Key;var b=Theme.Button(entry.Value,"时间范围："+entry.Value,20);b.Margin=new Thickness(1,0,1,0);b.Click+=delegate{if(prefs.Range==key)return;prefs.Range=key;revision++;UpdateButtons();SchedulePersist();if(!ApplyCachedRange())RefreshUsage(false);else if(busy)refreshPending=true;};ranges[key]=b;period.Children.Add(b);}
             cards=new UniformGrid{Columns=3,Margin=new Thickness(-3,0,-3,0)};body.Children.Add(cards);
             modelPanel=new ModelPanel();body.Children.Add(modelPanel);
-            history=new HistoryPanel{ShowCoverage=false};history.Configure(prefs.ShowHeatmap,prefs.ShowTrend,prefs.TrendDays,prefs.TrendAggregation);history.RangeChanged+=SetTrendRange;history.AggregationChanged+=SetTrendAggregation;history.CustomRangeRequested+=delegate(DateTime from,DateTime to){RequestCustomRange(history,from,to);};history.IsVisibleChanged+=delegate{if(history.IsVisible)history.SetRange(prefs.TrendDays);};body.Children.Add(history);
+            history=new HistoryPanel{ShowCoverage=false};history.Configure(prefs.ShowHeatmap,prefs.ShowTrend,prefs.TrendDays,prefs.TrendAggregation,prefs.HeatmapAggregation);history.RangeChanged+=SetTrendRange;history.AggregationChanged+=SetTrendAggregation;history.HeatAggregationChanged+=SetHeatAggregation;history.CustomRangeRequested+=delegate(DateTime from,DateTime to){RequestCustomRange(history,from,to);};history.IsVisibleChanged+=delegate{if(history.IsVisible)history.SetRange(prefs.TrendDays);};body.Children.Add(history);
             var footer=new Grid{Margin=new Thickness(0,7,0,0)};footer.RowDefinitions.Add(new RowDefinition{Height=GridLength.Auto});footer.RowDefinitions.Add(new RowDefinition{Height=GridLength.Auto});Grid.SetRow(footer,3);grid.Children.Add(footer);
             warning=Theme.Text("",10,Theme.Warning);warning.TextTrimming=TextTrimming.CharacterEllipsis;
             coverageToggle=Theme.Button("","查看统计说明与处理建议",0);coverageToggle.Content=warning;coverageToggle.Height=24;coverageToggle.Padding=new Thickness(3,1,3,1);coverageToggle.HorizontalContentAlignment=HorizontalAlignment.Stretch;coverageToggle.Visibility=Visibility.Collapsed;coverageToggle.Click+=delegate{OpenCoverage();};AutomationProperties.SetAutomationId(coverageToggle,"CoverageToggle");footer.Children.Add(coverageToggle);
@@ -227,7 +227,7 @@ namespace CodexUserData
             if(closed)return;
             if(accepted==true)
             {
-                bool newAccount=prefs.CodexHome!=settings.Result.CodexHome||prefs.QuotaCli!=settings.Result.QuotaCli;prefs=settings.Result;usageView.Select(prefs.UsageView);Program.Save(prefs);if(prefs.StartWithCodex)CodexLaunchWatcher.Ensure();quota.Configure(newAccount);EnsureActivity();Opacity=prefs.Opacity;source.Select(prefs.Source);app.Select(prefs.App);timer.Interval=TimeSpan.FromSeconds(prefs.RefreshSeconds);history.Configure(prefs.ShowHeatmap,prefs.ShowTrend,prefs.TrendDays,prefs.TrendAggregation);UpdateSource();BuildCards();UpdateButtons();SelectionChanged();
+                bool newAccount=prefs.CodexHome!=settings.Result.CodexHome||prefs.QuotaCli!=settings.Result.QuotaCli;prefs=settings.Result;usageView.Select(prefs.UsageView);Program.Save(prefs);if(prefs.StartWithCodex)CodexLaunchWatcher.Ensure();quota.Configure(newAccount);EnsureActivity();Opacity=prefs.Opacity;source.Select(prefs.Source);app.Select(prefs.App);timer.Interval=TimeSpan.FromSeconds(prefs.RefreshSeconds);history.Configure(prefs.ShowHeatmap,prefs.ShowTrend,prefs.TrendDays,prefs.TrendAggregation,prefs.HeatmapAggregation);UpdateSource();BuildCards();UpdateButtons();SelectionChanged();
             }
             else Opacity=original;
             Theme.Apply(prefs);quota.ApplyTheme();UpdateCompletionViews();
@@ -235,6 +235,7 @@ namespace CodexUserData
         private string Scope(){return prefs.Source=="local"?(prefs.Remote.Enabled?(prefs.UsageView=="local"?"本机 Codex":prefs.UsageView=="remote"?"服务器 Codex":"Codex · 合计"):"本地 Codex"): "CC Switch · "+(String.IsNullOrEmpty(prefs.App)?"全部应用":prefs.App);}
         private void SetTrendRange(int value){customRangeRevision++;prefs.TrendDays=value;if(history.IsVisible)history.SetRange(value);if(largeHistory!=null&&largeHistory.IsVisible)largeHistory.SetRange(value);SchedulePersist();}
         private void SetTrendAggregation(string value){prefs.TrendAggregation=value;if(history.IsVisible)history.SetAggregation(value);if(largeHistory!=null&&largeHistory.IsVisible)largeHistory.SetAggregation(value);SchedulePersist();}
+        private void SetHeatAggregation(string value){prefs.HeatmapAggregation=value;if(history.IsVisible)history.SetHeatAggregation(value);if(largeHistory!=null&&largeHistory.IsVisible)largeHistory.SetHeatAggregation(value);SchedulePersist();}
         private async void RequestCustomRange(HistoryPanel panel,DateTime from,DateTime to)
         {
             if(closed||panel==null)return;
@@ -397,7 +398,7 @@ namespace CodexUserData
         {
             if(closed)return;
             if(historyWindow!=null){WindowInteraction.ResumeReveal(historyWindow);if(!historyWindow.IsVisible)historyWindow.Show();if(historyWindow.WindowState==WindowState.Minimized)historyWindow.WindowState=WindowState.Normal;historyWindow.Activate();return;}
-            largeHistory=new HistoryPanel{Margin=new Thickness(20,10,20,20)};largeHistory.RangeChanged+=SetTrendRange;largeHistory.AggregationChanged+=SetTrendAggregation;largeHistory.CustomRangeRequested+=delegate(DateTime from,DateTime to){RequestCustomRange(largeHistory,from,to);};largeHistory.IsVisibleChanged+=delegate{if(largeHistory!=null&&largeHistory.IsVisible)largeHistory.SetRange(prefs.TrendDays);};largeHistory.Configure(true,true,prefs.TrendDays,prefs.TrendAggregation);largeHistory.Apply(snapshot,Scope());
+            largeHistory=new HistoryPanel{Margin=new Thickness(20,10,20,20)};largeHistory.RangeChanged+=SetTrendRange;largeHistory.AggregationChanged+=SetTrendAggregation;largeHistory.HeatAggregationChanged+=SetHeatAggregation;largeHistory.CustomRangeRequested+=delegate(DateTime from,DateTime to){RequestCustomRange(largeHistory,from,to);};largeHistory.IsVisibleChanged+=delegate{if(largeHistory!=null&&largeHistory.IsVisible)largeHistory.SetRange(prefs.TrendDays);};largeHistory.Configure(true,true,prefs.TrendDays,prefs.TrendAggregation,prefs.HeatmapAggregation);largeHistory.Apply(snapshot,Scope());
             quotaHistoryPanel=new QuotaHistoryPanel(quota.HistoryStore,()=>QuotaHistoryStore.Scope(prefs.CodexHome),()=>quota.HistoryError);
             var content=new Grid();content.Children.Add(largeHistory);content.Children.Add(quotaHistoryPanel);quotaHistoryPanel.Visibility=Visibility.Collapsed;
             var layout=new DockPanel();var tabs=new WrapPanel{Margin=new Thickness(20,8,20,0)};DockPanel.SetDock(tabs,Dock.Top);layout.Children.Add(tabs);
