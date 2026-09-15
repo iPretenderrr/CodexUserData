@@ -14,18 +14,21 @@ namespace CodexUserData
 {
     internal static class ChartStabilityProbe
     {
-        private static void Add(DailyUsage day,string model,long tokens,decimal cost)
-        {day.Add(tokens,0,0,0,1,0,999);day.Models.Add(new ModelUsage{Model=model,Effort="high",Tokens=tokens,Input=tokens,Requests=1,EquivalentUsd=cost});}
+        private static void Add(DailyUsage day,string model,long tokens,decimal cost,long cached=0)
+        {
+            long fresh=Math.Max(0,tokens-cached);day.Add(fresh,0,cached,0,1,0,999);day.Models.Add(new ModelUsage{Model=model,Effort="high",Tokens=tokens,Input=fresh,CacheRead=cached,Requests=1,EquivalentUsd=cost});
+        }
         private static UsageSnapshot Fixture()
         {
             var days=DailyUsage.Empty(DateTime.Today,180);
             for(int i=0;i<days.Length;i++)
             {
                 int ago=days.Length-1-i;
-                Add(days[i],"fixture-alpha",ago==0?900000:ago<=7?2000:1000,ago==0?90:ago<=7?2:1);
-                Add(days[i],"fixture-beta",ago==0?300000:10000,ago==0?30:10);
+                long alpha=ago==0?900000:ago<=7?2000:1000,beta=ago==0?300000:10000;
+                Add(days[i],"fixture-alpha",alpha,ago==0?90:ago<=7?2:1,alpha*(2+ago%5)/8);
+                Add(days[i],"fixture-beta",beta,ago==0?30:10,beta*(4+ago%3)/8);
             }
-            var hours=DailyUsage.Hours(DateTime.Today);Add(hours[0],"fixture-alpha",250,.0000001m);Add(hours[1],"fixture-beta",500,.0000002m);
+            var hours=DailyUsage.Hours(DateTime.Today);Add(hours[0],"fixture-alpha",250,.0000001m,100);Add(hours[1],"fixture-beta",500,.0000002m,350);
             return new UsageSnapshot{Daily=days,Hourly=hours,HourlyThrough=2,SourceName="Generated chart fixture"};
         }
         internal static async Task Run(string root)
@@ -45,6 +48,7 @@ namespace CodexUserData
             comparison=ChartComparison.Calculate(DailyUsage.Empty(today.AddDays(-1),14),7,today,false,false);
             StabilityProbe.Check(comparison.Available&&!comparison.ChangePercent.HasValue&&comparison.Message.Contains("均为 0"),"two observed zero periods remain zero rather than an undefined percentage");
             StabilityProbe.Check(ChartValue.Money(.0000001m)!="$0.00"&&ChartValue.Axis(.0000001,true)!=ChartValue.Axis(.0000002,true)&&ChartValue.Axis(2000,false)==TokenText.Axis(2000),"very small positive estimates remain readable and token axes keep token units");
+            var cachePoint=new DailyUsage();cachePoint.Add(20,500,60,20,1,0,0);StabilityProbe.Check(Math.Abs(ChartValue.CacheRate(cachePoint)-60)<.001,"cache hit rate divides cache reads by fresh, cached and cache-write input while excluding output");
             var modeSource=data.Daily.Skip(data.Daily.Length-14).ToArray();var weekly=UsageTrendSeries.Build(modeSource,"weekly");var cumulative=UsageTrendSeries.Build(modeSource,"cumulative");
             StabilityProbe.Check(weekly.Length>=2&&weekly.All(d=>DateTime.ParseExact(d.Date,"yyyy-MM-dd",CultureInfo.InvariantCulture).DayOfWeek==DayOfWeek.Sunday)&&weekly.Sum(d=>d.Tokens)==modeSource.Sum(d=>d.Tokens),"weekly trend buckets start on Sunday and preserve the selected range total");
             StabilityProbe.Check(cumulative.Length==modeSource.Length&&cumulative.Last().Tokens==modeSource.Sum(d=>d.Tokens)&&cumulative.Zip(cumulative.Skip(1),(a,b)=>b.Tokens>=a.Tokens).All(v=>v),"cumulative trend keeps each date and grows to the selected range total");
@@ -75,27 +79,29 @@ namespace CodexUserData
             try
             {
                 window.Show();await Task.Delay(60);window.UpdateLayout();
-                var trend=StabilityProbe.Field<UsageChart>(panel,"trend");var heat=StabilityProbe.Field<UsageChart>(panel,"heat");var detail=StabilityProbe.Field<UsageDetails>(panel,"trendDetail");
+                var trend=StabilityProbe.Field<UsageChart>(panel,"trend");var heat=StabilityProbe.Field<UsageChart>(panel,"heat");var cacheTrend=StabilityProbe.Field<UsageChart>(panel,"cacheTrend");var detail=StabilityProbe.Field<UsageDetails>(panel,"trendDetail");
+                StabilityProbe.Check(cacheTrend.IsRate&&!cacheTrend.IsHourly&&cacheTrend.WindowDays==7&&cacheTrend.Days.Length==data.Daily.Length,"cache hit chart follows the selected token date range without its own aggregation controls");
                 var chartImage=new RenderTargetBitmap((int)Math.Ceiling(window.ActualWidth),(int)Math.Ceiling(window.ActualHeight),96,96,PixelFormats.Pbgra32);chartImage.Render(window);var chartPng=new PngBitmapEncoder();chartPng.Frames.Add(BitmapFrame.Create(chartImage));using(var file=File.Create(Path.Combine(root,"chart-mode-controls.png")))chartPng.Save(file);
                 panel.SetHeatAggregation("weekly");window.UpdateLayout();var weeklyImage=new RenderTargetBitmap((int)Math.Ceiling(window.ActualWidth),(int)Math.Ceiling(window.ActualHeight),96,96,PixelFormats.Pbgra32);weeklyImage.Render(window);var weeklyPng=new PngBitmapEncoder();weeklyPng.Frames.Add(BitmapFrame.Create(weeklyImage));using(var file=File.Create(Path.Combine(root,"heatmap-weekly.png")))weeklyPng.Save(file);
                 panel.SetHeatAggregation("cumulative");window.UpdateLayout();var cumulativeImage=new RenderTargetBitmap((int)Math.Ceiling(window.ActualWidth),(int)Math.Ceiling(window.ActualHeight),96,96,PixelFormats.Pbgra32);cumulativeImage.Render(window);var cumulativePng=new PngBitmapEncoder();cumulativePng.Frames.Add(BitmapFrame.Create(cumulativeImage));using(var file=File.Create(Path.Combine(root,"heatmap-cumulative.png")))cumulativePng.Save(file);panel.SetHeatAggregation("daily");window.UpdateLayout();
-                var chartScroller=(ScrollViewer)window.Content;chartScroller.ScrollToVerticalOffset(500);window.UpdateLayout();var trendImage=new RenderTargetBitmap((int)Math.Ceiling(window.ActualWidth),(int)Math.Ceiling(window.ActualHeight),96,96,PixelFormats.Pbgra32);trendImage.Render(window);var trendPng=new PngBitmapEncoder();trendPng.Frames.Add(BitmapFrame.Create(trendImage));using(var file=File.Create(Path.Combine(root,"trend-mode-controls.png")))trendPng.Save(file);chartScroller.ScrollToTop();window.Width=340;await Task.Delay(25);window.UpdateLayout();
+                var chartScroller=(ScrollViewer)window.Content;chartScroller.ScrollToVerticalOffset(500);window.UpdateLayout();var trendImage=new RenderTargetBitmap((int)Math.Ceiling(window.ActualWidth),(int)Math.Ceiling(window.ActualHeight),96,96,PixelFormats.Pbgra32);trendImage.Render(window);var trendPng=new PngBitmapEncoder();trendPng.Frames.Add(BitmapFrame.Create(trendImage));using(var file=File.Create(Path.Combine(root,"trend-mode-controls.png")))trendPng.Save(file);chartScroller.ScrollToEnd();window.UpdateLayout();var cacheImage=new RenderTargetBitmap((int)Math.Ceiling(window.ActualWidth),(int)Math.Ceiling(window.ActualHeight),96,96,PixelFormats.Pbgra32);cacheImage.Render(window);var cachePng=new PngBitmapEncoder();cachePng.Frames.Add(BitmapFrame.Create(cacheImage));using(var file=File.Create(Path.Combine(root,"cache-hit-rate.png")))cachePng.Save(file);chartScroller.ScrollToTop();window.Width=340;await Task.Delay(25);window.UpdateLayout();
                 var heatModes=StabilityProbe.Field<System.Collections.Generic.Dictionary<string,Button>>(panel,"heatAggregations");var trendModes=StabilityProbe.Field<System.Collections.Generic.Dictionary<string,Button>>(panel,"trendAggregations");var heatDetail=StabilityProbe.Field<UsageDetails>(panel,"heatDetail");
                 panel.SetHeatAggregation("weekly");heat.Choose(heat.Days.Length-1,true);StabilityProbe.Check(heat.Days.Length>=25&&heat.Days.Length<=27&&heat.HeatMode=="weekly"&&heat.Days.Last().DisplayLabel.StartsWith("周 ")&&heatDetail.Heading.StartsWith("周 ")&&AutomationProperties.GetItemStatus(heatModes["weekly"])=="已选中"&&AutomationProperties.GetItemStatus(trendModes["daily"])=="已选中","heatmap weekly mode uses one column per Sunday-based week without changing the trend mode");
                 long fullHeatTotal=data.Daily.Sum(d=>d.Tokens);int heatWeeks=heat.Days.Length;panel.SetHeatAggregation("cumulative");StabilityProbe.Check(heat.Days.Length==heatWeeks&&heat.Days.Last().Tokens==fullHeatTotal&&heat.HeatMode=="cumulative"&&AutomationProperties.GetItemStatus(heatModes["cumulative"])=="已选中"&&AutomationProperties.GetItemStatus(trendModes["daily"])=="已选中","heatmap cumulative mode is an independent weekly staircase ending at the 180-day total");panel.SetHeatAggregation("daily");
                 DateTime customFrom=today.AddHours(8),customTo=today.AddHours(9);long customStart=LocalCodexUsage.Unix(customFrom);var customDays=DailyUsage.Empty(customTo,1);var customTimeline=UsageTimeline.Empty(customStart,LocalCodexUsage.Unix(customTo),300);
-                Add(customDays[0],"fixture-alpha",1000,1);Add(customTimeline[0],"fixture-alpha",300,.3m);Add(customTimeline.Last(),"fixture-alpha",700,.7m);
+                Add(customDays[0],"fixture-alpha",1000,1,600);Add(customTimeline[0],"fixture-alpha",300,.3m,210);Add(customTimeline.Last(),"fixture-alpha",700,.7m,350);
                 var customSnapshot=new UsageSnapshot{Daily=customDays,Hourly=DailyUsage.Hours(customTo),Timeline=customTimeline,TimelineStepSeconds=300,HourlyThrough=24,SourceName="Generated custom fixture"};
                 panel.BeginCustomRange(customFrom,customTo,"Generated chart fixture");var rangeButtons=StabilityProbe.Field<System.Collections.Generic.Dictionary<int,Button>>(panel,"ranges");var customButton=StabilityProbe.Field<Button>(panel,"customRangeButton");
                 StabilityProbe.Check(rangeButtons.Values.All(b=>AutomationProperties.GetItemStatus(b)=="未选中")&&AutomationProperties.GetItemStatus(customButton)=="已选中"&&heat.Days.Length==180,"selecting a custom curve clears preset highlights without replacing the 180-day heatmap");
                 panel.ApplyCustomRange(customSnapshot,"Generated chart fixture",customFrom,customTo);await Task.Delay(35);window.UpdateLayout();
                 StabilityProbe.Check(trend.Days.Length==customTimeline.Length&&trend.Days[0].Date.Length==19&&trend.Days.Sum(d=>d.Tokens)==1000,"custom trend renders the selected timestamp buckets instead of reusing daily aggregates");
+                StabilityProbe.Check(cacheTrend.IsRate&&cacheTrend.Days.Length==customTimeline.Length&&cacheTrend.WindowDays==customTimeline.Length,"cache hit chart follows the exact custom timestamp buckets");
                 StabilityProbe.Check(heat.Days.Length==180&&heat.Days[0].Date==data.Daily[0].Date&&AutomationProperties.GetItemStatus(customButton)=="已选中","the completed custom curve leaves heatmap dates and custom selection state unchanged");
-                panel.SetAggregation("weekly");StabilityProbe.Check(trend.Days.Length==1&&DateTime.ParseExact(trend.Days[0].Date,"yyyy-MM-dd",CultureInfo.InvariantCulture).DayOfWeek==DayOfWeek.Sunday&&trend.Days[0].Tokens==1000,"weekly mode groups a custom interval into Sunday-based buckets");
-                panel.SetAggregation("cumulative");StabilityProbe.Check(trend.Days.Length==customTimeline.Length&&trend.Days.Last().Tokens==1000,"cumulative mode ends at the exact custom interval total");panel.SetAggregation("daily");
+                panel.SetAggregation("weekly");StabilityProbe.Check(trend.Days.Length==1&&DateTime.ParseExact(trend.Days[0].Date,"yyyy-MM-dd",CultureInfo.InvariantCulture).DayOfWeek==DayOfWeek.Sunday&&trend.Days[0].Tokens==1000&&cacheTrend.Days.Length==customTimeline.Length,"weekly token mode does not aggregate the cache hit curve");
+                panel.SetAggregation("cumulative");StabilityProbe.Check(trend.Days.Length==customTimeline.Length&&trend.Days.Last().Tokens==1000&&cacheTrend.Days.Length==customTimeline.Length,"cumulative token mode does not alter the cache hit curve");panel.SetAggregation("daily");
                 panel.SetRange(7);await Task.Delay(25);window.UpdateLayout();
                 var costButton=(Button)GuideStabilityProbe.Find(panel,"ChartMetricCost");costButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));await Task.Delay(35);
-                StabilityProbe.Check(trend.IsCost&&heat.IsCost&&trend.Selected==-1&&detail.Heading.Contains("未选择"),"clicking the cost metric switches both charts without automatically selecting a trend period");
+                StabilityProbe.Check(trend.IsCost&&heat.IsCost&&cacheTrend.IsRate&&!cacheTrend.IsCost&&trend.Selected==-1&&detail.Heading.Contains("未选择"),"clicking the cost metric leaves the independent cache hit rate curve unchanged");
                 panel.SetModel("fixture-alpha");await Task.Delay(25);
                 var filtered=StabilityProbe.Field<UsageSnapshot>(panel,"snapshot");comparison=ChartComparison.Calculate(filtered.Daily,7,today,true,false);
                 StabilityProbe.Check(comparison.Current==14&&comparison.Previous==7&&Math.Abs(comparison.ChangePercent.Value-100)<.001&&filtered.Daily.Last().Tokens==900000,"model filtering applies to API estimates, token totals and complete-period changes together");
@@ -107,6 +113,7 @@ namespace CodexUserData
                 StabilityProbe.Check(trend.Selected==selected&&detail.Heading==heading&&heat.Selected==data.Daily.Length-3&&!trend.IsCost,"manual trend and heatmap selections stay independent when the metric changes");
                 panel.SetRange(1);panel.SetMetric(true);await Task.Delay(35);window.UpdateLayout();
                 StabilityProbe.Check(trend.IsHourly&&trend.Selected==-1&&trend.Days.Length==24&&detail.Heading.Contains("未选择"),"switching from daily to hourly data clears the old selection without choosing a replacement");
+                StabilityProbe.Check(cacheTrend.IsRate&&cacheTrend.IsHourly&&cacheTrend.Days.Length==24&&cacheTrend.WindowDays==1,"the cache hit chart follows the token chart into today's hourly range");
                 double max=StabilityProbe.Field<double>(trend,"max");
                 StabilityProbe.Check(max>0&&max<.00001&&trend.PointFor(0).Y<StabilityProbe.Field<Rect>(trend,"plot").Bottom,"a tiny model-filtered cost produces a visible nonzero curve instead of a token-sized axis");
                 int builds=trend.GeometryBuilds;trend.Highlight("fixture-alpha");trend.Choose(0,false);await Task.Delay(30);panel.Apply(data,"Generated chart fixture");await Task.Delay(30);

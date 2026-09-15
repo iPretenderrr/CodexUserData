@@ -36,6 +36,10 @@ namespace CodexUserData
     internal static class ChartValue
     {
         internal static decimal Of(DailyUsage day,bool cost){return cost?day.Models.Sum(m=>m.EquivalentUsd):day.Tokens;}
+        internal static double CacheRate(DailyUsage day)
+        {
+            long eligible=day.Input+day.CacheRead+day.CacheWrite;return eligible>0?100.0*day.CacheRead/eligible:0;
+        }
         internal static string Money(decimal value)
         {return "$"+(value>0&&value<.0001m?value.ToString("0.##E+0",CultureInfo.InvariantCulture):value.ToString(value>0&&value<.01m?"0.######":"N2",CultureInfo.InvariantCulture));}
         internal static string Axis(double value,bool cost)
@@ -164,10 +168,11 @@ namespace CodexUserData
         internal string HeatMode {get;private set;}
         private bool HeatColumns {get{return IsHeatmap&&HeatMode!="daily";}}
         internal bool IsCost {get;private set;}
+        internal bool IsRate {get;private set;}
         private int through;
         internal string HighlightedModel {get;private set;}
         internal int GeometryBuilds {get;private set;}
-        private sealed class Layer {internal string Model;internal StreamGeometry Area;internal double[] Upper;}
+        private sealed class Layer {internal string Model;internal StreamGeometry Area,Line;internal double[] Upper;}
         private readonly List<Layer> layers=new List<Layer>();
         internal void Highlight(string model){if(HighlightedModel==model)return;HighlightedModel=model;AutomationProperties.SetItemStatus(this,model==null?"全部模型":"高亮："+model);InvalidateVisual();}
         internal int Selected=-1,Hovered=-1;
@@ -219,18 +224,18 @@ namespace CodexUserData
             protected override bool IsControlElementCore(){return true;}
             protected override bool IsContentElementCore(){return true;}
         }
-        internal void SetData(DailyUsage[] days,int count,bool hourly=false,int availableHours=24,bool cost=false,string heatMode="daily")
+        internal void SetData(DailyUsage[] days,int count,bool hourly=false,int availableHours=24,bool cost=false,string heatMode="daily",bool rate=false)
         {
             string hoveredDate=Hovered>=0&&Hovered<Days.Length?Days[Hovered].Date:null;
-            int oldCount=WindowDays;Days=days??new DailyUsage[0];IsHourly=hourly;IsCost=cost;HeatMode=IsHeatmap&&(heatMode=="weekly"||heatMode=="cumulative")?heatMode:"daily";through=hourly?Math.Max(0,Math.Min(Days.Length,availableHours)):Days.Length;string next=hourly+"/"+through+"/"+cost+"/"+HeatMode+"/"+Signature(Days);WindowDays=count;
+            int oldCount=WindowDays;Days=days??new DailyUsage[0];IsHourly=hourly;IsRate=!IsHeatmap&&rate;IsCost=!IsRate&&cost;HeatMode=IsHeatmap&&(heatMode=="weekly"||heatMode=="cumulative")?heatMode:"daily";through=hourly?Math.Max(0,Math.Min(Days.Length,availableHours)):Days.Length;string next=hourly+"/"+through+"/"+IsCost+"/"+IsRate+"/"+HeatMode+"/"+Signature(Days);WindowDays=count;
             bool dataChanged=next!=signature;if(!dataChanged&&oldCount==count)return;signature=next;cachedDrawing=null;layers.Clear();
             // A different visible period does not change the underlying model series.
             if(dataChanged)
             {
-                series.Clear();foreach(string model in Days.SelectMany(d=>d.Models).Select(m=>m.Model).Distinct().OrderBy(m=>m))series[model]=new double[Days.Length];
-                for(int i=0;i<Days.Length;i++)foreach(var m in Days[i].Models)series[m.Model][i]+=cost?(double)m.EquivalentUsd:m.Tokens;
+                series.Clear();if(!IsRate){foreach(string model in Days.SelectMany(d=>d.Models).Select(m=>m.Model).Distinct().OrderBy(m=>m))series[model]=new double[Days.Length];
+                for(int i=0;i<Days.Length;i++)foreach(var m in Days[i].Models)series[m.Model][i]+=IsCost?(double)m.EquivalentUsd:m.Tokens;}
             }
-            AutomationProperties.SetName(this,IsHeatmap?(cost?"每日 API 估算费用热度图":"每日用量热度图"):(cost?"API 估算费用趋势 · USD":"Token 用量趋势"));
+            AutomationProperties.SetName(this,IsHeatmap?(IsCost?"每日 API 估算费用热度图":"每日用量热度图"):(IsRate?"缓存命中率趋势":IsCost?"API 估算费用趋势 · USD":"Token 用量趋势"));
             if(Selected>=Days.Length)Selected=-1;Hovered=hoveredDate==null?-1:Array.FindIndex(Days,d=>d.Date==hoveredDate);if(Hovered<0)tip.IsOpen=false;else UpdateTip(Days[Hovered]);if(IsHeatmap&&ActualWidth>0)Height=HeatHeight(ActualWidth);InvalidateVisual();
         }
         internal double HeatHeight(double width)
@@ -244,10 +249,14 @@ namespace CodexUserData
             if(index<0||index>=Days.Length){if(Hovered!=-1){Hovered=-1;tip.IsOpen=false;InvalidateVisual();}return;}
             if(!clicked&&Hovered==index)return;Hovered=index;if(clicked)Selected=index;
             DailyUsage day=Days[index];UpdateTip(day);tip.PlacementTarget=this;tip.Placement=PlacementMode.Mouse;tip.IsOpen=IsMouseOver;
-            AutomationProperties.SetHelpText(this,Label(day)+"，"+(IsCost?ChartValue.Money(ChartValue.Of(day,true))+" USD · API 估算":TokenText.Full(day.Tokens)+" Tokens"));if(Pick!=null)Pick(index,clicked);InvalidateVisual();
+            AutomationProperties.SetHelpText(this,Label(day)+"，"+(IsRate?ChartValue.CacheRate(day).ToString("0.0",CultureInfo.InvariantCulture)+"% 缓存命中率":IsCost?ChartValue.Money(ChartValue.Of(day,true))+" USD · API 估算":TokenText.Full(day.Tokens)+" Tokens"));if(Pick!=null)Pick(index,clicked);InvalidateVisual();
         }
         private static string Label(DailyUsage day){return String.IsNullOrEmpty(day.DisplayLabel)?day.Date:day.DisplayLabel;}
-        private void UpdateTip(DailyUsage day){string tokens=TokenText.Compact(day.Tokens)+" Tokens",cost=ChartValue.Money(ChartValue.Of(day,true))+" USD · API 估算";tip.Content=Label(day)+"\n"+(IsCost?cost+"\n"+tokens:tokens+"\n"+cost)+"\n点击固定下方明细";}
+        private void UpdateTip(DailyUsage day)
+        {
+            if(IsRate){long eligible=day.Input+day.CacheRead+day.CacheWrite;tip.Content=Label(day)+"\n"+ChartValue.CacheRate(day).ToString("0.0",CultureInfo.InvariantCulture)+"% 缓存命中率\n缓存读取 "+TokenText.Compact(day.CacheRead)+" / 可缓存输入 "+TokenText.Compact(eligible);return;}
+            string tokens=TokenText.Compact(day.Tokens)+" Tokens",cost=ChartValue.Money(ChartValue.Of(day,true))+" USD · API 估算";tip.Content=Label(day)+"\n"+(IsCost?cost+"\n"+tokens:tokens+"\n"+cost)+"\n点击固定下方明细";
+        }
 
         internal int Hit(Point p)
         {
@@ -264,8 +273,9 @@ namespace CodexUserData
         internal Point PointFor(int index)
         {
             if(IsHeatmap){if(HeatColumns)return new Point(plot.Left+index*pitch+cell/2,plot.Bottom-pitch+cell/2);int position=index+offset;return new Point(plot.Left+(position/7)*pitch+cell/2,plot.Top+(position%7)*pitch+cell/2);}
-            return new Point(IsHourly?plot.Left+(index+.5)*plot.Width/24:plot.Left+(index-first)*plot.Width/Math.Max(1,Days.Length-first-1),plot.Bottom-((double)ChartValue.Of(Days[index],IsCost)/max)*plot.Height);
+            return new Point(IsHourly?plot.Left+(index+.5)*plot.Width/24:plot.Left+(index-first)*plot.Width/Math.Max(1,Days.Length-first-1),plot.Bottom-MetricValue(Days[index])/max*plot.Height);
         }
+        private double MetricValue(DailyUsage day){return IsRate?ChartValue.CacheRate(day):(double)ChartValue.Of(day,IsCost);}
         private void Text(DrawingContext dc,string text,double x,double y,double size,Brush color)
         {
             dc.DrawText(new FormattedText(text,CultureInfo.InvariantCulture,FlowDirection.LeftToRight,new Typeface("Segoe UI, Microsoft YaHei UI"),size,color,VisualTreeHelper.GetDpi(this).PixelsPerDip),new Point(x,y));
@@ -283,7 +293,7 @@ namespace CodexUserData
             {
                 int active=Hovered>=first?Hovered:Selected>=first?Selected:-1;
                 if(active>=first&&active<through){Point point=PointFor(active);dc.DrawLine(new Pen(Theme.Muted,.8),new Point(point.X,plot.Top),new Point(point.X,plot.Bottom));
-                    foreach(var layer in layers){if(HighlightedModel!=null&&HighlightedModel!=layer.Model)continue;point.Y=plot.Bottom-layer.Upper[active-first]/max*plot.Height;dc.DrawEllipse(ModelColors.For(layer.Model),new Pen(Theme.Ink,.8),point,3,3);}}
+                    foreach(var layer in layers){if(HighlightedModel!=null&&HighlightedModel!=layer.Model)continue;point.Y=plot.Bottom-layer.Upper[active-first]/max*plot.Height;dc.DrawEllipse(IsRate?Theme.Accent:ModelColors.For(layer.Model),new Pen(Theme.Ink,.8),point,3,3);}}
             }
         }
         private void DrawHeatmap(DrawingContext dc)
@@ -328,9 +338,9 @@ namespace CodexUserData
         {
             first=IsHourly?0:Math.Max(0,Days.Length-WindowDays);int count=through-first;
             double left=IsCost?72:46;plot=new Rect(left,14,Math.Max(1,ActualWidth-left-8),Math.Max(40,ActualHeight-44));
-            max=NiceMax(count>0?Days.Skip(first).Take(count).Max(d=>(double)ChartValue.Of(d,IsCost)):0);
+            max=IsRate?100:NiceMax(count>0?Days.Skip(first).Take(count).Max(d=>MetricValue(d)):0);
             var dashed=new Pen(Theme.Line,.7){DashStyle=new DashStyle(new double[]{3,4},0)};
-            for(int line=0;line<=4;line++){double y=plot.Bottom-plot.Height*line/4;dc.DrawLine(dashed,new Point(plot.Left,y),new Point(plot.Right,y));Text(dc,ChartValue.Axis(max*line/4,IsCost),0,y-6,9,Theme.Muted);}
+            for(int line=0;line<=4;line++){double y=plot.Bottom-plot.Height*line/4;dc.DrawLine(dashed,new Point(plot.Left,y),new Point(plot.Right,y));Text(dc,IsRate?(max*line/4).ToString("0",CultureInfo.InvariantCulture)+"%":ChartValue.Axis(max*line/4,IsCost),0,y-6,9,Theme.Muted);}
             if(IsHourly)
             {
                 foreach(int hour in new[]{0,6,12,18,23}){double x=plot.Left+hour*plot.Width/24;Text(dc,hour.ToString("00")+":00",Math.Min(plot.Right-28,x),plot.Bottom+8,9,Theme.Muted);}
@@ -341,6 +351,7 @@ namespace CodexUserData
                 int labels=Math.Max(2,Math.Min(7,(int)(plot.Width/65)));for(int i=0;i<labels;i++){int index=first+(int)Math.Round((count-1)*i/(double)(labels-1));Point point=PointFor(index);string label=AxisDate(Days[index].Date);double labelWidth=label.Length>5?62:31;Text(dc,label,Math.Max(plot.Left,Math.Min(plot.Right-labelWidth,point.X-labelWidth/2)),plot.Bottom+8,9,Theme.Muted);}
             }
             layers.Clear();GeometryBuilds++;if(count<=0)return;
+            if(IsRate){double[] values=Days.Skip(first).Take(count).Select(MetricValue).ToArray();layers.Add(new Layer{Model="cache-hit-rate",Upper=values,Area=Band(values,new double[count]),Line=Curve(values)});return;}
             double[] lower=new double[count];var names=series.Keys.OrderBy(ModelOrder).ThenBy(m=>m).ToArray();
             foreach(string name in names)
             {
@@ -360,7 +371,12 @@ namespace CodexUserData
         private void DrawAreas(DrawingContext dc)
         {
             // Hover changes opacity only. Shared frozen paths keep highlighting fast even at 180 days.
+            if(IsRate&&layers.Count>0){dc.PushOpacity(.2);dc.DrawGeometry(Theme.Accent,null,layers[0].Area);dc.Pop();dc.DrawGeometry(null,new Pen(Theme.Accent,2),layers[0].Line);return;}
             foreach(var layer in layers){bool active=HighlightedModel==layer.Model;dc.PushOpacity(HighlightedModel==null?.92:active?1:.15);dc.DrawGeometry(ModelColors.For(layer.Model),active?new Pen(Theme.Ink,1.1):null,layer.Area);dc.Pop();}
+        }
+        private StreamGeometry Curve(double[] values)
+        {
+            var shape=new StreamGeometry();using(var context=shape.Open()){Point firstPoint=PointFor(first);firstPoint.Y=plot.Bottom-values[0]/max*plot.Height;context.BeginFigure(firstPoint,false,false);Point previous=firstPoint;for(int i=1;i<values.Length;i++){Point next=PointFor(first+i);next.Y=plot.Bottom-values[i]/max*plot.Height;Segment(context,previous,next);previous=next;}}shape.Freeze();return shape;
         }
         private StreamGeometry Band(double[] upper,double[] lower)
         {
@@ -564,13 +580,13 @@ namespace CodexUserData
     internal sealed class HistoryPanel : StackPanel
     {
         internal static readonly int[] Periods={1,7,14,30,60,90,180};
-        private readonly Border heatCard,trendCard;
-        private readonly UsageChart heat,trend;
+        private readonly Border heatCard,trendCard,cacheCard;
+        private readonly UsageChart heat,trend,cacheTrend;
         private readonly Grid heatHeader,trendHeader;
         private readonly WrapPanel heatModes,trendActions;
         private readonly UsageDetails heatDetail=new UsageDetails("Heatmap","热度图 · 选中明细"),trendDetail=new UsageDetails("Trend","曲线图 · 时段明细");
         private readonly ChartDetailSelection heatSelection,trendSelection;
-        private readonly TextBlock sourceLabel,sum,average,value,timing,summaryLabel,averageLabel,valueLabel,heatTitle,heatHint,trendTitle,comparisonText;
+        private readonly TextBlock sourceLabel,sum,average,value,timing,summaryLabel,averageLabel,valueLabel,heatTitle,heatHint,trendTitle,comparisonText,cacheHint;
         private readonly UniformGrid summary;
         private readonly Button tokensMetric,costMetric;
         private readonly Border coverage;
@@ -628,13 +644,17 @@ namespace CodexUserData
             comparisonText=Theme.Text("等待当前来源的数据",10,Theme.Muted);comparisonText.TextWrapping=TextWrapping.Wrap;comparisonText.LineHeight=16;trendBody.Children.Add(comparisonText);AutomationProperties.SetAutomationId(comparisonText,"TrendComparison");
             trendBody.Children.Add(legend);trend=new UsageChart(false);trendBody.Children.Add(trend);AutomationProperties.SetAutomationId(trend,"TrendChart");AutomationProperties.SetAutomationId(heat,"HeatmapChart");
             trendBody.Children.Add(DetailViewport(trendDetail));
+            var cacheBody=new StackPanel();cacheCard=Card(cacheBody);cacheCard.Margin=new Thickness(0,9,0,0);Children.Add(cacheCard);
+            var cacheTitle=Theme.Text("缓存命中率趋势",13,Theme.Ink);cacheTitle.TextWrapping=TextWrapping.Wrap;cacheBody.Children.Add(cacheTitle);
+            cacheHint=Theme.Text("时间范围与 Token 用量趋势同步",10,Theme.Muted);cacheHint.TextWrapping=TextWrapping.Wrap;cacheHint.Margin=new Thickness(0,5,0,6);cacheBody.Children.Add(cacheHint);
+            cacheTrend=new UsageChart(false);cacheBody.Children.Add(cacheTrend);AutomationProperties.SetAutomationId(cacheTrend,"CacheHitRateChart");
             coverageText=Theme.Text("",10,Theme.Warning);coverageText.TextWrapping=TextWrapping.Wrap;coverageText.Margin=new Thickness(3,7,3,3);
             var coverageBody=new StackPanel();coverageText.Visibility=Visibility.Collapsed;var toggleCoverage=Theme.Button("ⓘ 数据覆盖说明  ⌄","展开数据覆盖说明",30);toggleCoverage.Foreground=Theme.Warning;toggleCoverage.HorizontalAlignment=HorizontalAlignment.Left;toggleCoverage.FontSize=10;
             toggleCoverage.Click+=delegate{coverageText.Visibility=coverageText.Visibility==Visibility.Visible?Visibility.Collapsed:Visibility.Visible;};coverageBody.Children.Add(toggleCoverage);coverageBody.Children.Add(coverageText);
             coverage=new Border{Child=coverageBody,Margin=new Thickness(2,10,0,0),Visibility=Visibility.Collapsed};Children.Add(coverage);
             heatSelection=new ChartDetailSelection(heat,heatDetail);trendSelection=new ChartDetailSelection(trend,trendDetail,false,false);
-            PreviewMouseWheel+=delegate{heatSelection.PauseForScroll();trendSelection.PauseForScroll();};
-            SizeChanged+=delegate{ReflowChartHeaders();heat.Height=heat.HeatHeight(Math.Max(180,ActualWidth-24));trend.Height=ActualWidth<420?280:ActualWidth<760?330:380;summary.Columns=ActualWidth<360?2:3;};SetRange(30);SetHeatAggregation("daily");SetAggregation("daily");SetMetric(false);
+            PreviewMouseWheel+=delegate{heatSelection.PauseForScroll();trendSelection.PauseForScroll();cacheTrend.HoverPausedUntil=DateTime.UtcNow.AddMilliseconds(350);};
+            SizeChanged+=delegate{ReflowChartHeaders();heat.Height=heat.HeatHeight(Math.Max(180,ActualWidth-24));trend.Height=ActualWidth<420?280:ActualWidth<760?330:380;cacheTrend.Height=ActualWidth<420?220:ActualWidth<760?250:280;summary.Columns=ActualWidth<360?2:3;};SetRange(30);SetHeatAggregation("daily");SetAggregation("daily");SetMetric(false);
         }
         private static Grid ChartHeader()
         {
@@ -671,7 +691,7 @@ namespace CodexUserData
         }
         internal void SetRange(int count)
         {
-            int next=Periods.Contains(count)?count:30;if(rangeInitialized&&days==next&&customRange==null)return;rangeInitialized=true;if(days!=next||customRange!=null)trendSelection.Reset();
+            int next=Periods.Contains(count)?count:30;if(rangeInitialized&&days==next&&customRange==null)return;rangeInitialized=true;if(days!=next||customRange!=null){trendSelection.Reset();cacheTrend.ClearPointer();}
             days=next;customRange=null;customSnapshot=null;customScope=null;customLoading=false;customRangeButton.Content="自定义";UpdateRangeButtons();
             // The selected preset changes the visible window even when the source snapshot
             // is unchanged, so force the lightweight view pass to update totals and details.
@@ -712,7 +732,7 @@ namespace CodexUserData
         private void UpdateTrendTitle(){string mode=trendAggregation=="weekly"?"每周":trendAggregation=="cumulative"?"累计":"每日";trendTitle.Text=(cost?"API 估算费用趋势 · USD":"Token 用量趋势")+" · "+mode;}
         internal void Configure(bool showHeat,bool showTrend,int count,string aggregationMode="daily",string heatAggregationMode="daily")
         {
-            heatCard.Visibility=showHeat?Visibility.Visible:Visibility.Collapsed;trendCard.Visibility=showTrend?Visibility.Visible:Visibility.Collapsed;Visibility=showHeat||showTrend?Visibility.Visible:Visibility.Collapsed;SetRange(count);SetHeatAggregation(heatAggregationMode);SetAggregation(aggregationMode);
+            heatCard.Visibility=showHeat?Visibility.Visible:Visibility.Collapsed;trendCard.Visibility=showTrend?Visibility.Visible:Visibility.Collapsed;cacheCard.Visibility=showTrend?Visibility.Visible:Visibility.Collapsed;Visibility=showHeat||showTrend?Visibility.Visible:Visibility.Collapsed;SetRange(count);SetHeatAggregation(heatAggregationMode);SetAggregation(aggregationMode);
         }
         private static DailyUsage[] Filter(DailyUsage[] data,string model)
         {
@@ -737,7 +757,7 @@ namespace CodexUserData
         }
         internal void BeginCustomRange(DateTime from,DateTime to,string scope)
         {
-            customRange=UsageRangeSpec.Create(from,to);customScope=scope;customSnapshot=null;customLoading=true;snapshot=null;viewSignature=null;trendSelection.Reset();sourceLabel.Tag=scope;customRangeButton.Content="读取中…";UpdateRangeButtons();sourceLabel.Text=scope+" · 曲线 "+customRange.Label+" · 读取中";comparisonText.Text="正在读取自定义时间范围…";trendDetail.Clear("正在读取自定义时间范围…");UpdateTrend();
+            customRange=UsageRangeSpec.Create(from,to);customScope=scope;customSnapshot=null;customLoading=true;snapshot=null;viewSignature=null;trendSelection.Reset();cacheTrend.ClearPointer();sourceLabel.Tag=scope;customRangeButton.Content="读取中…";UpdateRangeButtons();sourceLabel.Text=scope+" · 曲线 "+customRange.Label+" · 读取中";comparisonText.Text="正在读取自定义时间范围…";trendDetail.Clear("正在读取自定义时间范围…");UpdateTrend();
         }
         internal void ApplyCustomRange(UsageSnapshot data,string scope,DateTime from,DateTime to)
         {
@@ -775,6 +795,10 @@ namespace CodexUserData
             DailyUsage[] visible=custom?raw:hourly?raw.Take(snapshot==null?0:snapshot.HourlyThrough).ToArray():raw.Skip(Math.Max(0,raw.Length-days)).ToArray();
             DailyUsage[] chartData=trendAggregation=="daily"?raw:UsageTrendSeries.Build(visible,trendAggregation);bool chartHourly=trendAggregation=="daily"&&hourly;int window=trendAggregation=="daily"?(custom?raw.Length:days):chartData.Length;
             trend.SetData(chartData,window,chartHourly,chartHourly&&snapshot!=null?snapshot.HourlyThrough:chartData.Length,cost);
+            // Reuse the same already-filtered buckets and range. Cache rate remains a
+            // point-in-time ratio, independent from the token chart aggregation mode.
+            int cacheWindow=custom?raw.Length:days;cacheTrend.SetData(raw,cacheWindow,hourly,hourly&&snapshot!=null?snapshot.HourlyThrough:raw.Length,false,"daily",true);
+            cacheHint.Text=customLoading?"正在读取自定义时间范围…":custom&&customRange!=null?"自定义时间 · "+customRange.Label:days==1?"当天 · 按小时显示":"近 "+days+" 天 · 按日显示";
             long total=visible.Sum(d=>d.Tokens);decimal amount=visible.Sum(d=>ChartValue.Of(d,cost));sum.Text=cost?ChartValue.Money(amount):TokenText.Compact(total);sum.ToolTip=sum.Text+(cost?" USD · API 估算":" Tokens");
             summaryLabel.Text=(custom?"自定义区间":days==1?"今日已记录":"近 "+days+" 天")+(cost?" · USD":" · Tokens");averageLabel.Text=trendAggregation=="weekly"?"周均":custom&&customStep<86400?"时段均值":custom?"按日均值":days==1?"已记录小时均值":"已展示日期均值";
             int divisor=Math.Max(1,trendAggregation=="weekly"?chartData.Length:visible.Length);average.Text=cost?ChartValue.Money(amount/divisor):TokenText.Compact(total/divisor);average.ToolTip=average.Text+(cost?" USD":" Tokens")+"；含未结束时段";
