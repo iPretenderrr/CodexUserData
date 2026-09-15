@@ -83,6 +83,34 @@ namespace CodexUserData
             return Enumerable.Range(0,24).Select(h=>new DailyUsage{Date=today.Date.AddHours(h).ToString("yyyy-MM-dd HH:mm",CultureInfo.InvariantCulture)}).ToArray();
         }
     }
+    // A custom range is kept as a compact cache key. The values are local wall-clock
+    // timestamps; readers convert them to Unix seconds at the storage boundary.
+    // Keeping this separate from preset strings leaves the existing quick periods intact.
+    internal sealed class UsageRangeSpec
+    {
+        internal DateTime From,To;
+        internal string Key{get{return Encode(From,To);}}
+        internal string Label{get{return Format(From)+" ～ "+Format(To);}}
+        internal static string Encode(DateTime from,DateTime to)
+        {
+            from=DateTime.SpecifyKind(from,DateTimeKind.Local);to=DateTime.SpecifyKind(to,DateTimeKind.Local);
+            return "custom:"+from.ToString("yyyyMMddHHmmss",CultureInfo.InvariantCulture)+":"+to.ToString("yyyyMMddHHmmss",CultureInfo.InvariantCulture);
+        }
+        internal static string Format(DateTime value){return DateTime.SpecifyKind(value,DateTimeKind.Local).ToString("yyyy-MM-dd HH:mm:ss",CultureInfo.InvariantCulture);}
+        internal static bool TryParse(string value,out UsageRangeSpec range)
+        {
+            range=null;if(String.IsNullOrWhiteSpace(value)||!value.StartsWith("custom:",StringComparison.Ordinal))return false;
+            string[] parts=value.Substring(7).Split(':');if(parts.Length!=2)return false;DateTime from,to;
+            if(!DateTime.TryParseExact(parts[0],"yyyyMMddHHmmss",CultureInfo.InvariantCulture,DateTimeStyles.None,out from)||!DateTime.TryParseExact(parts[1],"yyyyMMddHHmmss",CultureInfo.InvariantCulture,DateTimeStyles.None,out to))return false;
+            from=DateTime.SpecifyKind(from,DateTimeKind.Local);to=DateTime.SpecifyKind(to,DateTimeKind.Local);if(to<from)return false;
+            range=new UsageRangeSpec{From=from,To=to};return true;
+        }
+        internal static UsageRangeSpec Create(DateTime from,DateTime to)
+        {
+            from=DateTime.SpecifyKind(from,DateTimeKind.Local);to=DateTime.SpecifyKind(to,DateTimeKind.Local);if(to<from)throw new ArgumentException("结束时间不能早于开始时间。");
+            return new UsageRangeSpec{From=from,To=to};
+        }
+    }
     internal sealed class UsageSnapshot
     {
         internal long NextChangeAt=Int64.MaxValue;
@@ -204,6 +232,8 @@ WHERE r.date >= ?1 AND r.date <= ?2
                 throw new FileNotFoundException("找不到 CC Switch 数据库，请确认 CC Switch 已初始化或选择正确的数据库。");
 
             DateTime localNow = now.Kind == DateTimeKind.Utc ? now.ToLocalTime() : DateTime.SpecifyKind(now, DateTimeKind.Local);
+            UsageRangeSpec custom;
+            if (UsageRangeSpec.TryParse(range,out custom)) return ReadCustom(dbPath,custom.From,custom.To,app,localNow);
             DateTime? start;
             switch (range)
             {
@@ -305,6 +335,47 @@ WHERE r.date >= ?1 AND r.date <= ?2
                 result.LatestRecord = latestArchive + "（历史汇总）";
             return result;
         }
+        internal static UsageSnapshot ReadCustom(string dbPath,DateTime from,DateTime to,string app,DateTime now)
+        {
+            if (String.IsNullOrWhiteSpace(dbPath) || !File.Exists(dbPath))
+                throw new FileNotFoundException("找不到 CC Switch 数据库，请确认 CC Switch 已初始化或选择正确的数据库。");
+            DateTime localFrom=DateTime.SpecifyKind(from,DateTimeKind.Local),localTo=DateTime.SpecifyKind(to,DateTimeKind.Local);
+            if(localTo<localFrom)throw new ArgumentException("结束时间不能早于开始时间。");
+            long startSeconds=ToUnixSeconds(localFrom),endSeconds=ToUnixSeconds(localTo);
+            int dayCount=checked((localTo.Date-localFrom.Date).Days+1);
+            var result=new UsageSnapshot{Daily=DailyUsage.Empty(localTo,dayCount),Hourly=DailyUsage.Hours(localTo),HourlyThrough=24,LatestRecord="暂无记录"};
+            DateTime firstFull=localFrom.Date.AddDays(1),lastFull=localTo.Date.AddDays(-1);
+            string firstRollup=firstFull<=lastFull?firstFull.ToString("yyyy-MM-dd",CultureInfo.InvariantCulture):"9999-12-31";
+            string lastRollup=firstFull<=lastFull?lastFull.ToString("yyyy-MM-dd",CultureInfo.InvariantCulture):"0001-01-01";
+            double detailCost=0,archivedCost=0;long? latestDetail=null;string latestArchive=null;
+            using(ReadConnection db=new ReadConnection(dbPath))
+            {
+                db.Execute("PRAGMA query_only = ON");db.Execute("BEGIN");
+                try
+                {
+                    using(ReadStatement statement=db.Prepare(DetailSql))
+                    {
+                        statement.Bind(1,startSeconds);statement.Bind(2,endSeconds);statement.Bind(3,app??String.Empty);statement.ReadRow();
+                        result.DetailRequests=statement.Int64(0);result.Requests=result.DetailRequests;result.InputTokens=statement.Int64(1);result.OutputTokens=statement.Int64(2);result.CacheReadTokens=statement.Int64(3);result.CacheCreationTokens=statement.Int64(4);detailCost=statement.Double(5);result.SuccessCount=statement.Int64(6);if(!statement.IsNull(7))latestDetail=statement.Int64(7);
+                    }
+                    if(firstFull<=lastFull)
+                    {
+                        using(ReadStatement statement=db.Prepare(RollupSql))
+                        {
+                            statement.Bind(1,firstRollup);statement.Bind(2,lastRollup);statement.Bind(3,app??String.Empty);statement.ReadRow();result.ArchivedRequests=statement.Int64(0);
+                            checked{result.Requests+=result.ArchivedRequests;result.InputTokens+=statement.Int64(1);result.OutputTokens+=statement.Int64(2);result.CacheReadTokens+=statement.Int64(3);result.CacheCreationTokens+=statement.Int64(4);result.SuccessCount+=statement.Int64(6);}archivedCost=statement.Double(5);latestArchive=statement.Text(7);
+                        }
+                    }
+                    ReadDailyCustom(db,result.Daily,startSeconds,endSeconds,firstRollup,lastRollup,app);ReadModels(db,result,startSeconds,endSeconds,firstRollup,lastRollup,app);
+                }
+                finally{db.Execute("ROLLBACK");}
+            }
+            long cacheableInput;checked{cacheableInput=result.InputTokens+result.CacheReadTokens+result.CacheCreationTokens;result.TotalTokens=cacheableInput+result.OutputTokens;}
+            result.CacheHitRate=cacheableInput>0?100.0*result.CacheReadTokens/cacheableInput:0.0;result.HourlyUnallocatedTokens=0;result.SuccessRate=result.Requests>0?100.0*result.SuccessCount/result.Requests:0.0;
+            result.CostUsd=Decimal.Parse((detailCost+archivedCost).ToString("F6",CultureInfo.InvariantCulture),CultureInfo.InvariantCulture);
+            if(latestDetail.HasValue)result.LatestRecord=Epoch.AddSeconds(latestDetail.Value).ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss",CultureInfo.InvariantCulture);else if(!String.IsNullOrEmpty(latestArchive))result.LatestRecord=latestArchive+"（历史汇总）";
+            return result;
+        }
         internal static string[] ModelCatalog(string path)
         {
             var models=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -355,6 +426,21 @@ AND (?3='' OR (CASE WHEN r.app_type='claude-desktop' THEN 'claude' ELSE r.app_ty
             {
                 rows.Bind(1,days[0].Date);rows.Bind(2,lastRollup);rows.Bind(3,app??"");AddDailyRows(rows,byDate);
             }
+        }
+        private static void ReadDailyCustom(ReadConnection db,DailyUsage[] days,long from,long until,string firstRollup,string lastRollup,string app)
+        {
+            var byDate=new Dictionary<string,DailyUsage>();foreach(var day in days)byDate[day.Date]=day;
+            var calendar=new StringBuilder("WITH calendar(day,lo,hi) AS (VALUES ");
+            for(int i=0;i<days.Length;i++){DateTime day=DateTime.ParseExact(days[i].Date,"yyyy-MM-dd",CultureInfo.InvariantCulture);if(i>0)calendar.Append(',');calendar.Append("('").Append(days[i].Date).Append("',").Append(ToUnixSeconds(day)).Append(',').Append(ToUnixSeconds(day.AddDays(1))).Append(')');}
+            calendar.Append(") ");
+            string detail=calendar+@"SELECT calendar.day,COUNT(*),SUM("+FreshInput("l")+@"),SUM(l.output_tokens),SUM(l.cache_read_tokens),SUM(l.cache_creation_tokens),SUM(CAST(l.total_cost_usd AS REAL)),l.model
+FROM calendar JOIN proxy_request_logs l ON l.created_at>=calendar.lo AND l.created_at<calendar.hi WHERE l.created_at>=?1 AND l.created_at<=?2
+AND (?3='' OR (CASE WHEN l.app_type='claude-desktop' THEN 'claude' ELSE l.app_type END)=?3) AND "+EffectiveLogFilter+" GROUP BY 1,l.model";
+            string rollup=@"SELECT r.date,SUM(r.request_count),SUM("+FreshInput("r")+@"),SUM(r.output_tokens),SUM(r.cache_read_tokens),SUM(r.cache_creation_tokens),SUM(CAST(r.total_cost_usd AS REAL)),r.model
+FROM usage_daily_rollups r WHERE r.date>=?1 AND r.date<=?2
+AND (?3='' OR (CASE WHEN r.app_type='claude-desktop' THEN 'claude' ELSE r.app_type END)=?3) GROUP BY 1,r.model";
+            using(var rows=db.Prepare(detail)){rows.Bind(1,from);rows.Bind(2,until);rows.Bind(3,app??"");AddDailyRows(rows,byDate);}
+            if(String.CompareOrdinal(firstRollup,lastRollup)<=0)using(var rows=db.Prepare(rollup)){rows.Bind(1,firstRollup);rows.Bind(2,lastRollup);rows.Bind(3,app??"");AddDailyRows(rows,byDate);}
         }
         private static void AddDailyRows(ReadStatement rows,Dictionary<string,DailyUsage> days)
         {

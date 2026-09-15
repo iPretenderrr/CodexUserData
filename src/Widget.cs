@@ -45,6 +45,10 @@ namespace CodexUserData
         private bool refreshPending,scanPending;
         private Dictionary<string,UsageSnapshot> readyRanges;
         private DateTime rangesObserved;
+        private int customRangeRevision;
+        // LocalCodexUsage owns a mutable numeric ledger. Custom-range reads and the
+        // periodic scanner share this short gate so a selection never sees a half-updated list.
+        private readonly object usageGate=new object();
         private string localRoot;
         private readonly DispatcherTimer timer=new DispatcherTimer();
         private readonly DispatcherTimer preferenceTimer=new DispatcherTimer{Interval=TimeSpan.FromMilliseconds(400)};
@@ -140,7 +144,7 @@ namespace CodexUserData
             foreach(var entry in new Dictionary<string,string>{{"today","今日"},{"week","7 天"},{"month","30 天"},{"all","全部"}}){string key=entry.Key;var b=Theme.Button(entry.Value,"时间范围："+entry.Value,20);b.Margin=new Thickness(1,0,1,0);b.Click+=delegate{if(prefs.Range==key)return;prefs.Range=key;revision++;UpdateButtons();SchedulePersist();if(!ApplyCachedRange())RefreshUsage(false);else if(busy)refreshPending=true;};ranges[key]=b;period.Children.Add(b);}
             cards=new UniformGrid{Columns=3,Margin=new Thickness(-3,0,-3,0)};body.Children.Add(cards);
             modelPanel=new ModelPanel();body.Children.Add(modelPanel);
-            history=new HistoryPanel{ShowCoverage=false};history.Configure(prefs.ShowHeatmap,prefs.ShowTrend,prefs.TrendDays);history.RangeChanged+=SetTrendRange;history.IsVisibleChanged+=delegate{if(history.IsVisible)history.SetRange(prefs.TrendDays);};body.Children.Add(history);
+            history=new HistoryPanel{ShowCoverage=false};history.Configure(prefs.ShowHeatmap,prefs.ShowTrend,prefs.TrendDays);history.RangeChanged+=SetTrendRange;history.CustomRangeRequested+=delegate(DateTime from,DateTime to){RequestCustomRange(history,from,to);};history.IsVisibleChanged+=delegate{if(history.IsVisible)history.SetRange(prefs.TrendDays);};body.Children.Add(history);
             var footer=new Grid{Margin=new Thickness(0,7,0,0)};footer.RowDefinitions.Add(new RowDefinition{Height=GridLength.Auto});footer.RowDefinitions.Add(new RowDefinition{Height=GridLength.Auto});Grid.SetRow(footer,3);grid.Children.Add(footer);
             warning=Theme.Text("",10,Theme.Warning);warning.TextTrimming=TextTrimming.CharacterEllipsis;
             coverageToggle=Theme.Button("","查看统计说明与处理建议",0);coverageToggle.Content=warning;coverageToggle.Height=24;coverageToggle.Padding=new Thickness(3,1,3,1);coverageToggle.HorizontalContentAlignment=HorizontalAlignment.Stretch;coverageToggle.Visibility=Visibility.Collapsed;coverageToggle.Click+=delegate{OpenCoverage();};AutomationProperties.SetAutomationId(coverageToggle,"CoverageToggle");footer.Children.Add(coverageToggle);
@@ -210,7 +214,7 @@ namespace CodexUserData
         }
         private void SelectionChanged()
         {
-            readyRanges=null;
+            readyRanges=null;customRangeRevision++;
             revision++;snapshot=null;quota.AcceptUsage(null,Scope());heroValue.Text="—";heroExact.Text="";heroExact.Visibility=Visibility.Collapsed;heroLabel.Text=PeriodName()+" · "+LabelFor(heroKey);foreach(var text in values.Values)text.Text="—";SetCoverageNotice("",false,false);heroNote.Text="等待当前范围的数据";modelPanel.Apply(null);history.Apply(null,Scope());if(largeHistory!=null)largeHistory.Apply(null,Scope());Persist();RefreshUsage(false);
         }
         private void OpenSettings()
@@ -229,7 +233,34 @@ namespace CodexUserData
             Theme.Apply(prefs);quota.ApplyTheme();UpdateCompletionViews();
         }
         private string Scope(){return prefs.Source=="local"?(prefs.Remote.Enabled?(prefs.UsageView=="local"?"本机 Codex":prefs.UsageView=="remote"?"服务器 Codex":"Codex · 合计"):"本地 Codex"): "CC Switch · "+(String.IsNullOrEmpty(prefs.App)?"全部应用":prefs.App);}
-        private void SetTrendRange(int value){prefs.TrendDays=value;if(history.IsVisible)history.SetRange(value);if(largeHistory!=null&&largeHistory.IsVisible)largeHistory.SetRange(value);SchedulePersist();}
+        private void SetTrendRange(int value){customRangeRevision++;prefs.TrendDays=value;if(history.IsVisible)history.SetRange(value);if(largeHistory!=null&&largeHistory.IsVisible)largeHistory.SetRange(value);SchedulePersist();}
+        private async void RequestCustomRange(HistoryPanel panel,DateTime from,DateTime to)
+        {
+            if(closed||panel==null)return;
+            UsageRangeSpec spec=UsageRangeSpec.Create(from,to);string key=spec.Key,scope=Scope();int request=++customRangeRevision;string selected=prefs.Source,application=prefs.App,db=prefs.Database,home=prefs.CodexHome,view=prefs.UsageView;var remoteReader=remote;var prices=prefs.PriceOverrides;
+            try
+            {
+                UsageSnapshot value=await Task.Run(()=>
+                {
+                    ApiPrices.Configure(prices);
+                    if(selected!="local")return UsageDatabase.Read(db,key,application,DateTime.Now);
+                    lock(usageGate)
+                    {
+                        if(local==null||localRoot!=home)
+                        {
+                            local=new LocalCodexUsage(home,Path.Combine(Program.DataFolder,"local-codex-cache.json.gz"));localRoot=home;
+                            local.Update(null,()=>closed||request!=customRangeRevision);
+                        }
+                        if(remoteReader==null)return local.Snapshot(key,DateTime.Now);
+                        if(exportedReader!=local||exportedVersion!=local.DataVersion){exportedRecords=local.Export();exportedReader=local;exportedVersion=local.DataVersion;}
+                        var state=remoteReader.View;var localRecords=exportedRecords??new List<LogCursor>();return unionCache.Get(localRecords,state.Records,view,key,DateTime.Now,view=="local"?"本机 Codex":view=="remote"?"服务器 Codex":"Codex · 合计");
+                    }
+                });
+                if(!closed&&request==customRangeRevision&&String.Equals(scope,Scope(),StringComparison.Ordinal)&&panel.MatchesCustomRange(from,to,scope))panel.ApplyCustomRange(value,scope,from,to);
+            }
+            catch(OperationCanceledException){if(!closed&&request==customRangeRevision&&panel.MatchesCustomRange(from,to,scope))panel.FailCustomRange("读取已取消。",scope);}
+            catch(Exception ex){if(!closed&&request==customRangeRevision&&panel.MatchesCustomRange(from,to,scope))panel.FailCustomRange(ex.Message,scope);}
+        }
         private void SchedulePersist(){if(preview)return;preferenceTimer.Stop();preferenceTimer.Start();}
         private bool ApplyCachedRange()
         {
@@ -365,7 +396,7 @@ namespace CodexUserData
         {
             if(closed)return;
             if(historyWindow!=null){WindowInteraction.ResumeReveal(historyWindow);if(!historyWindow.IsVisible)historyWindow.Show();if(historyWindow.WindowState==WindowState.Minimized)historyWindow.WindowState=WindowState.Normal;historyWindow.Activate();return;}
-            largeHistory=new HistoryPanel{Margin=new Thickness(20,10,20,20)};largeHistory.RangeChanged+=SetTrendRange;largeHistory.IsVisibleChanged+=delegate{if(largeHistory!=null&&largeHistory.IsVisible)largeHistory.SetRange(prefs.TrendDays);};largeHistory.Configure(true,true,prefs.TrendDays);largeHistory.Apply(snapshot,Scope());
+            largeHistory=new HistoryPanel{Margin=new Thickness(20,10,20,20)};largeHistory.RangeChanged+=SetTrendRange;largeHistory.CustomRangeRequested+=delegate(DateTime from,DateTime to){RequestCustomRange(largeHistory,from,to);};largeHistory.IsVisibleChanged+=delegate{if(largeHistory!=null&&largeHistory.IsVisible)largeHistory.SetRange(prefs.TrendDays);};largeHistory.Configure(true,true,prefs.TrendDays);largeHistory.Apply(snapshot,Scope());
             quotaHistoryPanel=new QuotaHistoryPanel(quota.HistoryStore,()=>QuotaHistoryStore.Scope(prefs.CodexHome),()=>quota.HistoryError);
             var content=new Grid();content.Children.Add(largeHistory);content.Children.Add(quotaHistoryPanel);quotaHistoryPanel.Visibility=Visibility.Collapsed;
             var layout=new DockPanel();var tabs=new WrapPanel{Margin=new Thickness(20,8,20,0)};DockPanel.SetDock(tabs,Dock.Top);layout.Children.Add(tabs);
@@ -386,17 +417,17 @@ namespace CodexUserData
                 UsageSnapshot result=await Task.Run(()=>
                 {
                     ApiPrices.Configure(priceOverrides);
-                    if(remoteReader==null){unionCache.Clear();exportedReader=null;exportedRecords=null;exportedVersion=-1;}
+                    if(remoteReader==null)lock(usageGate){unionCache.Clear();exportedReader=null;exportedRecords=null;exportedVersion=-1;}
                     if(selected!="local"&&remoteReader==null)return UsageDatabase.Read(db,range,application,DateTime.Now);
-                    if(local==null||localRoot!=home){local=new LocalCodexUsage(home,Path.Combine(Program.DataFolder,"local-codex-cache.json.gz"));localRoot=home;scan=true;}
+                    lock(usageGate)if(local==null||localRoot!=home){local=new LocalCodexUsage(home,Path.Combine(Program.DataFolder,"local-codex-cache.json.gz"));localRoot=home;scan=true;}
                     string localFailure=null;
                     // Selecting a range consumes the existing ledger. Only the timer,
                     // explicit refresh or a new source requests filesystem discovery.
-                    try{if(scan)local.Update(message=>Dispatcher.BeginInvoke(new Action(()=>{if(!closed&&version==revision)status.Text=message;})),()=>closed);}
+                    try{if(scan)lock(usageGate)local.Update(message=>Dispatcher.BeginInvoke(new Action(()=>{if(!closed&&version==revision)status.Text=message;})),()=>closed);}
                     catch(IOException){if(remoteReader==null)throw;localFailure="本机日志读取失败，保留上次数据。";}
                     catch(UnauthorizedAccessException){if(remoteReader==null)throw;localFailure="本机日志没有读取权限，保留上次数据。";}
-                    if(remoteReader==null){observed=DateTime.Now;available=new[]{"today","week","month","all"}.ToDictionary(k=>k,k=>local.Snapshot(k,observed));return available[range];}
-                    if(exportedReader!=local||exportedVersion!=local.DataVersion){exportedRecords=local.Export();exportedReader=local;exportedVersion=local.DataVersion;}
+                    if(remoteReader==null)lock(usageGate){observed=DateTime.Now;available=new[]{"today","week","month","all"}.ToDictionary(k=>k,k=>local.Snapshot(k,observed));return available[range];}
+                    lock(usageGate)if(exportedReader!=local||exportedVersion!=local.DataVersion){exportedRecords=local.Export();exportedReader=local;exportedVersion=local.DataVersion;}
                     var localRecords=exportedRecords;var state=remoteReader.View;var now=DateTime.Now;
                     observed=now;
                     total=unionCache.Get(localRecords,state.Records,"combined","today",now,"Codex · 合计");

@@ -81,6 +81,11 @@ namespace CodexUserData
             var local=records.Values.ToList();var server=local.Select(LocalCodexUsage.CopyCursor).ToList();var union=new UsageUnionCache();var combined=union.Get(local,server,"combined","today",now,"combined");
             Same(combined,UsageUnion.Snapshot(local.Concat(server),"today",now,"combined"),"cross-source duplicated sessions");
             Check(Object.ReferenceEquals(combined.Daily,union.Get(local,server,"combined","month",now,"combined").Daily),"remote union shares merged summaries across periods");
+            DateTime customFrom=now.Date.AddDays(-2).AddHours(12).AddSeconds(3),customTo=now.Date.AddDays(-1).AddHours(12).AddSeconds(4);string customKey=UsageRangeSpec.Encode(customFrom,customTo);
+            long expected=records.Values.SelectMany(c=>c.Events).Where(e=>e.Time>=LocalCodexUsage.Unix(customFrom)&&e.Time<=LocalCodexUsage.Unix(customTo)).Sum(e=>e.Input+e.Output);
+            var custom=memo.Get(records,2,customKey,now);var projected=memo.Get(records,2,customKey,now);UsageRangeSpec parsedRange;Check(UsageRangeSpec.TryParse(customKey,out parsedRange)&&parsedRange.From==customFrom&&parsedRange.To==customTo,"custom range keys round-trip local seconds");
+            Check(custom.TotalTokens==expected&&custom.Daily.Length==2&&custom.Daily[0].Date==customFrom.ToString("yyyy-MM-dd",CultureInfo.InvariantCulture)&&custom.Daily[1].Date==customTo.ToString("yyyy-MM-dd",CultureInfo.InvariantCulture),"custom local range filters event timestamps and keeps boundary dates");
+            Check(projected.TotalTokens==custom.TotalTokens&&projected.Daily.Length==custom.Daily.Length,"repeated custom range reads reuse the numeric ledger memo");
         }
         private static string Header(string id,DateTime at){return Json.Serialize(new{type="session_meta",timestamp=at.ToString("o"),payload=new{id=id,timestamp=at.ToString("o")}})+"\n";}
         private static string Token(DateTime at,long input){return Json.Serialize(new{type="event_msg",timestamp=at.ToString("o"),payload=new{type="token_count",info=new{last_token_usage=new{input_tokens=input,output_tokens=1}}}})+"\n";}

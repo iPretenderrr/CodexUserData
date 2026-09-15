@@ -66,9 +66,19 @@ namespace CodexUserData
             readAt=at;UsageSnapshot value;
             if(!ranges.TryGetValue(range,out value))
             {
-                UsageSnapshot all;
-                if(!ranges.TryGetValue("all",out all)){all=LocalCodexUsage.Aggregate(records,"all",now,failed);ranges["all"]=all;nextChange=all.NextChangeAt;}
-                value=Select(all,range,now);ranges[range]=value;
+                UsageRangeSpec custom;
+                if(UsageRangeSpec.TryParse(range,out custom))
+                {
+                    // Custom intervals need event timestamps, so aggregate directly from
+                    // the already-read ledger instead of rounding to whole days.
+                    value=LocalCodexUsage.Aggregate(records,range,now,failed);ranges[range]=value;
+                }
+                else
+                {
+                    UsageSnapshot all;
+                    if(!ranges.TryGetValue("all",out all)){all=LocalCodexUsage.Aggregate(records,"all",now,failed);ranges["all"]=all;nextChange=all.NextChangeAt;}
+                    value=Select(all,range,now);ranges[range]=value;
+                }
             }
             return value.Copy();
         }
@@ -353,13 +363,18 @@ namespace CodexUserData
         internal static UsageSnapshot Aggregate(Dictionary<string,LogCursor> cursors,string range,DateTime now,int failed=0)
         {
             if(now.Kind==DateTimeKind.Utc)now=now.ToLocalTime();
+            UsageRangeSpec custom;
+            bool customRange=UsageRangeSpec.TryParse(range,out custom);
             UsageSnapshot result=new UsageSnapshot {SourceName="本地 Codex",CostAvailable=false,CountLabel="用量记录",LatestRecord="暂无记录",CoverageFiles=cursors.Count,PeriodSessions=new long[3],PeriodInferred=new long[3]};
             result.KnownModels=cursors.Values.SelectMany(c=>c.Events).Select(e=>e.Model).Where(m=>!String.IsNullOrWhiteSpace(m)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
             result.Quotas=cursors.Values.SelectMany(c=>c.Quotas).GroupBy(q=>q.Id).Select(g=>g.OrderByDescending(q=>q.ObservedAt).First()).ToList();
-            result.Daily=DailyUsage.Empty(now,180);DateTime historyStart=now.Date.AddDays(-179);long historyFrom=Unix(historyStart);
-            result.Hourly=DailyUsage.Hours(now);result.HourlyThrough=now.Hour+1;long todayFrom=Unix(now.Date);
+            DateTime historyStart=customRange?custom.From.Date:now.Date.AddDays(-179);
+            int historyDays=customRange?checked((custom.To.Date-historyStart).Days+1):180;
+            result.Daily=DailyUsage.Empty(customRange?custom.To:now,historyDays);long historyFrom=Unix(historyStart);
+            result.Hourly=DailyUsage.Hours(customRange?custom.To:now);result.HourlyThrough=customRange?24:now.Hour+1;long todayFrom=Unix(now.Date);
             long[] periodStarts={todayFrom,Unix(now.Date.AddDays(-6)),Unix(now.Date.AddDays(-29))};
-            long from=range=="all"?Int64.MinValue:Unix(now.Date.AddDays(range=="week"?-6:range=="month"?-29:0)); long until=Unix(now);
+            long from=customRange?Unix(custom.From):range=="all"?Int64.MinValue:Unix(now.Date.AddDays(range=="week"?-6:range=="month"?-29:0));
+            long until=customRange?Unix(custom.To):Unix(now);
             int deferred=0,invalid=0,missingMeta=0,missingParent=0,unverifiedParent=0;long latest=0;
             foreach(LogCursor cursor in cursors.Values)
             {
@@ -399,7 +414,8 @@ namespace CodexUserData
                         ModelUsage.Accumulate(hour.Models,item.Model,item.Effort,item.Input-item.Cached-item.CacheWrite,item.Output,item.Cached,item.CacheWrite,1);
                     }
                     // Reuse the already-deduplicated events; daily charts never reread the rollout files.
-                    if(item.Time>=historyFrom)
+                    bool inHistory=item.Time>=historyFrom&&(!customRange||item.Time>=from)&&(!customRange||item.Time<=until);
+                    if(inHistory)
                     {
                         int index=(Epoch.AddSeconds(item.Time).ToLocalTime().Date-historyStart).Days;
                         if(index>=0&&index<result.Daily.Length)result.Daily[index].Add(item.Input-item.Cached-item.CacheWrite,item.Output,item.Cached,item.CacheWrite,1,item.Reasoning,0);
