@@ -227,16 +227,16 @@ namespace CodexUserData
             // A different visible period does not change the underlying model series.
             if(dataChanged)
             {
-                series.Clear();if(!IsHeatmap){foreach(string model in Days.SelectMany(d=>d.Models).Select(m=>m.Model).Distinct().OrderBy(m=>m))series[model]=new double[Days.Length];
-                for(int i=0;i<Days.Length;i++)foreach(var m in Days[i].Models)series[m.Model][i]+=cost?(double)m.EquivalentUsd:m.Tokens;}
+                series.Clear();foreach(string model in Days.SelectMany(d=>d.Models).Select(m=>m.Model).Distinct().OrderBy(m=>m))series[model]=new double[Days.Length];
+                for(int i=0;i<Days.Length;i++)foreach(var m in Days[i].Models)series[m.Model][i]+=cost?(double)m.EquivalentUsd:m.Tokens;
             }
             AutomationProperties.SetName(this,IsHeatmap?(cost?"每日 API 估算费用热度图":"每日用量热度图"):(cost?"API 估算费用趋势 · USD":"Token 用量趋势"));
             if(Selected>=Days.Length)Selected=-1;Hovered=hoveredDate==null?-1:Array.FindIndex(Days,d=>d.Date==hoveredDate);if(Hovered<0)tip.IsOpen=false;else UpdateTip(Days[Hovered]);if(IsHeatmap&&ActualWidth>0)Height=HeatHeight(ActualWidth);InvalidateVisual();
         }
         internal double HeatHeight(double width)
         {
-            int n=27;if(Days.Length>0){if(HeatColumns)n=Days.Length;else{var start=DateTime.ParseExact(Days[0].Date,"yyyy-MM-dd",CultureInfo.InvariantCulture);n=(int)Math.Ceiling((Days.Length+(int)start.DayOfWeek)/7.0);}}
-            return Math.Max(5,(width-4)/Math.Max(1,n))*7+28;
+            int n=27;if(Days.Length>0){if(HeatColumns)n=Days.Length;else{var start=DateTime.ParseExact(Days[0].Date,"yyyy-MM-dd",CultureInfo.InvariantCulture);int startOffset=((int)start.DayOfWeek+6)%7;n=(int)Math.Ceiling((Days.Length+startOffset)/7.0);}}
+            return Math.Max(5,(width-22)/Math.Max(1,n))*7+51;
         }
         internal void ClearPointer(){Selected=-1;Hovered=-1;tip.IsOpen=false;InvalidateVisual();}
         internal void Choose(int index,bool clicked)
@@ -288,28 +288,40 @@ namespace CodexUserData
         }
         private void DrawHeatmap(DrawingContext dc)
         {
-            first=0;DateTime start=DateTime.ParseExact(Days[0].Date,"yyyy-MM-dd",CultureInfo.InvariantCulture);offset=HeatColumns?0:(int)start.DayOfWeek;columns=HeatColumns?Days.Length:(int)Math.Ceiling((Days.Length+offset)/7.0);
-            pitch=Math.Max(5,(ActualWidth-4)/Math.Max(1,columns));cell=Math.Max(3,pitch-3);plot=new Rect(2,4,pitch*columns,pitch*7);max=Days.Max(d=>(double)ChartValue.Of(d,IsCost));if(max<=0)max=1;double radius=Math.Min(3.5,cell*.24);
-            // Draw the complete seven-row frame first. Leading/trailing calendar cells
-            // and unfilled weekly levels stay visible like the Codex activity chart.
+            first=0;DateTime start=DateTime.ParseExact(Days[0].Date,"yyyy-MM-dd",CultureInfo.InvariantCulture);offset=HeatColumns?0:((int)start.DayOfWeek+6)%7;columns=HeatColumns?Days.Length:(int)Math.Ceiling((Days.Length+offset)/7.0);
+            pitch=Math.Max(5,(ActualWidth-22)/Math.Max(1,columns));cell=Math.Max(3,pitch-3);plot=new Rect(20,24,pitch*columns,pitch*7);max=Days.Max(d=>(double)ChartValue.Of(d,IsCost));if(max<=0)max=1;double radius=Math.Min(3.5,cell*.24);
+            // Empty calendar slots and unfilled weekly levels use the existing heatmap
+            // palette; only the meaning and height of the cells changes between modes.
             for(int column=0;column<columns;column++)for(int row=0;row<7;row++)dc.DrawRoundedRectangle(levels[0],null,new Rect(plot.Left+column*pitch,plot.Top+row*pitch,cell,cell),radius,radius);
             if(HeatColumns)
             {
                 for(int i=0;i<Days.Length;i++)
                 {
-                    int filled=HeatRows((double)ChartValue.Of(Days[i],IsCost),max);for(int row=7-filled;row<7;row++)dc.DrawRoundedRectangle(levels[3],null,new Rect(plot.Left+i*pitch,plot.Top+row*pitch,cell,cell),radius,radius);
+                    double amount=(double)ChartValue.Of(Days[i],IsCost);int level=amount<=0?0:Math.Min(4,1+(int)Math.Floor(3.999*Math.Sqrt(amount/max))),filled=HeatRows(amount,max);
+                    for(int row=7-filled;row<7;row++){var rect=new Rect(plot.Left+i*pitch,plot.Top+row*pitch,cell,cell);dc.DrawRoundedRectangle(levels[level],null,rect,radius,radius);DrawModelStripe(dc,i,rect,amount);}
                 }
             }
             else for(int i=0;i<Days.Length;i++)
             {
-                Point p=PointFor(i);double amount=(double)ChartValue.Of(Days[i],IsCost);int level=amount<=0?0:Math.Min(4,1+(int)Math.Floor(3.999*Math.Sqrt(amount/max)));dc.DrawRoundedRectangle(levels[level],null,new Rect(p.X-cell/2,p.Y-cell/2,cell,cell),radius,radius);
+                Point p=PointFor(i);double amount=(double)ChartValue.Of(Days[i],IsCost);int level=amount<=0?0:Math.Min(4,1+(int)Math.Floor(3.999*Math.Sqrt(amount/max)));var rect=new Rect(p.X-cell/2,p.Y-cell/2,cell,cell);dc.DrawRoundedRectangle(levels[level],null,rect,radius,radius);DrawModelStripe(dc,i,rect,amount);
             }
             int previousMonth=-1;double lastLabel=-100;
             for(int i=0;i<Days.Length;i++)
             {
                 DateTime date=DateTime.ParseExact(Days[i].Date.Substring(0,10),"yyyy-MM-dd",CultureInfo.InvariantCulture);int column=HeatColumns?i:(i+offset)/7;double x=plot.Left+column*pitch;
-                if(date.Month!=previousMonth){if(x-lastLabel>32){Text(dc,date.Month+"月",Math.Max(plot.Left,Math.Min(plot.Right-24,x)),plot.Bottom+7,10,Theme.Muted);lastLabel=x;}previousMonth=date.Month;}
+                if(date.Month!=previousMonth){if(x-plot.Left-lastLabel>28){Text(dc,date.Month+"月",x,2,10,Theme.Muted);lastLabel=x-plot.Left;}previousMonth=date.Month;}
             }
+            if(!HeatColumns){Text(dc,"一",0,24,9,Theme.Muted);Text(dc,"四",0,24+3*pitch,9,Theme.Muted);Text(dc,"日",0,24+6*pitch,9,Theme.Muted);}
+            double y=plot.Bottom+8;Text(dc,"少",20,y,9,Theme.Muted);for(int i=0;i<5;i++)dc.DrawRoundedRectangle(levels[i],null,new Rect(39+i*13,y+2,10,10),2,2);Text(dc,"多",107,y,9,Theme.Muted);if(ActualWidth>350)Text(dc,IsCost?"色阶：估算费用 · 细条：模型占比":"色阶：用量 · 细条：模型占比",140,y,9,Theme.Muted);
+        }
+        private void DrawModelStripe(DrawingContext dc,int index,Rect rect,double amount)
+        {
+            if(amount<=0||series.Count==0)return;
+            // Preserve the original thin model-composition strip without creating
+            // individual WPF elements, which keeps 180-day rendering inexpensive.
+            double inset=Math.Min(2,cell*.12),stripe=Math.Max(.8,Math.Min(2,cell*.09));var track=new Rect(rect.Left+inset,rect.Bottom-inset-stripe,cell-2*inset,stripe);
+            dc.PushClip(new RectangleGeometry(track,stripe/2,stripe/2));double x=track.Left;
+            foreach(var pair in series){double part=pair.Value[index];if(part<=0)continue;double width=track.Width*part/amount;dc.DrawRectangle(ModelColors.For(pair.Key),null,new Rect(x,track.Top,width,stripe));x+=width;}dc.Pop();
         }
         internal static int HeatRows(double amount,double maximum){return amount<=0||maximum<=0?0:Math.Min(7,Math.Max(1,(int)Math.Ceiling(amount/maximum*7-1e-9)));}
         private void DrawTrend(DrawingContext dc)
@@ -694,8 +706,8 @@ namespace CodexUserData
         private void UpdateHeatTitle()
         {
             heatTitle.Text=cost?"近 180 天 API 估算费用热度图 · USD":"近 180 天用量热度图";
-            string mode=heatAggregation=="weekly"?"每列一周（周日开始），填充高度表示周用量":heatAggregation=="cumulative"?"每列一周，填充高度表示窗口内累计用量":"每格一天，颜色深浅表示当天用量";
-            heatHint.Text="固定近 180 天 · "+mode+(cost?" · 费用是估算，缺价格按 0":"");
+            string mode=heatAggregation=="weekly"?"每列一周（周日开始），填充高度表示周用量":heatAggregation=="cumulative"?"每列一周，填充高度表示窗口内累计用量":"每格表示当天总量";
+            heatHint.Text="固定近 180 天 · "+mode+(cost?" · 估算费用并非账单，缺价格按 0":" · 细条表示模型占比");
         }
         private void UpdateTrendTitle(){string mode=trendAggregation=="weekly"?"每周":trendAggregation=="cumulative"?"累计":"每日";trendTitle.Text=(cost?"API 估算费用趋势 · USD":"Token 用量趋势")+" · "+mode;}
         internal void Configure(bool showHeat,bool showTrend,int count,string aggregationMode="daily",string heatAggregationMode="daily")
