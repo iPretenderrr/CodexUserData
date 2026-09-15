@@ -591,27 +591,29 @@ namespace CodexUserData
         private readonly Button tokensMetric,costMetric;
         private readonly Border coverage;
         private readonly TextBlock coverageText;
-        private readonly Dictionary<int,Button> ranges=new Dictionary<int,Button>();
-        private readonly Button customRangeButton;
+        private readonly Dictionary<int,Button> ranges=new Dictionary<int,Button>(),cacheRanges=new Dictionary<int,Button>();
+        private readonly Button customRangeButton,cacheCustomRangeButton;
         private readonly Dictionary<string,Button> heatAggregations=new Dictionary<string,Button>(),trendAggregations=new Dictionary<string,Button>();
         private readonly Dictionary<string,Button> legendItems=new Dictionary<string,Button>();
         private readonly Dictionary<string,string> modelChoices=new Dictionary<string,string>{{"","全部模型"}};
         private readonly ChoiceButton modelFilter;
         private readonly WrapPanel legend=new WrapPanel{Margin=new Thickness(0,6,0,8)};
         private UsageSnapshot original,snapshot;
-        private UsageSnapshot customSnapshot;
-        private UsageRangeSpec customRange;
-        private string customScope;
-        private bool customLoading;
+        private UsageSnapshot customSnapshot,cacheCustomSnapshot;
+        private UsageRangeSpec customRange,cacheCustomRange;
+        private string customScope,cacheCustomScope;
+        private bool customLoading,cacheCustomLoading;
         private string modelKey="",viewSignature,pinnedModel,heatAggregation="daily",trendAggregation="daily";
-        private int days=30;
+        private int days=30,cacheDays=30;
         private bool rangeInitialized;
         private bool cost;
         internal bool ShowCoverage=true;
         internal event Action<int> RangeChanged;
+        internal event Action<int> CacheRangeChanged;
         internal event Action<string> AggregationChanged;
         internal event Action<string> HeatAggregationChanged;
         internal event Action<DateTime,DateTime> CustomRangeRequested;
+        internal event Action<DateTime,DateTime> CacheCustomRangeRequested;
         internal HistoryPanel()
         {
             Background=Brushes.Transparent;
@@ -635,7 +637,7 @@ namespace CodexUserData
             // Wrap period buttons as the window shrinks; a horizontal StackPanel would clip the last options.
             var buttons=new WrapPanel{Margin=new Thickness(-2,9,0,8)};trendBody.Children.Add(buttons);
             foreach(int n in Periods){int v=n;var button=Theme.Button(n==1?"当天":n+"D",n==1?"当天趋势":n+" 天趋势",n==1?44:39);button.Height=27;button.FontSize=11;button.Margin=new Thickness(2,2,2,2);button.Click+=delegate{SetRange(v);if(RangeChanged!=null)RangeChanged(v);};ranges[n]=button;buttons.Children.Add(button);}
-            customRangeButton=Theme.Button("自定义","选择开始和结束日期时间",64);customRangeButton.Height=27;customRangeButton.FontSize=11;customRangeButton.Margin=new Thickness(2,2,2,2);customRangeButton.Click+=delegate{OpenCustomRange();};buttons.Children.Add(customRangeButton);
+            customRangeButton=Theme.Button("自定义","选择开始和结束日期时间",64);customRangeButton.Height=27;customRangeButton.FontSize=11;customRangeButton.Margin=new Thickness(2,2,2,2);customRangeButton.Click+=delegate{OpenCustomRange(false);};buttons.Children.Add(customRangeButton);
             summary=new UniformGrid{Columns=3,Margin=new Thickness(0,3,0,2)};trendBody.Children.Add(summary);
             sum=Summary(summary,"区间用量",out summaryLabel);average=Summary(summary,"日均",out averageLabel);value=Summary(summary,"API 估算 · USD",out valueLabel);
             AutomationProperties.SetAutomationId(sum,"TrendMetricTotal");AutomationProperties.SetAutomationId(average,"TrendMetricAverage");AutomationProperties.SetAutomationId(value,"TrendSecondaryTotal");
@@ -646,7 +648,10 @@ namespace CodexUserData
             trendBody.Children.Add(DetailViewport(trendDetail));
             var cacheBody=new StackPanel();cacheCard=Card(cacheBody);cacheCard.Margin=new Thickness(0,9,0,0);Children.Add(cacheCard);
             var cacheTitle=Theme.Text("缓存命中率趋势",13,Theme.Ink);cacheTitle.TextWrapping=TextWrapping.Wrap;cacheBody.Children.Add(cacheTitle);
-            cacheHint=Theme.Text("时间范围与 Token 用量趋势同步",10,Theme.Muted);cacheHint.TextWrapping=TextWrapping.Wrap;cacheHint.Margin=new Thickness(0,5,0,6);cacheBody.Children.Add(cacheHint);
+            cacheHint=Theme.Text("独立时间范围",10,Theme.Muted);cacheHint.TextWrapping=TextWrapping.Wrap;cacheHint.Margin=new Thickness(0,5,0,2);cacheBody.Children.Add(cacheHint);
+            var cacheButtons=new WrapPanel{Margin=new Thickness(-2,5,0,8)};cacheBody.Children.Add(cacheButtons);
+            foreach(int n in Periods){int v=n;var button=Theme.Button(n==1?"当天":n+"D",n==1?"缓存命中率当天趋势":"缓存命中率 "+n+" 天趋势",n==1?44:39);button.Height=27;button.FontSize=11;button.Margin=new Thickness(2);button.Click+=delegate{SetCacheRange(v);if(CacheRangeChanged!=null)CacheRangeChanged(v);};cacheRanges[n]=button;cacheButtons.Children.Add(button);}
+            cacheCustomRangeButton=Theme.Button("自定义","选择缓存命中率的开始和结束日期时间",64);cacheCustomRangeButton.Height=27;cacheCustomRangeButton.FontSize=11;cacheCustomRangeButton.Margin=new Thickness(2);cacheCustomRangeButton.Click+=delegate{OpenCustomRange(true);};cacheButtons.Children.Add(cacheCustomRangeButton);
             cacheTrend=new UsageChart(false);cacheBody.Children.Add(cacheTrend);AutomationProperties.SetAutomationId(cacheTrend,"CacheHitRateChart");
             coverageText=Theme.Text("",10,Theme.Warning);coverageText.TextWrapping=TextWrapping.Wrap;coverageText.Margin=new Thickness(3,7,3,3);
             var coverageBody=new StackPanel();coverageText.Visibility=Visibility.Collapsed;var toggleCoverage=Theme.Button("ⓘ 数据覆盖说明  ⌄","展开数据覆盖说明",30);toggleCoverage.Foreground=Theme.Warning;toggleCoverage.HorizontalAlignment=HorizontalAlignment.Left;toggleCoverage.FontSize=10;
@@ -654,7 +659,7 @@ namespace CodexUserData
             coverage=new Border{Child=coverageBody,Margin=new Thickness(2,10,0,0),Visibility=Visibility.Collapsed};Children.Add(coverage);
             heatSelection=new ChartDetailSelection(heat,heatDetail);trendSelection=new ChartDetailSelection(trend,trendDetail,false,false);
             PreviewMouseWheel+=delegate{heatSelection.PauseForScroll();trendSelection.PauseForScroll();cacheTrend.HoverPausedUntil=DateTime.UtcNow.AddMilliseconds(350);};
-            SizeChanged+=delegate{ReflowChartHeaders();heat.Height=heat.HeatHeight(Math.Max(180,ActualWidth-24));trend.Height=ActualWidth<420?280:ActualWidth<760?330:380;cacheTrend.Height=ActualWidth<420?220:ActualWidth<760?250:280;summary.Columns=ActualWidth<360?2:3;};SetRange(30);SetHeatAggregation("daily");SetAggregation("daily");SetMetric(false);
+            SizeChanged+=delegate{ReflowChartHeaders();heat.Height=heat.HeatHeight(Math.Max(180,ActualWidth-24));trend.Height=ActualWidth<420?280:ActualWidth<760?330:380;cacheTrend.Height=ActualWidth<420?220:ActualWidth<760?250:280;summary.Columns=ActualWidth<360?2:3;};SetRange(30);SetCacheRange(30);SetHeatAggregation("daily");SetAggregation("daily");SetMetric(false);
         }
         private static Grid ChartHeader()
         {
@@ -691,7 +696,7 @@ namespace CodexUserData
         }
         internal void SetRange(int count)
         {
-            int next=Periods.Contains(count)?count:30;if(rangeInitialized&&days==next&&customRange==null)return;rangeInitialized=true;if(days!=next||customRange!=null){trendSelection.Reset();cacheTrend.ClearPointer();}
+            int next=Periods.Contains(count)?count:30;if(rangeInitialized&&days==next&&customRange==null)return;rangeInitialized=true;if(days!=next||customRange!=null)trendSelection.Reset();
             days=next;customRange=null;customSnapshot=null;customScope=null;customLoading=false;customRangeButton.Content="自定义";UpdateRangeButtons();
             // The selected preset changes the visible window even when the source snapshot
             // is unchanged, so force the lightweight view pass to update totals and details.
@@ -702,6 +707,17 @@ namespace CodexUserData
             bool custom=customRange!=null;
             foreach(var pair in ranges){bool selected=!custom&&pair.Key==days;pair.Value.Foreground=selected?Theme.Accent:Theme.Muted;pair.Value.Background=selected?Theme.Hover:Brushes.Transparent;AutomationProperties.SetItemStatus(pair.Value,selected?"已选中":"未选中");}
             customRangeButton.Foreground=custom?Theme.Accent:Theme.Muted;customRangeButton.Background=custom?Theme.Hover:Brushes.Transparent;AutomationProperties.SetItemStatus(customRangeButton,custom?"已选中":"未选中");
+        }
+        internal void SetCacheRange(int count)
+        {
+            int next=Periods.Contains(count)?count:30;if(cacheDays==next&&cacheCustomRange==null&&cacheTrend.Days.Length>0)return;
+            cacheDays=next;cacheCustomRange=null;cacheCustomSnapshot=null;cacheCustomScope=null;cacheCustomLoading=false;cacheCustomRangeButton.Content="自定义";cacheTrend.ClearPointer();UpdateCacheRangeButtons();UpdateCacheTrend();
+        }
+        private void UpdateCacheRangeButtons()
+        {
+            bool custom=cacheCustomRange!=null;
+            foreach(var pair in cacheRanges){bool selected=!custom&&pair.Key==cacheDays;pair.Value.Foreground=selected?Theme.Accent:Theme.Muted;pair.Value.Background=selected?Theme.Hover:Brushes.Transparent;AutomationProperties.SetItemStatus(pair.Value,selected?"已选中":"未选中");}
+            cacheCustomRangeButton.Foreground=custom?Theme.Accent:Theme.Muted;cacheCustomRangeButton.Background=custom?Theme.Hover:Brushes.Transparent;AutomationProperties.SetItemStatus(cacheCustomRangeButton,custom?"已选中":"未选中");
         }
         internal void SetAggregation(string value)
         {
@@ -730,9 +746,9 @@ namespace CodexUserData
             heatHint.Text="固定近 180 天 · "+mode+(cost?" · 估算费用并非账单，缺价格按 0":" · 细条表示模型占比");
         }
         private void UpdateTrendTitle(){string mode=trendAggregation=="weekly"?"每周":trendAggregation=="cumulative"?"累计":"每日";trendTitle.Text=(cost?"API 估算费用趋势 · USD":"Token 用量趋势")+" · "+mode;}
-        internal void Configure(bool showHeat,bool showTrend,int count,string aggregationMode="daily",string heatAggregationMode="daily")
+        internal void Configure(bool showHeat,bool showTrend,int count,string aggregationMode="daily",string heatAggregationMode="daily",int cacheCount=30)
         {
-            heatCard.Visibility=showHeat?Visibility.Visible:Visibility.Collapsed;trendCard.Visibility=showTrend?Visibility.Visible:Visibility.Collapsed;cacheCard.Visibility=showTrend?Visibility.Visible:Visibility.Collapsed;Visibility=showHeat||showTrend?Visibility.Visible:Visibility.Collapsed;SetRange(count);SetHeatAggregation(heatAggregationMode);SetAggregation(aggregationMode);
+            heatCard.Visibility=showHeat?Visibility.Visible:Visibility.Collapsed;trendCard.Visibility=showTrend?Visibility.Visible:Visibility.Collapsed;cacheCard.Visibility=showTrend?Visibility.Visible:Visibility.Collapsed;Visibility=showHeat||showTrend?Visibility.Visible:Visibility.Collapsed;SetRange(count);SetCacheRange(cacheCount);SetHeatAggregation(heatAggregationMode);SetAggregation(aggregationMode);
         }
         private static DailyUsage[] Filter(DailyUsage[] data,string model)
         {
@@ -752,12 +768,12 @@ namespace CodexUserData
             bool changed=!String.Equals(scope,sourceLabel.Tag as string,StringComparison.Ordinal);original=data;
             // A refresh with no snapshot means the selected source is being rebuilt.
             // Clear a previous custom result here so it cannot survive a source/app switch.
-            if(changed||data==null){customRange=null;customSnapshot=null;customScope=null;customLoading=false;customRangeButton.Content="自定义";UpdateRangeButtons();}
+            if(changed||data==null){customRange=null;customSnapshot=null;customScope=null;customLoading=false;customRangeButton.Content="自定义";cacheCustomRange=null;cacheCustomSnapshot=null;cacheCustomScope=null;cacheCustomLoading=false;cacheCustomRangeButton.Content="自定义";UpdateRangeButtons();UpdateCacheRangeButtons();}
             ApplyView(customRange!=null&&customSnapshot!=null&&String.Equals(customScope,scope,StringComparison.Ordinal)?customSnapshot:data,scope);
         }
         internal void BeginCustomRange(DateTime from,DateTime to,string scope)
         {
-            customRange=UsageRangeSpec.Create(from,to);customScope=scope;customSnapshot=null;customLoading=true;snapshot=null;viewSignature=null;trendSelection.Reset();cacheTrend.ClearPointer();sourceLabel.Tag=scope;customRangeButton.Content="读取中…";UpdateRangeButtons();sourceLabel.Text=scope+" · 曲线 "+customRange.Label+" · 读取中";comparisonText.Text="正在读取自定义时间范围…";trendDetail.Clear("正在读取自定义时间范围…");UpdateTrend();
+            customRange=UsageRangeSpec.Create(from,to);customScope=scope;customSnapshot=null;customLoading=true;snapshot=null;viewSignature=null;trendSelection.Reset();sourceLabel.Tag=scope;customRangeButton.Content="读取中…";UpdateRangeButtons();sourceLabel.Text=scope+" · 曲线 "+customRange.Label+" · 读取中";comparisonText.Text="正在读取自定义时间范围…";trendDetail.Clear("正在读取自定义时间范围…");UpdateTrend();
         }
         internal void ApplyCustomRange(UsageSnapshot data,string scope,DateTime from,DateTime to)
         {
@@ -770,6 +786,22 @@ namespace CodexUserData
         internal void FailCustomRange(string message,string scope)
         {
             customRange=null;customSnapshot=null;customScope=null;customLoading=false;customRangeButton.Content="自定义";UpdateRangeButtons();ApplyView(original,scope);comparisonText.Text="自定义范围读取失败："+(String.IsNullOrWhiteSpace(message)?"请检查数据来源和路径。":message);
+        }
+        internal void BeginCacheCustomRange(DateTime from,DateTime to,string scope)
+        {
+            cacheCustomRange=UsageRangeSpec.Create(from,to);cacheCustomScope=scope;cacheCustomSnapshot=null;cacheCustomLoading=true;cacheCustomRangeButton.Content="读取中…";cacheTrend.ClearPointer();UpdateCacheRangeButtons();UpdateCacheTrend();
+        }
+        internal void ApplyCacheCustomRange(UsageSnapshot data,string scope,DateTime from,DateTime to)
+        {
+            cacheCustomRange=UsageRangeSpec.Create(from,to);cacheCustomScope=scope;cacheCustomSnapshot=data;cacheCustomLoading=false;cacheCustomRangeButton.Content="自定义";UpdateCacheRangeButtons();UpdateCacheTrend();
+        }
+        internal bool MatchesCacheCustomRange(DateTime from,DateTime to,string scope)
+        {
+            return cacheCustomRange!=null&&String.Equals(cacheCustomScope,scope,StringComparison.Ordinal)&&cacheCustomRange.From==DateTime.SpecifyKind(from,DateTimeKind.Local)&&cacheCustomRange.To==DateTime.SpecifyKind(to,DateTimeKind.Local);
+        }
+        internal void FailCacheCustomRange(string message,string scope)
+        {
+            cacheCustomRange=null;cacheCustomSnapshot=null;cacheCustomScope=null;cacheCustomLoading=false;cacheCustomRangeButton.Content="自定义";UpdateCacheRangeButtons();UpdateCacheTrend();cacheHint.Text="自定义范围读取失败："+(String.IsNullOrWhiteSpace(message)?"请检查数据来源和路径。":message);
         }
         private void ApplyView(UsageSnapshot data,string scope)
         {
@@ -785,7 +817,7 @@ namespace CodexUserData
             sourceLabel.Tag=scope;sourceLabel.Text=scope+(modelKey==""?"":" · "+modelKey)+" · "+(customRange!=null&&String.Equals(customScope,scope,StringComparison.Ordinal)?"曲线 "+customRange.Label:"近 180 天");
             coverageText.Text=data==null?"":data.Warning;coverage.Visibility=ShowCoverage&&!String.IsNullOrEmpty(coverageText.Text)?Visibility.Visible:Visibility.Collapsed;
             if(reset){if(customRange==null)heatSelection.Reset();trendSelection.Reset();}
-            ApplyHeat();UpdateTrend();
+            ApplyHeat();UpdateTrend();UpdateCacheTrend();
         }
         private void UpdateTrend()
         {
@@ -795,10 +827,6 @@ namespace CodexUserData
             DailyUsage[] visible=custom?raw:hourly?raw.Take(snapshot==null?0:snapshot.HourlyThrough).ToArray():raw.Skip(Math.Max(0,raw.Length-days)).ToArray();
             DailyUsage[] chartData=trendAggregation=="daily"?raw:UsageTrendSeries.Build(visible,trendAggregation);bool chartHourly=trendAggregation=="daily"&&hourly;int window=trendAggregation=="daily"?(custom?raw.Length:days):chartData.Length;
             trend.SetData(chartData,window,chartHourly,chartHourly&&snapshot!=null?snapshot.HourlyThrough:chartData.Length,cost);
-            // Reuse the same already-filtered buckets and range. Cache rate remains a
-            // point-in-time ratio, independent from the token chart aggregation mode.
-            int cacheWindow=custom?raw.Length:days;cacheTrend.SetData(raw,cacheWindow,hourly,hourly&&snapshot!=null?snapshot.HourlyThrough:raw.Length,false,"daily",true);
-            cacheHint.Text=customLoading?"正在读取自定义时间范围…":custom&&customRange!=null?"自定义时间 · "+customRange.Label:days==1?"当天 · 按小时显示":"近 "+days+" 天 · 按日显示";
             long total=visible.Sum(d=>d.Tokens);decimal amount=visible.Sum(d=>ChartValue.Of(d,cost));sum.Text=cost?ChartValue.Money(amount):TokenText.Compact(total);sum.ToolTip=sum.Text+(cost?" USD · API 估算":" Tokens");
             summaryLabel.Text=(custom?"自定义区间":days==1?"今日已记录":"近 "+days+" 天")+(cost?" · USD":" · Tokens");averageLabel.Text=trendAggregation=="weekly"?"周均":custom&&customStep<86400?"时段均值":custom?"按日均值":days==1?"已记录小时均值":"已展示日期均值";
             int divisor=Math.Max(1,trendAggregation=="weekly"?chartData.Length:visible.Length);average.Text=cost?ChartValue.Money(amount/divisor):TokenText.Compact(total/divisor);average.ToolTip=average.Text+(cost?" USD":" Tokens")+"；含未结束时段";
@@ -811,6 +839,13 @@ namespace CodexUserData
             int detailStart=trendAggregation=="daily"&&!custom&&!hourly?Math.Max(0,chartData.Length-days):0;int detailEnd=chartHourly&&snapshot!=null?snapshot.HourlyThrough:chartData.Length;
             trendSelection.SetData(chartData,detailStart,detailEnd,snapshot==null?"用量记录":snapshot.CountLabel);
             UpdateLegend(models);
+        }
+        private void UpdateCacheTrend()
+        {
+            bool custom=cacheCustomRange!=null;UsageSnapshot data=custom?cacheCustomSnapshot:original;bool hourly=!custom&&cacheDays==1;
+            DailyUsage[] raw=data==null?new DailyUsage[0]:custom?(data.Timeline.Length>0?data.Timeline:data.Daily):hourly?data.Hourly:data.Daily;raw=Filter(raw,modelKey);
+            int through=hourly&&data!=null?data.HourlyThrough:raw.Length;cacheTrend.SetData(raw,custom?raw.Length:cacheDays,hourly,through,false,"daily",true);
+            cacheHint.Text=cacheCustomLoading?"正在读取自定义时间范围…":custom&&cacheCustomRange!=null?"自定义时间 · "+cacheCustomRange.Label:cacheDays==1?"当天 · 按小时显示":"近 "+cacheDays+" 天 · 按日显示";
         }
         private void UpdateLegend(ModelUsage[] models)
         {
@@ -828,15 +863,17 @@ namespace CodexUserData
             }
             foreach(var pair in totals){if(legendItems[pair.Key].Content is TextBlock)continue;var label=Theme.Text("● "+pair.Key,10,ModelColors.For(pair.Key));legendItems[pair.Key].Content=label;}
         }
-        private void OpenCustomRange()
+        private void OpenCustomRange(bool cache)
         {
-            DateTime now=DateTime.Now;DateTime initialFrom=customRange==null?now.AddHours(-1):customRange.From;DateTime initialTo=customRange==null?now:customRange.To;
+            DateTime now=DateTime.Now;UsageRangeSpec selected=cache?cacheCustomRange:customRange;DateTime initialFrom=selected==null?now.AddHours(-1):selected.From;DateTime initialTo=selected==null?now:selected.To;
             var picker=new DateTimeRangePicker(initialFrom,initialTo);
             var dialog=new StyledWindow{Title="自定义时间范围",Width=760,Height=430,MinWidth=720,MinHeight=410,ResizeMode=ResizeMode.NoResize,Owner=Window.GetWindow(this),ShowInTaskbar=false,WindowStartupLocation=WindowStartupLocation.CenterOwner};dialog.SetBody(picker,"选择日期和时间","CUSTOM RANGE",false);
             DateTime selectedFrom=initialFrom,selectedTo=initialTo;
             Func<bool> read=delegate{return picker.TryRead(out selectedFrom,out selectedTo);};
             picker.CancelButton.Click+=delegate{WindowInteraction.Close(dialog);};picker.ApplyButton.Click+=delegate{WindowInteraction.CompleteDialog(dialog,true,read);};
-            bool? result=dialog.ShowDialog();if(result==true){BeginCustomRange(selectedFrom,selectedTo,sourceLabel.Tag as string);if(CustomRangeRequested!=null)CustomRangeRequested(selectedFrom,selectedTo);else if(original!=null)ApplyCustomRange(original,sourceLabel.Tag as string,selectedFrom,selectedTo);}
+            bool? result=dialog.ShowDialog();if(result!=true)return;string scope=sourceLabel.Tag as string;
+            if(cache){BeginCacheCustomRange(selectedFrom,selectedTo,scope);if(CacheCustomRangeRequested!=null)CacheCustomRangeRequested(selectedFrom,selectedTo);else if(original!=null)ApplyCacheCustomRange(original,scope,selectedFrom,selectedTo);}
+            else{BeginCustomRange(selectedFrom,selectedTo,scope);if(CustomRangeRequested!=null)CustomRangeRequested(selectedFrom,selectedTo);else if(original!=null)ApplyCustomRange(original,scope,selectedFrom,selectedTo);}
         }
         private void Highlight(string model){trend.Highlight(model);foreach(var pair in legendItems)pair.Value.Opacity=model==null||pair.Key==model?1:.45;}
     }
