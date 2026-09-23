@@ -8,6 +8,7 @@
 !/.gitignore
 !/.gitattributes
 !/README.md
+!/model-prices.json
 !/README-release.md
 !/LICENSE
 !/THIRD-PARTY-NOTICES.txt
@@ -37,6 +38,7 @@
 !/tools/ChartStabilityProbe.cs
 !/tools/DiagnosticStabilityProbe.cs
 !/tools/UpdateStabilityProbe.cs
+!/tools/PriceCatalogStabilityProbe.cs
 !/tools/IslandStabilityProbe.cs
 !/tools/WindowMotionStabilityProbe.cs
 !/src/build.ps1
@@ -63,6 +65,7 @@
 !/src/QuotaStatus.cs
 !/src/SettingsWindow.cs
 !/src/ReleaseUpdate.cs
+!/src/PriceCatalog.cs
 !/src/Diagnostics.cs
 !/src/Theme.cs
 !/src/ThemeEditor.cs

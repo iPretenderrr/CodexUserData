@@ -14,30 +14,45 @@ namespace CodexUserData
         public long Tokens {get;set;} public long Input {get;set;} public long Output {get;set;} public long CacheRead {get;set;} public long CacheWrite {get;set;} public long Requests {get;set;}
         public decimal EquivalentUsd {get;set;} public long UnpricedTokens {get;set;}
         internal void Add(long input,long output,long read,long write,long requests)
+        {Add(input,output,read,write,requests,ApiPrices.Snapshot());}
+        internal void Add(long input,long output,long read,long write,long requests,PriceState prices)
         {
             checked{Input+=input;Output+=output;CacheRead+=read;CacheWrite+=write;Tokens+=input+output+read+write;Requests+=requests;}
-            long unknown;EquivalentUsd+=ApiPrices.Estimate(Model,input,output,read,write,out unknown);UnpricedTokens+=unknown;
+            long unknown;EquivalentUsd+=ApiPrices.Estimate(prices,Model,input,output,read,write,out unknown);UnpricedTokens+=unknown;
         }
         internal static void Accumulate(List<ModelUsage> list,string model,string effort,long input,long output,long read,long write,long requests)
+        {Accumulate(list,model,effort,input,output,read,write,requests,ApiPrices.Snapshot());}
+        internal static void Accumulate(List<ModelUsage> list,string model,string effort,long input,long output,long read,long write,long requests,PriceState prices)
         {
             model=String.IsNullOrWhiteSpace(model)?"unknown":model;effort=String.IsNullOrWhiteSpace(effort)?"unknown":effort;
-            var row=list.FirstOrDefault(m=>m.Model==model&&m.Effort==effort);if(row==null){row=new ModelUsage{Model=model,Effort=effort};list.Add(row);}row.Add(input,output,read,write,requests);
+            var row=list.FirstOrDefault(m=>String.Equals(m.Model,model,StringComparison.OrdinalIgnoreCase)&&m.Effort==effort);if(row==null){row=new ModelUsage{Model=model,Effort=effort};list.Add(row);}row.Add(input,output,read,write,requests,prices);
         }
+    }
+    internal sealed class PriceState
+    {
+        internal readonly Dictionary<string,decimal[]> Overrides,Catalog;
+        internal readonly long CatalogRevision;
+        internal readonly string CatalogCheckedOn;
+        internal PriceState(Dictionary<string,decimal[]> overrides,Dictionary<string,decimal[]> catalog,long revision,string checkedOn)
+        {Overrides=overrides;Catalog=catalog;CatalogRevision=revision;CatalogCheckedOn=checkedOn??"";}
     }
     internal static class ApiPrices
     {
-        internal const string CheckedOn="2026-09-08";
-        internal const string Basis="模型 API 等效值 · USD / 每百万 Tokens · 内置基准核对 2026-09-08；自定义价格优先";
+        internal const string CheckedOn="2026-09-23";
+        internal static string Basis {get{var value=current;return "模型 API 等效值 · USD / 每百万 Tokens · Standard 短上下文 · "+(value.CatalogRevision>0?"在线基准核对 "+value.CatalogCheckedOn:"内置基准核对 "+CheckedOn)+"；自定义价格优先";}}
         // USD / 1M tokens: fresh input, cached input, cache writes, output.
         // One explicit baseline makes historical totals comparable; not a reconstruction of invoices.
         private static readonly Dictionary<string,decimal[]> rates=new Dictionary<string,decimal[]>(StringComparer.OrdinalIgnoreCase) {
-            {"gpt-6-astra",new[]{10m,1m,12.5m,50m}}, {"gpt-5.6-sol",new[]{4m,.4m,5m,20m}},
+            {"gpt-6-astra",new[]{10m,1m,12.5m,50m}}, {"gpt-6-sol",new[]{2m,.2m,2.5m,10m}},
+            {"gpt-6-luna",new[]{.1m,.01m,.125m,.5m}}, {"gpt-5.6-sol",new[]{4m,.4m,5m,20m}},
             {"gpt-5.6",new[]{4m,.4m,5m,20m}}, {"gpt-5.6-terra",new[]{2m,.2m,2.5m,12m}},
             {"gpt-5.6-luna",new[]{.2m,.02m,.25m,1.2m}}, {"gpt-5.5",new[]{5m,.5m,-1m,30m}},
             {"gpt-5.4",new[]{2.5m,.25m,-1m,15m}}, {"gpt-5.3-codex",new[]{1.75m,.175m,-1m,14m}}
         };
-        private static volatile Dictionary<string,decimal[]> overrides=new Dictionary<string,decimal[]>(StringComparer.OrdinalIgnoreCase);
-        internal static object Version {get{return overrides;}}
+        private static readonly object gate=new object();
+        private static volatile PriceState current=new PriceState(new Dictionary<string,decimal[]>(StringComparer.OrdinalIgnoreCase),new Dictionary<string,decimal[]>(StringComparer.OrdinalIgnoreCase),0,"");
+        internal static object Version {get{return current;}}
+        internal static PriceState Snapshot(){return current;}
         internal static Dictionary<string,decimal[]> Clean(Dictionary<string,decimal[]> values)
         {
             var result=new Dictionary<string,decimal[]>(StringComparer.OrdinalIgnoreCase);
@@ -47,16 +62,41 @@ namespace CodexUserData
         // Publish a copied, immutable lookup; one worker applies it before a complete aggregation.
         internal static void Configure(Dictionary<string,decimal[]> values)
         {
-            var clean=Clean(values);var old=overrides;
-            if(old.Count==clean.Count&&clean.All(p=>old.ContainsKey(p.Key)&&old[p.Key].SequenceEqual(p.Value)))return;
-            overrides=clean;
+            var clean=Clean(values);lock(gate)
+            {
+                var old=current;if(Same(old.Overrides,clean))return;
+                current=new PriceState(clean,old.Catalog,old.CatalogRevision,old.CatalogCheckedOn);
+            }
         }
-        internal static IEnumerable<string> DefaultModels {get{return rates.Keys;}}
-        internal static decimal[] Default(string model){decimal[] value;return model!=null&&rates.TryGetValue(model,out value)?(decimal[])value.Clone():new[]{-1m,-1m,-1m,-1m};}
-        internal static decimal Estimate(string model,long input,long output,long cached,long write,out long unknown)
+        internal static bool ConfigureCatalog(Dictionary<string,decimal[]> values,long revision,string checkedOn)
         {
-            decimal[] rate;var current=overrides;unknown=0;
-            if(model==null||(!current.TryGetValue(model,out rate)&&!rates.TryGetValue(model,out rate))){return 0;}
+            var clean=Clean(values);if(clean.Count==0||revision<=0)throw new InvalidDataException("价格清单为空。");
+            lock(gate)
+            {
+                var old=current;if(revision<old.CatalogRevision)throw new InvalidDataException("价格清单版本不能回退。");
+                if(revision==old.CatalogRevision)
+                {
+                    if(!Same(old.Catalog,clean)||!String.Equals(old.CatalogCheckedOn,checkedOn,StringComparison.Ordinal))throw new InvalidDataException("相同版本的价格清单内容发生变化。");
+                    return false;
+                }
+                current=new PriceState(old.Overrides,clean,revision,checkedOn);return true;
+            }
+        }
+        private static bool Same(Dictionary<string,decimal[]> left,Dictionary<string,decimal[]> right)
+        {return left.Count==right.Count&&right.All(p=>left.ContainsKey(p.Key)&&left[p.Key].SequenceEqual(p.Value));}
+        internal static IEnumerable<string> DefaultModels {get{return rates.Keys.Concat(current.Catalog.Keys).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();}}
+        internal static decimal[] Default(string model)
+        {
+            decimal[] value;var state=current;
+            return model!=null&&(state.Catalog.TryGetValue(model,out value)||rates.TryGetValue(model,out value))?(decimal[])value.Clone():new[]{-1m,-1m,-1m,-1m};
+        }
+        internal static string DefaultSource(string model){return model!=null&&current.Catalog.ContainsKey(model)?"在线基准":model!=null&&rates.ContainsKey(model)?"内置":"";}
+        internal static decimal Estimate(string model,long input,long output,long cached,long write,out long unknown)
+        {return Estimate(current,model,input,output,cached,write,out unknown);}
+        internal static decimal Estimate(PriceState state,string model,long input,long output,long cached,long write,out long unknown)
+        {
+            decimal[] rate;state=state??current;unknown=0;
+            if(model==null||(!state.Overrides.TryGetValue(model,out rate)&&!state.Catalog.TryGetValue(model,out rate)&&!rates.TryGetValue(model,out rate))){return 0;}
             // Missing components contribute zero to this estimate; this does not assert free billing.
             return (input*Math.Max(0,rate[0])+cached*Math.Max(0,rate[1])+write*Math.Max(0,rate[2])+output*Math.Max(0,rate[3]))/1000000m;
         }
@@ -258,7 +298,7 @@ WHERE r.date >= ?1 AND r.date <= ?2
             if (String.IsNullOrWhiteSpace(dbPath) || !File.Exists(dbPath))
                 throw new FileNotFoundException("找不到 CC Switch 数据库，请确认 CC Switch 已初始化或选择正确的数据库。");
 
-            DateTime localNow = now.Kind == DateTimeKind.Utc ? now.ToLocalTime() : DateTime.SpecifyKind(now, DateTimeKind.Local);
+            DateTime localNow = now.Kind == DateTimeKind.Utc ? now.ToLocalTime() : DateTime.SpecifyKind(now, DateTimeKind.Local);PriceState prices=ApiPrices.Snapshot();
             UsageRangeSpec custom;
             if (UsageRangeSpec.TryParse(range,out custom)) return ReadCustom(dbPath,custom.From,custom.To,app,localNow);
             DateTime? start;
@@ -333,9 +373,9 @@ WHERE r.date >= ?1 AND r.date <= ?2
                             latestArchive = statement.Text(7);
                         }
                     }
-                    ReadDaily(db,result.Daily,endSeconds,lastRollupDate,app);
-                    ReadHourly(db,result.Hourly,localNow,endSeconds,app);
-                    ReadModels(db,result,startSeconds,endSeconds,firstRollupDay,lastRollupDate,app);
+                    ReadDaily(db,result.Daily,endSeconds,lastRollupDate,app,prices);
+                    ReadHourly(db,result.Hourly,localNow,endSeconds,app,prices);
+                    ReadModels(db,result,startSeconds,endSeconds,firstRollupDay,lastRollupDate,app,prices);
                 }
                 finally
                 {
@@ -366,7 +406,7 @@ WHERE r.date >= ?1 AND r.date <= ?2
         {
             if (String.IsNullOrWhiteSpace(dbPath) || !File.Exists(dbPath))
                 throw new FileNotFoundException("找不到 CC Switch 数据库，请确认 CC Switch 已初始化或选择正确的数据库。");
-            DateTime localFrom=DateTime.SpecifyKind(from,DateTimeKind.Local),localTo=DateTime.SpecifyKind(to,DateTimeKind.Local);
+            DateTime localFrom=DateTime.SpecifyKind(from,DateTimeKind.Local),localTo=DateTime.SpecifyKind(to,DateTimeKind.Local);PriceState prices=ApiPrices.Snapshot();
             if(localTo<localFrom)throw new ArgumentException("结束时间不能早于开始时间。");
             long startSeconds=ToUnixSeconds(localFrom),endSeconds=ToUnixSeconds(localTo);
             int dayCount=checked((localTo.Date-localFrom.Date).Days+1);
@@ -399,9 +439,9 @@ WHERE r.date >= ?1 AND r.date <= ?2
                             checked{result.Requests+=result.ArchivedRequests;result.InputTokens+=statement.Int64(1);result.OutputTokens+=statement.Int64(2);result.CacheReadTokens+=statement.Int64(3);result.CacheCreationTokens+=statement.Int64(4);result.SuccessCount+=statement.Int64(6);}archivedCost=statement.Double(5);latestArchive=statement.Text(7);
                         }
                     }
-                    ReadDailyCustom(db,result.Daily,startSeconds,endSeconds,firstRollup,lastRollup,app);
-                    if(result.TimelineStepSeconds<86400)ReadTimeline(db,result.Timeline,startSeconds,endSeconds,result.TimelineStepSeconds,app);
-                    ReadModels(db,result,startSeconds,endSeconds,firstRollup,lastRollup,app);
+                    ReadDailyCustom(db,result.Daily,startSeconds,endSeconds,firstRollup,lastRollup,app,prices);
+                    if(result.TimelineStepSeconds<86400)ReadTimeline(db,result.Timeline,startSeconds,endSeconds,result.TimelineStepSeconds,app,prices);
+                    ReadModels(db,result,startSeconds,endSeconds,firstRollup,lastRollup,app,prices);
                 }
                 finally{db.Execute("ROLLBACK");}
             }
@@ -424,23 +464,23 @@ WHERE r.date >= ?1 AND r.date <= ?2
             }
             return models.OrderBy(m=>m).ToArray();
         }
-        private static void ReadModels(ReadConnection db,UsageSnapshot result,long from,long until,string first,string last,string app)
+        private static void ReadModels(ReadConnection db,UsageSnapshot result,long from,long until,string first,string last,string app,PriceState prices)
         {
             string tail=" AND (?3='' OR (CASE WHEN l.app_type='claude-desktop' THEN 'claude' ELSE l.app_type END)=?3)";
             string detail="SELECT l.model,SUM("+FreshInput("l")+"),SUM(l.output_tokens),SUM(l.cache_read_tokens),SUM(l.cache_creation_tokens),COUNT(*) FROM proxy_request_logs l WHERE l.created_at>=?1 AND l.created_at<=?2"+tail+" AND "+EffectiveLogFilter+" GROUP BY l.model";
             string rollup="SELECT l.model,SUM("+FreshInput("l")+"),SUM(l.output_tokens),SUM(l.cache_read_tokens),SUM(l.cache_creation_tokens),SUM(l.request_count) FROM usage_daily_rollups l WHERE l.date>=?1 AND l.date<=?2"+tail+" GROUP BY l.model";
-            using(var rows=db.Prepare(detail)){rows.Bind(1,from);rows.Bind(2,until);rows.Bind(3,app??"");AddModels(rows,result.Models);}
-            using(var rows=db.Prepare(rollup)){rows.Bind(1,first);rows.Bind(2,last);rows.Bind(3,app??"");AddModels(rows,result.Models);}
+            using(var rows=db.Prepare(detail)){rows.Bind(1,from);rows.Bind(2,until);rows.Bind(3,app??"");AddModels(rows,result.Models,prices);}
+            using(var rows=db.Prepare(rollup)){rows.Bind(1,first);rows.Bind(2,last);rows.Bind(3,app??"");AddModels(rows,result.Models,prices);}
             result.EquivalentUsd=result.Models.Sum(m=>m.EquivalentUsd);result.UnpricedTokens=result.Models.Sum(m=>m.UnpricedTokens);
         }
-        private static void AddModels(ReadStatement rows,List<ModelUsage> models){while(rows.Next())ModelUsage.Accumulate(models,rows.Text(0),"unknown",rows.Int64(1),rows.Int64(2),rows.Int64(3),rows.Int64(4),rows.Int64(5));}
+        private static void AddModels(ReadStatement rows,List<ModelUsage> models,PriceState prices){while(rows.Next())ModelUsage.Accumulate(models,rows.Text(0),"unknown",rows.Int64(1),rows.Int64(2),rows.Int64(3),rows.Int64(4),rows.Int64(5),prices);}
 
         private static long ToUnixSeconds(DateTime localTime)
         {
             return (long)Math.Floor((localTime.ToUniversalTime() - Epoch).TotalSeconds);
         }
 
-        private static void ReadDaily(ReadConnection db,DailyUsage[] days,long until,string lastRollup,string app)
+        private static void ReadDaily(ReadConnection db,DailyUsage[] days,long until,string lastRollup,string app,PriceState prices)
         {
             // Two grouped queries share the same read transaction as the headline.
             // Do not query once per square: that would multiply SQLite work by 180.
@@ -458,14 +498,14 @@ FROM usage_daily_rollups r WHERE r.date>=?1 AND r.date<=?2
 AND (?3='' OR (CASE WHEN r.app_type='claude-desktop' THEN 'claude' ELSE r.app_type END)=?3) GROUP BY 1,r.model";
             using(var rows=db.Prepare(detail))
             {
-                rows.Bind(1,ToUnixSeconds(DateTime.ParseExact(days[0].Date,"yyyy-MM-dd",CultureInfo.InvariantCulture)));rows.Bind(2,until);rows.Bind(3,app??"");AddDailyRows(rows,byDate);
+                rows.Bind(1,ToUnixSeconds(DateTime.ParseExact(days[0].Date,"yyyy-MM-dd",CultureInfo.InvariantCulture)));rows.Bind(2,until);rows.Bind(3,app??"");AddDailyRows(rows,byDate,prices);
             }
             using(var rows=db.Prepare(rollup))
             {
-                rows.Bind(1,days[0].Date);rows.Bind(2,lastRollup);rows.Bind(3,app??"");AddDailyRows(rows,byDate);
+                rows.Bind(1,days[0].Date);rows.Bind(2,lastRollup);rows.Bind(3,app??"");AddDailyRows(rows,byDate,prices);
             }
         }
-        private static void ReadDailyCustom(ReadConnection db,DailyUsage[] days,long from,long until,string firstRollup,string lastRollup,string app)
+        private static void ReadDailyCustom(ReadConnection db,DailyUsage[] days,long from,long until,string firstRollup,string lastRollup,string app,PriceState prices)
         {
             var byDate=new Dictionary<string,DailyUsage>();foreach(var day in days)byDate[day.Date]=day;
             var calendar=new StringBuilder("WITH calendar(day,lo,hi) AS (VALUES ");
@@ -477,10 +517,10 @@ AND (?3='' OR (CASE WHEN l.app_type='claude-desktop' THEN 'claude' ELSE l.app_ty
             string rollup=@"SELECT r.date,SUM(r.request_count),SUM("+FreshInput("r")+@"),SUM(r.output_tokens),SUM(r.cache_read_tokens),SUM(r.cache_creation_tokens),SUM(CAST(r.total_cost_usd AS REAL)),r.model
 FROM usage_daily_rollups r WHERE r.date>=?1 AND r.date<=?2
 AND (?3='' OR (CASE WHEN r.app_type='claude-desktop' THEN 'claude' ELSE r.app_type END)=?3) GROUP BY 1,r.model";
-            using(var rows=db.Prepare(detail)){rows.Bind(1,from);rows.Bind(2,until);rows.Bind(3,app??"");AddDailyRows(rows,byDate);}
-            if(String.CompareOrdinal(firstRollup,lastRollup)<=0)using(var rows=db.Prepare(rollup)){rows.Bind(1,firstRollup);rows.Bind(2,lastRollup);rows.Bind(3,app??"");AddDailyRows(rows,byDate);}
+            using(var rows=db.Prepare(detail)){rows.Bind(1,from);rows.Bind(2,until);rows.Bind(3,app??"");AddDailyRows(rows,byDate,prices);}
+            if(String.CompareOrdinal(firstRollup,lastRollup)<=0)using(var rows=db.Prepare(rollup)){rows.Bind(1,firstRollup);rows.Bind(2,lastRollup);rows.Bind(3,app??"");AddDailyRows(rows,byDate,prices);}
         }
-        private static void ReadTimeline(ReadConnection db,DailyUsage[] buckets,long from,long until,long step,string app)
+        private static void ReadTimeline(ReadConnection db,DailyUsage[] buckets,long from,long until,long step,string app,PriceState prices)
         {
             string sql=@"SELECT CAST((l.created_at-?1)/?3 AS INTEGER),COUNT(*),SUM("+FreshInput("l")+@"),SUM(l.output_tokens),SUM(l.cache_read_tokens),SUM(l.cache_creation_tokens),SUM(CAST(l.total_cost_usd AS REAL)),l.model
 FROM proxy_request_logs l WHERE l.created_at>=?1 AND l.created_at<=?2
@@ -491,28 +531,28 @@ AND (?4='' OR (CASE WHEN l.app_type='claude-desktop' THEN 'claude' ELSE l.app_ty
                 while(rows.Next())
                 {
                     int index=(int)rows.Int64(0);if(index<0||index>=buckets.Length)continue;var bucket=buckets[index];
-                    bucket.Add(rows.Int64(2),rows.Int64(3),rows.Int64(4),rows.Int64(5),rows.Int64(1),0,(decimal)rows.Double(6));ModelUsage.Accumulate(bucket.Models,rows.Text(7),"unknown",rows.Int64(2),rows.Int64(3),rows.Int64(4),rows.Int64(5),rows.Int64(1));
+                    bucket.Add(rows.Int64(2),rows.Int64(3),rows.Int64(4),rows.Int64(5),rows.Int64(1),0,(decimal)rows.Double(6));ModelUsage.Accumulate(bucket.Models,rows.Text(7),"unknown",rows.Int64(2),rows.Int64(3),rows.Int64(4),rows.Int64(5),rows.Int64(1),prices);
                 }
             }
         }
-        private static void AddDailyRows(ReadStatement rows,Dictionary<string,DailyUsage> days)
+        private static void AddDailyRows(ReadStatement rows,Dictionary<string,DailyUsage> days,PriceState prices)
         {
             while(rows.Next())
             {
                 DailyUsage day;if(!days.TryGetValue(rows.Text(0),out day))continue;
                 day.Add(rows.Int64(2),rows.Int64(3),rows.Int64(4),rows.Int64(5),rows.Int64(1),0,(decimal)rows.Double(6));
-                ModelUsage.Accumulate(day.Models,rows.Text(7),"unknown",rows.Int64(2),rows.Int64(3),rows.Int64(4),rows.Int64(5),rows.Int64(1));
+                ModelUsage.Accumulate(day.Models,rows.Text(7),"unknown",rows.Int64(2),rows.Int64(3),rows.Int64(4),rows.Int64(5),rows.Int64(1),prices);
             }
         }
 
-        private static void ReadHourly(ReadConnection db,DailyUsage[] hours,DateTime now,long until,string app)
+        private static void ReadHourly(ReadConnection db,DailyUsage[] hours,DateTime now,long until,string app,PriceState prices)
         {
             // One grouped read in the same snapshot; no per-hour queries and no extra database scan per graph.
             var calendar=new StringBuilder("WITH calendar(day,lo,hi) AS (VALUES ");
             for(int h=0;h<24;h++){if(h>0)calendar.Append(',');calendar.Append("('").Append(hours[h].Date).Append("',").Append(ToUnixSeconds(now.Date.AddHours(h))).Append(',').Append(ToUnixSeconds(now.Date.AddHours(h+1))).Append(')');}
             calendar.Append(") ");
             string sql=calendar+"SELECT calendar.day,COUNT(*),SUM("+FreshInput("l")+"),SUM(l.output_tokens),SUM(l.cache_read_tokens),SUM(l.cache_creation_tokens),SUM(CAST(l.total_cost_usd AS REAL)),l.model FROM calendar JOIN proxy_request_logs l ON l.created_at>=calendar.lo AND l.created_at<calendar.hi WHERE l.created_at>=?1 AND l.created_at<=?2 AND (?3='' OR (CASE WHEN l.app_type='claude-desktop' THEN 'claude' ELSE l.app_type END)=?3) AND "+EffectiveLogFilter+" GROUP BY 1,l.model";
-            using(var rows=db.Prepare(sql)){rows.Bind(1,ToUnixSeconds(now.Date));rows.Bind(2,until);rows.Bind(3,app??"");AddDailyRows(rows,hours.ToDictionary(h=>h.Date));}
+            using(var rows=db.Prepare(sql)){rows.Bind(1,ToUnixSeconds(now.Date));rows.Bind(2,until);rows.Bind(3,app??"");AddDailyRows(rows,hours.ToDictionary(h=>h.Date),prices);}
         }
 
         private sealed class ReadConnection : IDisposable

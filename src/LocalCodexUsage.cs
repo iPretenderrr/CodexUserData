@@ -60,9 +60,9 @@ namespace CodexUserData
         internal UsageSnapshot Get(Dictionary<string,LogCursor> records,int dataVersion,string range,DateTime now,int failed=0)
         {
             if(now.Kind==DateTimeKind.Utc)now=now.ToLocalTime();
-            long at=LocalCodexUsage.Unix(now);string clock=now.ToString("yyyyMMddHH",CultureInfo.InvariantCulture)+"/"+TimeZoneInfo.Local.GetUtcOffset(now).Ticks;
-            if(version!=dataVersion||failures!=failed||prices!=ApiPrices.Version||hour!=clock||at<readAt||at>=nextChange)
-            {ranges.Clear();version=dataVersion;failures=failed;prices=ApiPrices.Version;hour=clock;nextChange=Int64.MaxValue;}
+            PriceState priceState=ApiPrices.Snapshot();long at=LocalCodexUsage.Unix(now);string clock=now.ToString("yyyyMMddHH",CultureInfo.InvariantCulture)+"/"+TimeZoneInfo.Local.GetUtcOffset(now).Ticks;
+            if(version!=dataVersion||failures!=failed||prices!=priceState||hour!=clock||at<readAt||at>=nextChange)
+            {ranges.Clear();version=dataVersion;failures=failed;prices=priceState;hour=clock;nextChange=Int64.MaxValue;}
             readAt=at;UsageSnapshot value;
             if(!ranges.TryGetValue(range,out value))
             {
@@ -71,25 +71,25 @@ namespace CodexUserData
                 {
                     // Custom intervals need event timestamps, so aggregate directly from
                     // the already-read ledger instead of rounding to whole days.
-                    value=LocalCodexUsage.Aggregate(records,range,now,failed);ranges[range]=value;
+                    value=LocalCodexUsage.Aggregate(records,range,now,failed,priceState);ranges[range]=value;
                 }
                 else
                 {
                     UsageSnapshot all;
-                    if(!ranges.TryGetValue("all",out all)){all=LocalCodexUsage.Aggregate(records,"all",now,failed);ranges["all"]=all;nextChange=all.NextChangeAt;}
-                    value=Select(all,range,now);ranges[range]=value;
+                    if(!ranges.TryGetValue("all",out all)){all=LocalCodexUsage.Aggregate(records,"all",now,failed,priceState);ranges["all"]=all;nextChange=all.NextChangeAt;}
+                    value=Select(all,range,now,priceState);ranges[range]=value;
                 }
             }
             return value.Copy();
         }
-        private static UsageSnapshot Select(UsageSnapshot all,string range,DateTime now)
+        private static UsageSnapshot Select(UsageSnapshot all,string range,DateTime now,PriceState prices)
         {
             if(range=="all")return all;
             int count=range=="week"?7:range=="month"?30:1,index=count==1?0:count==7?1:2;
             var result=all.Copy();var days=all.Daily.Skip(Math.Max(0,all.Daily.Length-count)).ToArray();
             result.TotalTokens=days.Sum(d=>d.Tokens);result.InputTokens=days.Sum(d=>d.Input);result.OutputTokens=days.Sum(d=>d.Output);
             result.CacheReadTokens=days.Sum(d=>d.CacheRead);result.CacheCreationTokens=days.Sum(d=>d.CacheWrite);result.ReasoningTokens=days.Sum(d=>d.Reasoning);result.Requests=days.Sum(d=>d.Requests);
-            result.Models=new List<ModelUsage>();foreach(var model in days.SelectMany(d=>d.Models))ModelUsage.Accumulate(result.Models,model.Model,model.Effort,model.Input,model.Output,model.CacheRead,model.CacheWrite,model.Requests);
+            result.Models=new List<ModelUsage>();foreach(var model in days.SelectMany(d=>d.Models))ModelUsage.Accumulate(result.Models,model.Model,model.Effort,model.Input,model.Output,model.CacheRead,model.CacheWrite,model.Requests,prices);
             result.EquivalentUsd=result.Models.Sum(m=>m.EquivalentUsd);result.UnpricedTokens=result.Models.Sum(m=>m.UnpricedTokens);
             long input=result.InputTokens+result.CacheReadTokens+result.CacheCreationTokens;result.CacheHitRate=input>0?result.CacheReadTokens*100.0/input:0;
             result.Sessions=all.PeriodSessions[index];result.InferredRecords=all.PeriodInferred[index];
@@ -361,6 +361,8 @@ namespace CodexUserData
             LogCursor value;if(!cursors.TryGetValue(path,out value)){value=new LogCursor{Id=LogFile.SessionId(path),Path=path};cursors[path]=value;dirty=true;}return value;
         }
         internal static UsageSnapshot Aggregate(Dictionary<string,LogCursor> cursors,string range,DateTime now,int failed=0)
+        {return Aggregate(cursors,range,now,failed,ApiPrices.Snapshot());}
+        internal static UsageSnapshot Aggregate(Dictionary<string,LogCursor> cursors,string range,DateTime now,int failed,PriceState prices)
         {
             if(now.Kind==DateTimeKind.Utc)now=now.ToLocalTime();
             UsageRangeSpec custom;
@@ -417,7 +419,7 @@ namespace CodexUserData
                     {
                         var hour=result.Hourly[Epoch.AddSeconds(item.Time).ToLocalTime().Hour];
                         hour.Add(item.Input-item.Cached-item.CacheWrite,item.Output,item.Cached,item.CacheWrite,1,item.Reasoning,0);
-                        ModelUsage.Accumulate(hour.Models,item.Model,item.Effort,item.Input-item.Cached-item.CacheWrite,item.Output,item.Cached,item.CacheWrite,1);
+                        ModelUsage.Accumulate(hour.Models,item.Model,item.Effort,item.Input-item.Cached-item.CacheWrite,item.Output,item.Cached,item.CacheWrite,1,prices);
                     }
                     // Reuse the already-deduplicated events; daily charts never reread the rollout files.
                     bool inHistory=item.Time>=historyFrom&&(!customRange||item.Time>=from)&&(!customRange||item.Time<=until);
@@ -425,7 +427,7 @@ namespace CodexUserData
                     {
                         int index=(Epoch.AddSeconds(item.Time).ToLocalTime().Date-historyStart).Days;
                         if(index>=0&&index<result.Daily.Length)result.Daily[index].Add(item.Input-item.Cached-item.CacheWrite,item.Output,item.Cached,item.CacheWrite,1,item.Reasoning,0);
-                        if(index>=0&&index<result.Daily.Length)ModelUsage.Accumulate(result.Daily[index].Models,item.Model,item.Effort,item.Input-item.Cached-item.CacheWrite,item.Output,item.Cached,item.CacheWrite,1);
+                        if(index>=0&&index<result.Daily.Length)ModelUsage.Accumulate(result.Daily[index].Models,item.Model,item.Effort,item.Input-item.Cached-item.CacheWrite,item.Output,item.Cached,item.CacheWrite,1,prices);
                     }
                     if(item.Time<from)continue;
                     if(customRange&&timelineStep<86400)
@@ -435,11 +437,11 @@ namespace CodexUserData
                         {
                             var bucket=result.Timeline[timelineIndex];
                             bucket.Add(item.Input-item.Cached-item.CacheWrite,item.Output,item.Cached,item.CacheWrite,1,item.Reasoning,0);
-                            ModelUsage.Accumulate(bucket.Models,item.Model,item.Effort,item.Input-item.Cached-item.CacheWrite,item.Output,item.Cached,item.CacheWrite,1);
+                            ModelUsage.Accumulate(bucket.Models,item.Model,item.Effort,item.Input-item.Cached-item.CacheWrite,item.Output,item.Cached,item.CacheWrite,1,prices);
                         }
                     }
                     checked {result.TotalTokens+=item.Input+item.Output;result.InputTokens+=item.Input-item.Cached-item.CacheWrite;result.CacheReadTokens+=item.Cached;result.CacheCreationTokens+=item.CacheWrite;result.OutputTokens+=item.Output;result.ReasoningTokens+=item.Reasoning;result.Requests++;}
-                    ModelUsage.Accumulate(result.Models,item.Model,item.Effort,item.Input-item.Cached-item.CacheWrite,item.Output,item.Cached,item.CacheWrite,1);
+                    ModelUsage.Accumulate(result.Models,item.Model,item.Effort,item.Input-item.Cached-item.CacheWrite,item.Output,item.Cached,item.CacheWrite,1,prices);
                     if(item.Inferred)result.InferredRecords++;
                     latest=Math.Max(latest,item.Time);used=true;
                 }

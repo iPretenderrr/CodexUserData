@@ -1,4 +1,4 @@
-﻿param([string]$Version='1.9.2',[switch]$FloatingOnly,[switch]$PeriodOnly,[switch]$SkipHtmlSmokeTest)
+﻿param([string]$Version='1.9.3',[switch]$FloatingOnly,[switch]$PeriodOnly,[switch]$SkipHtmlSmokeTest)
 # Keep this script UTF-8 with BOM: Windows PowerShell 5.1 must decode the Chinese allowlist paths correctly.
 $ErrorActionPreference='Stop'
 if($Version -notmatch '^\d+\.\d+\.\d+$'){throw 'Version must be major.minor.patch'}

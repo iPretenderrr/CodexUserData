@@ -10,8 +10,8 @@ using System.Windows;
 
 [assembly: System.Reflection.AssemblyTitle("CodexUserData")]
 [assembly: System.Reflection.AssemblyProduct("CodexUserData")]
-[assembly: System.Reflection.AssemblyVersion("1.9.2.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.9.2.0")]
+[assembly: System.Reflection.AssemblyVersion("1.9.3.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.9.3.0")]
 
 namespace CodexUserData
 {
@@ -190,7 +190,7 @@ namespace CodexUserData
                         if(h!=IntPtr.Zero)PostMessage(h,ShowMainMessage,IntPtr.Zero,IntPtr.Zero);return 0;
                     }
                 }
-                PortableStore.Initialize(DataFolder,Path.Combine(Folder,"data"));Preferences p=ReadPreferences();ApiPrices.Configure(p.PriceOverrides);
+                PortableStore.Initialize(DataFolder,Path.Combine(Folder,"data"));PriceCatalog.LoadCached();Preferences p=ReadPreferences();ApiPrices.Configure(p.PriceOverrides);
                 if(args.Length>1 && args[0]=="--quota-check")
                 {
                     var quotas=QuotaReader.Query(args.Length>2?args[2]:p.QuotaCli,p.CodexHome).GetAwaiter().GetResult();
@@ -214,6 +214,7 @@ namespace CodexUserData
                     if(p.StartWithWindows||p.StartWithCodex)try{StartupRegistration.Configure(p,Path.Combine(Folder,"CodexUserData.exe"));if(p.StartWithCodex)CodexLaunchWatcher.Ensure();}catch(Exception){MessageBox.Show("无法更新 Windows 自启动项。软件仍可使用，请在设置中重新保存自启动选项。",WindowTitle,MessageBoxButton.OK,MessageBoxImage.Information);}
                     var app=new Application {ShutdownMode=ShutdownMode.OnMainWindowClose};var main=new WidgetWindow(p,false);
                     main.Loaded+=delegate{if(p.LiveQuota&&!File.Exists(p.QuotaCli)&&!p.CliNoticeShown){p.CliNoticeShown=true;Save(p);MessageBox.Show("未找到 Codex CLI 可执行文件。请在设置中点击自动检测，或手动选择 codex.exe。本地用量统计仍可读取日志；在线额度需要可用且已登录的 CLI。",WindowTitle,MessageBoxButton.OK,MessageBoxImage.Information);}};
+                    main.Loaded+=async delegate{if(await PriceCatalog.RefreshAsync(CancellationToken.None))main.RefreshModelPrices();};
                     app.Run(main);
                 return 0;
             }

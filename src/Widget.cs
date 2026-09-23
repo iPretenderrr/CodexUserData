@@ -411,6 +411,9 @@ namespace CodexUserData
             styled.SetBody(layout,"用量与额度趋势","USAGE INSIGHTS",true);historyWindow=styled;historyWindow.Loaded+=delegate{if(historyWindow!=null)ClampWindow(historyWindow);};historyWindow.Closed+=delegate{historyWindow=null;largeHistory=null;quotaHistoryPanel=null;};historyWindow.Show();
         }
         private void RefreshData(){RefreshUsage(true);}
+        // Price updates reuse the parsed ledger and database query path; they do not force
+        // a filesystem rescan, which keeps the feature cheap on low-performance devices.
+        internal void RefreshModelPrices(){if(!preview&&!closed)RefreshUsage(false);}
         private async void RefreshUsage(bool scan)
         {
             if(preview||closed)return;if(busy){refreshPending=true;scanPending|=scan;return;}busy=true;int version=revision;string selected=prefs.Source,range=prefs.Range,application=prefs.App,db=prefs.Database,home=prefs.CodexHome,view=prefs.UsageView;var remoteReader=remote;var priceOverrides=prefs.PriceOverrides;UsageSnapshot total=null;Dictionary<string,UsageSnapshot> available=null;DateTime observed=DateTime.Now;

@@ -91,26 +91,26 @@ namespace CodexUserData
     {
         internal static DailyUsage[] Build(DailyUsage[] source,string mode)
         {
-            source=source??new DailyUsage[0];
-            if(mode=="weekly")return Weekly(source);
-            if(mode=="cumulative")return Cumulative(source);
+            source=source??new DailyUsage[0];PriceState prices=ApiPrices.Snapshot();
+            if(mode=="weekly")return Weekly(source,prices);
+            if(mode=="cumulative")return Cumulative(source,prices);
             return source;
         }
-        private static DailyUsage[] Weekly(DailyUsage[] source)
+        private static DailyUsage[] Weekly(DailyUsage[] source,PriceState prices)
         {
             var result=new List<DailyUsage>();string current=null;DailyUsage bucket=null;
             foreach(var item in source)
             {
                 DateTime date=DateTime.ParseExact(item.Date.Substring(0,10),"yyyy-MM-dd",CultureInfo.InvariantCulture);
                 string sunday=date.AddDays(-(int)date.DayOfWeek).ToString("yyyy-MM-dd",CultureInfo.InvariantCulture);
-                if(sunday!=current){current=sunday;bucket=new DailyUsage{Date=sunday,DisplayLabel=WeekLabel(date)};result.Add(bucket);}Merge(bucket,item);
+                if(sunday!=current){current=sunday;bucket=new DailyUsage{Date=sunday,DisplayLabel=WeekLabel(date)};result.Add(bucket);}Merge(bucket,item,prices);
             }
             return result.ToArray();
         }
-        private static DailyUsage[] Cumulative(DailyUsage[] source)
+        private static DailyUsage[] Cumulative(DailyUsage[] source,PriceState prices)
         {
             var result=new DailyUsage[source.Length];var running=new DailyUsage();
-            for(int i=0;i<source.Length;i++){Merge(running,source[i]);var point=new DailyUsage{Date=source[i].Date,DisplayLabel="累计至 "+source[i].Date};Merge(point,running);result[i]=point;}
+            for(int i=0;i<source.Length;i++){Merge(running,source[i],prices);var point=new DailyUsage{Date=source[i].Date,DisplayLabel="累计至 "+source[i].Date};Merge(point,running,prices);result[i]=point;}
             return result;
         }
         internal static string WeekLabel(DateTime date)
@@ -118,9 +118,11 @@ namespace CodexUserData
             DateTime sunday=date.Date.AddDays(-(int)date.DayOfWeek);return "周 "+sunday.ToString("yyyy-MM-dd",CultureInfo.InvariantCulture)+" ～ "+sunday.AddDays(6).ToString("yyyy-MM-dd",CultureInfo.InvariantCulture);
         }
         internal static void Merge(DailyUsage target,DailyUsage source)
+        {Merge(target,source,ApiPrices.Snapshot());}
+        internal static void Merge(DailyUsage target,DailyUsage source,PriceState prices)
         {
             target.Add(source.Input,source.Output,source.CacheRead,source.CacheWrite,source.Requests,source.Reasoning,source.CostUsd);
-            foreach(var model in source.Models)ModelUsage.Accumulate(target.Models,model.Model,model.Effort,model.Input,model.Output,model.CacheRead,model.CacheWrite,model.Requests);
+            foreach(var model in source.Models)ModelUsage.Accumulate(target.Models,model.Model,model.Effort,model.Input,model.Output,model.CacheRead,model.CacheWrite,model.Requests,prices);
         }
     }
 
@@ -130,28 +132,28 @@ namespace CodexUserData
     {
         internal static DailyUsage[] Build(DailyUsage[] source,string mode)
         {
-            source=source??new DailyUsage[0];
-            if(mode=="weekly")return Weekly(source);
-            if(mode=="cumulative")return Cumulative(source);
+            source=source??new DailyUsage[0];PriceState prices=ApiPrices.Snapshot();
+            if(mode=="weekly")return Weekly(source,prices);
+            if(mode=="cumulative")return Cumulative(source,prices);
             return source;
         }
-        private static DailyUsage[] Weekly(DailyUsage[] source)
+        private static DailyUsage[] Weekly(DailyUsage[] source,PriceState prices)
         {
             var result=new List<DailyUsage>();string current=null;DailyUsage bucket=null;DateTime first=source.Length==0?DateTime.MinValue:DateTime.ParseExact(source[0].Date.Substring(0,10),"yyyy-MM-dd",CultureInfo.InvariantCulture),last=source.Length==0?DateTime.MinValue:DateTime.ParseExact(source[source.Length-1].Date.Substring(0,10),"yyyy-MM-dd",CultureInfo.InvariantCulture);
             foreach(var item in source)
             {
                 DateTime date=DateTime.ParseExact(item.Date.Substring(0,10),"yyyy-MM-dd",CultureInfo.InvariantCulture);string sunday=date.AddDays(-(int)date.DayOfWeek).ToString("yyyy-MM-dd",CultureInfo.InvariantCulture);
-                if(sunday!=current){current=sunday;DateTime from=date.AddDays(-(int)date.DayOfWeek),to=from.AddDays(6);if(from<first)from=first;if(to>last)to=last;bucket=new DailyUsage{Date=sunday,DisplayLabel="周 "+from.ToString("yyyy-MM-dd",CultureInfo.InvariantCulture)+" ～ "+to.ToString("yyyy-MM-dd",CultureInfo.InvariantCulture)};result.Add(bucket);}UsageTrendSeries.Merge(bucket,item);
+                if(sunday!=current){current=sunday;DateTime from=date.AddDays(-(int)date.DayOfWeek),to=from.AddDays(6);if(from<first)from=first;if(to>last)to=last;bucket=new DailyUsage{Date=sunday,DisplayLabel="周 "+from.ToString("yyyy-MM-dd",CultureInfo.InvariantCulture)+" ～ "+to.ToString("yyyy-MM-dd",CultureInfo.InvariantCulture)};result.Add(bucket);}UsageTrendSeries.Merge(bucket,item,prices);
             }
             return result.ToArray();
         }
-        private static DailyUsage[] Cumulative(DailyUsage[] source)
+        private static DailyUsage[] Cumulative(DailyUsage[] source,PriceState prices)
         {
-            var weeks=Weekly(source);var result=new DailyUsage[weeks.Length];var running=new DailyUsage();string start=source.Length==0?"":source[0].Date.Substring(0,10),last=source.Length==0?"":source[source.Length-1].Date.Substring(0,10);
+            var weeks=Weekly(source,prices);var result=new DailyUsage[weeks.Length];var running=new DailyUsage();string start=source.Length==0?"":source[0].Date.Substring(0,10),last=source.Length==0?"":source[source.Length-1].Date.Substring(0,10);
             for(int i=0;i<weeks.Length;i++)
             {
-                UsageTrendSeries.Merge(running,weeks[i]);DateTime sunday=DateTime.ParseExact(weeks[i].Date,"yyyy-MM-dd",CultureInfo.InvariantCulture);string end=sunday.AddDays(6).ToString("yyyy-MM-dd",CultureInfo.InvariantCulture);if(String.CompareOrdinal(end,last)>0)end=last;
-                var point=new DailyUsage{Date=weeks[i].Date,DisplayLabel="累计 "+start+" ～ "+end};UsageTrendSeries.Merge(point,running);result[i]=point;
+                UsageTrendSeries.Merge(running,weeks[i],prices);DateTime sunday=DateTime.ParseExact(weeks[i].Date,"yyyy-MM-dd",CultureInfo.InvariantCulture);string end=sunday.AddDays(6).ToString("yyyy-MM-dd",CultureInfo.InvariantCulture);if(String.CompareOrdinal(end,last)>0)end=last;
+                var point=new DailyUsage{Date=weeks[i].Date,DisplayLabel="累计 "+start+" ～ "+end};UsageTrendSeries.Merge(point,running,prices);result[i]=point;
             }
             return result;
         }
@@ -367,7 +369,7 @@ namespace CodexUserData
             if(value.Length>=16)return value.Substring(5,11).Replace('-', '/');
             return value.Length>5?value.Substring(5).Replace('-', '/'):value;
         }
-        private static int ModelOrder(string name){switch(name){case "gpt-6-astra":return 0;case "gpt-5.6-sol":case "gpt-5.6":return 1;case "gpt-5.5":return 2;case "gpt-5.6-terra":return 3;case "gpt-5.6-luna":return 4;default:return 5;}}
+        private static int ModelOrder(string name){switch(name){case "gpt-6-astra":return 0;case "gpt-6-sol":return 1;case "gpt-6-luna":return 2;case "gpt-5.6-sol":case "gpt-5.6":return 3;case "gpt-5.5":return 4;case "gpt-5.6-terra":return 5;case "gpt-5.6-luna":return 6;default:return 7;}}
         private void DrawAreas(DrawingContext dc)
         {
             // Hover changes opacity only. Shared frozen paths keep highlighting fast even at 180 days.

@@ -32,7 +32,7 @@ namespace CodexUserData
             FontFamily=new System.Windows.Media.FontFamily("Segoe UI, Microsoft YaHei UI");
             var root=new DockPanel{Margin=new Thickness(18,0,18,16)};SetBody(root,"模型价格","API EQUIVALENT · USD",true);
             var intro=new StackPanel();DockPanel.SetDock(intro,Dock.Top);root.Children.Add(intro);
-            var note=Theme.Text("每百万 Tokens 的美元价格。留空或没有价格按 0 估算，不代表实际免费。\n按模型统一应用到所有思考强度及历史日期，仅影响等效估算。",11,Theme.Muted);note.TextWrapping=TextWrapping.Wrap;note.Margin=new Thickness(0,0,0,10);intro.Children.Add(note);
+            var note=Theme.Text("每百万 Tokens 的美元价格。在线基准每天最多检查一次，失败时沿用缓存；自定义价格始终优先。\n留空或没有价格按 0 估算，不代表实际免费；仅影响等效估算。",11,Theme.Muted);note.TextWrapping=TextWrapping.Wrap;note.Margin=new Thickness(0,0,0,10);intro.Children.Add(note);
             intro.Children.Add(Theme.Text("查找模型",10,Theme.Muted));search.Margin=new Thickness(0,5,0,0);search.ToolTip="搜索模型名称";AutomationProperties.SetName(search,"搜索模型价格");intro.Children.Add(search);search.TextChanged+=delegate{Filter();};
             status.TextWrapping=TextWrapping.Wrap;status.Margin=new Thickness(0,8,0,10);intro.Children.Add(status);
             var footer=new StackPanel{Margin=new Thickness(0,10,0,0)};DockPanel.SetDock(footer,Dock.Bottom);root.Children.Add(footer);
@@ -76,7 +76,7 @@ namespace CodexUserData
                 var panel=new StackPanel();row.Card=new Border{Background=Theme.Surface,CornerRadius=new CornerRadius(9),Padding=new Thickness(12,9,12,10),Margin=new Thickness(0,0,6,7),Child=panel};
                 var header=new DockPanel();panel.Children.Add(header);
                 var reset=Theme.Button("恢复默认","恢复 "+model+" 默认价格",68);reset.FontSize=10;reset.Height=25;reset.Padding=new Thickness(5,2,5,2);DockPanel.SetDock(reset,Dock.Right);header.Children.Add(reset);
-                row.State=Theme.Text(DescribeRate(custom,rate),10,Theme.Muted);AutomationProperties.SetAutomationId(row.State,"PriceState_"+model);row.State.Margin=new Thickness(8,0,6,0);DockPanel.SetDock(row.State,Dock.Right);header.Children.Add(row.State);
+                row.State=Theme.Text(DescribeRate(model,custom,rate),10,Theme.Muted);AutomationProperties.SetAutomationId(row.State,"PriceState_"+model);row.State.Margin=new Thickness(8,0,6,0);DockPanel.SetDock(row.State,Dock.Right);header.Children.Add(row.State);
                 var title=Theme.Text("● "+model,12,ModelColors.For(model));title.TextTrimming=TextTrimming.CharacterEllipsis;title.ToolTip=model;header.Children.Add(title);
                 var fields=new UniformGrid{Columns=4,Margin=new Thickness(-3,7,-3,0)};row.Fields=fields;panel.Children.Add(fields);
                 string[] labels={"未缓存输入","缓存读取","缓存创建","输出"};
@@ -93,14 +93,17 @@ namespace CodexUserData
         }
         private void Reflow(){foreach(var row in rows.Values)row.Fields.Columns=(ActualWidth>0?ActualWidth:Width)<520?2:4;}
         internal static string DescribeRate(bool custom,decimal[] rates)
+        {return DescribeRate(null,custom,rates);}
+        internal static string DescribeRate(string model,bool custom,decimal[] rates)
         {
             if(rates.All(v=>v<=0))return custom?"自定义 · 按 0":"按 0 估算";
-            return (custom?"自定义":"内置")+(rates.Any(v=>v<0)?" · 缺项按 0":"");
+            string source=custom?"自定义":ApiPrices.DefaultSource(model);if(String.IsNullOrEmpty(source))source="内置";
+            return source+(rates.Any(v=>v<0)?" · 缺项按 0":"");
         }
         private static void UpdateState(Row row)
         {
             var rates=new decimal[4];for(int i=0;i<rates.Length;i++)if(!Parse(row.Inputs[i].Text,out rates[i])){row.State.Text="价格待修正";row.State.Foreground=Theme.Warning;return;}
-            row.State.Text=DescribeRate(row.Custom,rates);row.State.Foreground=Theme.Muted;
+            row.State.Text=DescribeRate(row.Model,row.Custom,rates);row.State.Foreground=Theme.Muted;
         }
         private void Filter(){foreach(var row in rows.Values)row.Card.Visibility=row.Model.IndexOf(search.Text.Trim(),StringComparison.OrdinalIgnoreCase)>=0?Visibility.Visible:Visibility.Collapsed;}
         private static string RateText(decimal value){return value<0?"":value.ToString("0.########",CultureInfo.InvariantCulture);}
