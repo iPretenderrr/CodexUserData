@@ -12,28 +12,80 @@ namespace CodexUserData
 {
     internal static class ModelColors
     {
-        private static readonly string[] palette={"#83B9FF","#E3AD80","#63BBC6","#75CBAC","#E98FAD","#C9CB72","#91A3BB","#ABA9A7"};
-        private static readonly string[] lightPalette={"#2563B9","#9A531D","#187B8B","#08765C","#AF3765","#727114","#536F91","#626775"};
+        private static readonly string[] palette={"#83B9FF","#E3AD80","#63BBC6","#75CBAC","#E98FAD","#C9CB72","#91A3BB","#ABA9A7","#42C7E8","#B58AF3"};
+        private static readonly string[] lightPalette={"#2563B9","#9A531D","#187B8B","#08765C","#AF3765","#727114","#536F91","#626775","#087E9C","#6E48B5"};
+        private static readonly Color[] slotDark=Enumerable.Range(0,ModelColorRegistry.CandidateCount).Select(slot=>CreateSlotColor(slot,false)).ToArray();
+        private static readonly Color[] slotLight=Enumerable.Range(0,ModelColorRegistry.CandidateCount).Select(slot=>CreateSlotColor(slot,true)).ToArray();
+        private static readonly Lab[] fixedDark=palette.Select(value=>Oklab((Color)ColorConverter.ConvertFromString(value))).ToArray();
+        private static readonly Lab[] fixedLight=lightPalette.Select(value=>Oklab((Color)ColorConverter.ConvertFromString(value))).ToArray();
+        private static readonly Lab[] slotDarkLab=slotDark.Select(Oklab).ToArray(),slotLightLab=slotLight.Select(Oklab).ToArray();
         private static readonly Dictionary<string,Brush> brushes=new Dictionary<string,Brush>(StringComparer.OrdinalIgnoreCase);
         internal static void RefreshTheme(){foreach(var pair in brushes)((SolidColorBrush)pair.Value).Color=(Color)ColorConverter.ConvertFromString(ColorHex(pair.Key,Theme.IsLight));}
         internal static Brush For(string model)
         {
-            model=model??"unknown";Brush brush;if(brushes.TryGetValue(model,out brush))return brush;
+            model=model??"unknown";Brush brush;if(brushes.TryGetValue(model,out brush))return brush;EnsureModels(new[]{model});
             brush=Theme.LiveColor(ColorHex(model,Theme.IsLight));brushes[model]=brush;return brush;
         }
-        // Unknown future models receive a stable color directly from their ID. Computing it
-        // once per model is cheaper than maintaining or persisting an ever-growing color map.
+        internal static void EnsureModels(IEnumerable<string> models)
+        {
+            if(models==null)return;ModelColorRegistry.Ensure(models.Where(model=>FixedIndex(Normalize(model))<0),(model,used)=>ChooseSlot(model,used));
+        }
+        // ColorHex remains read-only so diagnostics and protected probes cannot rewrite user
+        // data. The main UI registers new names before creating their cached WPF brushes.
         internal static string ColorHex(string model,bool light)
         {
-            model=String.IsNullOrWhiteSpace(model)?"unknown":model.Trim().ToLowerInvariant();int index=FixedIndex(model);
+            model=Normalize(model);int index=FixedIndex(model);
             if(index>=0)return (light?lightPalette:palette)[index];
-            uint hash=2166136261;foreach(char c in model)hash=(hash^c)*16777619;
+            int slot;if(ModelColorRegistry.TryGet(model,out slot))return SlotHex(slot,light);
+            // Read-only helpers still need a deterministic fallback when a model has not yet
+            // been registered by the main UI process.
+            uint hash=StableHash(model);
             double hue=hash%360,saturation=(light?58:66)+((hash>>9)%9),luminance=(light?38:66)+((hash>>17)%7);
             return Hex(Hsl(hue,saturation/100,luminance/100));
         }
+        private static int ChooseSlot(string model,int[] used)
+        {
+            var occupied=new HashSet<int>(used);int start=(int)(StableHash(model)%ModelColorRegistry.CandidateCount),best=-1;double bestScore=-1;
+            for(int offset=0;offset<ModelColorRegistry.CandidateCount;offset++)
+            {
+                int slot=(start+offset)%ModelColorRegistry.CandidateCount;if(occupied.Contains(slot)&&occupied.Count<ModelColorRegistry.CandidateCount)continue;
+                double score=Double.MaxValue;
+                for(int i=0;i<fixedDark.Length;i++)score=Math.Min(score,Math.Min(Distance(slotDarkLab[slot],fixedDark[i]),Distance(slotLightLab[slot],fixedLight[i])));
+                foreach(int existing in occupied)score=Math.Min(score,Math.Min(Distance(slotDarkLab[slot],slotDarkLab[existing]),Distance(slotLightLab[slot],slotLightLab[existing])));
+                if(score>bestScore){bestScore=score;best=slot;}
+            }
+            return best>=0?best:start;
+        }
+        internal static string SlotHex(int slot,bool light){return Hex(light?slotLight[slot]:slotDark[slot]);}
+        private static Color CreateSlotColor(int slot,bool light)
+        {
+            double hue=(slot*137.50776405003785+11)%360,saturation=(light?60:68)+(slot%3)*5,luminance=(light?35:62)+((slot/3)%2)*8;
+            Color color=Hsl(hue,saturation/100,luminance/100),background=(Color)ColorConverter.ConvertFromString(light?"#E7EFF7":"#2B3846");
+            // Model names use small text, so tune only generated colors until they meet
+            // WCAG AA contrast against the lower-contrast hover surface in both themes.
+            double step=light?-0.02:0.02;
+            while(Contrast(color,background)<4.5&&luminance>8&&luminance<92){luminance+=step*100;color=Hsl(hue,saturation/100,luminance/100);}
+            return color;
+        }
+        private struct Lab {internal double L,A,B;}
+        private static double Distance(Lab a,Lab b){double l=a.L-b.L,x=a.A-b.A,y=a.B-b.B;return l*l+x*x+y*y;}
+        private static Lab Oklab(Color color)
+        {
+            double r=Linear(color.R/255.0),g=Linear(color.G/255.0),b=Linear(color.B/255.0);
+            double l=Math.Pow(.4122214708*r+.5363325363*g+.0514459929*b,1.0/3),m=Math.Pow(.2119034982*r+.6806995451*g+.1073969566*b,1.0/3),s=Math.Pow(.0883024619*r+.2817188376*g+.6299787005*b,1.0/3);
+            return new Lab{L=.2104542553*l+.793617785*m-.0040720468*s,A=1.9779984951*l-2.428592205*m+.4505937099*s,B=.0259040371*l+.7827717662*m-.808675766*s};
+        }
+        private static double Linear(double value){return value<=.04045?value/12.92:Math.Pow((value+.055)/1.055,2.4);}
+        internal static double Contrast(Color first,Color second)
+        {
+            double a=.2126*Linear(first.R/255.0)+.7152*Linear(first.G/255.0)+.0722*Linear(first.B/255.0),b=.2126*Linear(second.R/255.0)+.7152*Linear(second.G/255.0)+.0722*Linear(second.B/255.0);
+            return (Math.Max(a,b)+.05)/(Math.Min(a,b)+.05);
+        }
+        private static string Normalize(string model){return String.IsNullOrWhiteSpace(model)?"unknown":model.Trim().ToLowerInvariant();}
+        private static uint StableHash(string model){uint hash=2166136261;foreach(char c in model)hash=(hash^c)*16777619;return hash;}
         private static int FixedIndex(string model)
         {
-            switch(model){case "gpt-6-astra":return 0;case "gpt-5.6-sol":case "gpt-5.6":return 1;case "gpt-5.5":return 2;case "gpt-5.6-terra":return 3;case "gpt-5.6-luna":return 4;case "gpt-5.3-codex":return 5;case "gpt-5.4":return 6;case "codex-auto-review":case "unknown":return 7;default:return -1;}
+            switch(model){case "gpt-6-astra":return 0;case "gpt-5.6-sol":case "gpt-5.6":return 1;case "gpt-5.5":return 2;case "gpt-5.6-terra":return 3;case "gpt-5.6-luna":return 4;case "gpt-5.3-codex":return 5;case "gpt-5.4":return 6;case "codex-auto-review":case "unknown":return 7;case "gpt-6-sol":return 8;case "gpt-6-luna":return 9;default:return -1;}
         }
         private static Color Hsl(double hue,double saturation,double lightness)
         {

@@ -68,7 +68,8 @@ namespace CodexUserData
         }
         private void AddModels(IEnumerable<string> names)
         {
-            foreach(string model in names.Where(m=>!String.IsNullOrWhiteSpace(m)).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(m=>m))
+            string[] ordered=names.Where(m=>!String.IsNullOrWhiteSpace(m)).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(m=>m).ToArray();ModelColors.EnsureModels(ordered);
+            foreach(string model in ordered)
             {
                 if(rows.ContainsKey(model))continue;
                 decimal[] rate;bool custom=draft.PriceOverrides.TryGetValue(model,out rate);if(!custom)rate=ApiPrices.Default(model);

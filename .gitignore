@@ -66,6 +66,7 @@
 !/src/SettingsWindow.cs
 !/src/ReleaseUpdate.cs
 !/src/PriceCatalog.cs
+!/src/ModelColorRegistry.cs
 !/src/Diagnostics.cs
 !/src/Theme.cs
 !/src/ThemeEditor.cs

@@ -808,6 +808,7 @@ namespace CodexUserData
         private void ApplyView(UsageSnapshot data,string scope)
         {
             var names=data==null?new string[0]:data.Daily.SelectMany(d=>d.Models).Select(m=>m.Model).Distinct().OrderBy(m=>m).ToArray();
+            ModelColors.EnsureModels(names);
             if(modelKey!=""&&!names.Contains(modelKey))modelKey="";
             modelChoices.Clear();modelChoices.Add("","全部模型");foreach(string name in names)modelChoices[name]=name;modelFilter.Select(modelKey);
             string dailySignature=data==null?"":UsageChart.Signature(data.Daily);string heatSignature=original==null?"":Object.ReferenceEquals(data,original)?dailySignature:UsageChart.Signature(original.Daily);

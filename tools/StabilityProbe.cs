@@ -39,6 +39,8 @@ namespace CodexUserData
             // Never use the default user profile or CLI in a GUI regression host.
             var home=Path.Combine(root,"codex");Directory.CreateDirectory(Path.Combine(home,"sessions"));
             var prefs=new Preferences{CodexHome=home,Database=Path.Combine(root,"missing.db"),Source="local",LiveQuota=false,ShowQuota=false,QuotaCli="",BallMode=false,BallStyle="capsule",BallDock="",OrbAnimation="smooth",Left=180,Top=160,BallLeft=400,BallTop=250,Collapsed=true};
+            // Run color recovery before any WPF view can initialize the process-wide registry.
+            PriceCatalogStabilityProbe.Run(root);
             Theme.Apply(prefs);
             var work=new Rect(0,0,1920,1080);var near=new Rect(40,400,80,16);
             Check(FloatingBall.DockEdge(near,work,1)==-1&&FloatingBall.DockEdge(near,work,1,0)==0,"dock hysteresis retains the edge without attracting an undocked window");
@@ -79,7 +81,7 @@ namespace CodexUserData
                 if(pending!=null)await pending;
             }
             await HtmlStabilityProbe.Run(root);
-            foreach(string name in new[]{"PlacementStabilityProbe","StatusStabilityProbe","PeriodStabilityProbe","ChartStabilityProbe","QuotaHistoryStabilityProbe","DiagnosticStabilityProbe","UpdateStabilityProbe","PriceCatalogStabilityProbe","IslandStabilityProbe","WindowMotionStabilityProbe"})
+            foreach(string name in new[]{"PlacementStabilityProbe","StatusStabilityProbe","PeriodStabilityProbe","ChartStabilityProbe","QuotaHistoryStabilityProbe","DiagnosticStabilityProbe","UpdateStabilityProbe","IslandStabilityProbe","WindowMotionStabilityProbe"})
             {
                 var probe=typeof(StabilityProbe).Assembly.GetType("CodexUserData."+name);
                 if(probe==null)throw new InvalidOperationException("Required verification component is missing: "+name);

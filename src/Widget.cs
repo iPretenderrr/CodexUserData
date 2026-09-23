@@ -476,7 +476,7 @@ namespace CodexUserData
         }
         internal void ApplySnapshot(UsageSnapshot s)
         {
-            snapshot=s;prefs.KnownModels=prefs.KnownModels.Concat(s.KnownModels).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();quota.Accept(prefs.Remote.Enabled&&combinedSnapshot!=null?combinedSnapshot.Quotas:s.Quotas);quota.AcceptUsage(prefs.Remote.Enabled?combinedSnapshot:s,prefs.Remote.Enabled?"Codex · 合计":Scope());UpdateBall();if(!preview&&(!IsVisible||WindowState==WindowState.Minimized))return;heroLabel.Text=PeriodName()+" · "+LabelFor(heroKey);heroValue.Text=Format(heroKey,s,false);heroValue.ToolTip=Format(heroKey,s,true);
+            snapshot=s;prefs.KnownModels=prefs.KnownModels.Concat(s.KnownModels).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();ModelColors.EnsureModels(prefs.KnownModels.Concat(s.Models.Select(model=>model.Model)));quota.Accept(prefs.Remote.Enabled&&combinedSnapshot!=null?combinedSnapshot.Quotas:s.Quotas);quota.AcceptUsage(prefs.Remote.Enabled?combinedSnapshot:s,prefs.Remote.Enabled?"Codex · 合计":Scope());UpdateBall();if(!preview&&(!IsVisible||WindowState==WindowState.Minimized))return;heroLabel.Text=PeriodName()+" · "+LabelFor(heroKey);heroValue.Text=Format(heroKey,s,false);heroValue.ToolTip=Format(heroKey,s,true);
             heroExact.Text=heroKey=="tokens"&&!s.DataUnavailable?"("+TokenText.Exact(s.TotalTokens)+")":"";heroExact.Visibility=heroKey=="tokens"&&!prefs.Collapsed&&!s.DataUnavailable?Visibility.Visible:Visibility.Collapsed;
             heroNote.Text=s.DataUnavailable?"当前来源尚未读取成功":"API 估算 "+ModelColors.Money(s.EquivalentUsd,s.UnpricedTokens,s.TotalTokens)+" · USD";
             heroNote.ToolTip=ApiPrices.Basis+"\n估算基准，不代表订阅实际扣费。";

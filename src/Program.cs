@@ -10,8 +10,8 @@ using System.Windows;
 
 [assembly: System.Reflection.AssemblyTitle("CodexUserData")]
 [assembly: System.Reflection.AssemblyProduct("CodexUserData")]
-[assembly: System.Reflection.AssemblyVersion("1.9.3.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.9.3.0")]
+[assembly: System.Reflection.AssemblyVersion("1.9.4.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.9.4.0")]
 
 namespace CodexUserData
 {
@@ -190,7 +190,7 @@ namespace CodexUserData
                         if(h!=IntPtr.Zero)PostMessage(h,ShowMainMessage,IntPtr.Zero,IntPtr.Zero);return 0;
                     }
                 }
-                PortableStore.Initialize(DataFolder,Path.Combine(Folder,"data"));PriceCatalog.LoadCached();Preferences p=ReadPreferences();ApiPrices.Configure(p.PriceOverrides);
+                PortableStore.Initialize(DataFolder,Path.Combine(Folder,"data"));ModelColorRegistry.Initialize(!diagnostic);PriceCatalog.LoadCached();Preferences p=ReadPreferences();ApiPrices.Configure(p.PriceOverrides);
                 if(args.Length>1 && args[0]=="--quota-check")
                 {
                     var quotas=QuotaReader.Query(args.Length>2?args[2]:p.QuotaCli,p.CodexHome).GetAwaiter().GetResult();
