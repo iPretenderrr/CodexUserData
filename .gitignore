@@ -94,3 +94,10 @@
 !/tools/PeriodStabilityProbe.cs
 !/tools/PeriodPerformanceProbe.cs
 !/tools/measure-periods.ps1
+!/src/Milestones.cs
+!/src/MilestonePanel.cs
+!/src/MilestoneCurve.cs
+!/tools/MilestoneStabilityProbe.cs
+!/tools/MilestoneDataStabilityProbe.cs
+!/tools/MilestoneUiStabilityProbe.cs
+!/tools/MilestoneCurveStabilityProbe.cs

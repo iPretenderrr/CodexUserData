@@ -28,7 +28,7 @@ namespace CodexUserData
             var app=new Application{ShutdownMode=ShutdownMode.OnExplicitShutdown};int result=0;
             app.Startup+=async delegate
             {
-                try{if(args.Contains("--price-only")){PriceCatalogStabilityProbe.Run(root);}else if(args.Contains("--period-only")){await PeriodStabilityProbe.Run(root);await ChartStabilityProbe.Run(root);}else if(args.Contains("--remote-only")){await RemoteStabilityProbe.Run(root);DataStabilityProbe.Run(root);StatusStabilityProbe.Run(root);}else if(args.Contains("--html-only")){await HtmlStabilityProbe.Run(root);}else if(args.Contains("--floating-only")){await FloatingEffectsStabilityProbe.Run(root);await IslandStabilityProbe.Run(root);await HtmlStabilityProbe.Run(root);}else if(args.Contains("--quota-only")){await QuotaHistoryStabilityProbe.Run(root);}else if(args.Contains("--island-only")){await IslandStabilityProbe.Run(root);await WindowMotionStabilityProbe.Run(root);}else await Run(root);Console.WriteLine("SOURCE CHECKS: "+checks);}
+                try{if(args.Contains("--milestone-only")){MilestoneStabilityProbe.Run(root);MilestoneDataStabilityProbe.Run(root);await MilestoneUiStabilityProbe.Run(root);await MilestoneCurveStabilityProbe.Run(root);await MilestoneStabilityProbe.Integration(root);}else if(args.Contains("--price-only")){PriceCatalogStabilityProbe.Run(root);}else if(args.Contains("--period-only")){await PeriodStabilityProbe.Run(root);await ChartStabilityProbe.Run(root);}else if(args.Contains("--remote-only")){await RemoteStabilityProbe.Run(root);DataStabilityProbe.Run(root);StatusStabilityProbe.Run(root);}else if(args.Contains("--html-only")){await HtmlStabilityProbe.Run(root);}else if(args.Contains("--floating-only")){await FloatingEffectsStabilityProbe.Run(root);await IslandStabilityProbe.Run(root);await HtmlStabilityProbe.Run(root);}else if(args.Contains("--quota-only")){await QuotaHistoryStabilityProbe.Run(root);}else if(args.Contains("--island-only")){await IslandStabilityProbe.Run(root);await WindowMotionStabilityProbe.Run(root);}else await Run(root);Console.WriteLine("SOURCE CHECKS: "+checks);}
                 catch(Exception ex){result=1;Console.Error.WriteLine(ex);}
                 finally{foreach(Window window in app.Windows.Cast<Window>().ToArray())window.Close();app.Shutdown();}
             };
@@ -87,6 +87,7 @@ namespace CodexUserData
                 if(probe==null)throw new InvalidOperationException("Required verification component is missing: "+name);
                 var pending=probe.GetMethod("Run",BindingFlags.Static|BindingFlags.NonPublic|BindingFlags.Public).Invoke(null,new object[]{root}) as Task;if(pending!=null)await pending;
             }
+            MilestoneStabilityProbe.Run(root);MilestoneDataStabilityProbe.Run(root);await MilestoneUiStabilityProbe.Run(root);await MilestoneCurveStabilityProbe.Run(root);await MilestoneStabilityProbe.Integration(root);
             await GuideStabilityProbe.Run(root);
         }
         private static void VerifyDialogCompletion()

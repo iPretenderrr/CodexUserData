@@ -19,7 +19,7 @@ namespace CodexUserData
         private static LogCursor C(string id,long at,params LocalUsageEvent[] events){return new LogCursor{Id=id,Meta=true,Started=at,Events=events.ToList()};}
         private sealed class Fixture
         {
-            internal string Root;internal volatile bool Offline;internal long Bytes;internal int Connections;
+            internal string Root;internal volatile bool Offline;internal volatile string IncompleteDirectory,BlockedRead;internal long Bytes;internal int Connections,FullScans;
         }
         private sealed class CountStream : Stream
         {
@@ -39,12 +39,12 @@ namespace CodexUserData
             public void Connect(){if(fixture.Offline)throw new IOException();fixture.Connections++;}
             public IEnumerable<LogFile> List(string p)
             {
-                if(fixture.Offline)throw new IOException();string local=Local(p);
+                if(fixture.Offline)throw new IOException();if(p==Root)System.Threading.Interlocked.Increment(ref fixture.FullScans);if(p==fixture.IncompleteDirectory)throw new DirectoryNotFoundException();string local=Local(p);
                 foreach(string path in Directory.GetDirectories(local))yield return new LogFile{Path=p+"/"+Path.GetFileName(path),Directory=true};
                 foreach(string path in Directory.GetFiles(local,"rollout-*.jsonl"))yield return Stat(p+"/"+Path.GetFileName(path));
             }
             public LogFile Stat(string p){if(fixture.Offline)throw new IOException();var f=new FileInfo(Local(p));return new LogFile{Path=p,Length=f.Length,Modified=f.LastWriteTimeUtc.Ticks};}
-            public Stream Open(string p){return new CountStream(new FileStream(Local(p),FileMode.Open,FileAccess.Read,FileShare.ReadWrite|FileShare.Delete),fixture);}
+            public Stream Open(string p){if(p==fixture.BlockedRead)throw new UnauthorizedAccessException();return new CountStream(new FileStream(Local(p),FileMode.Open,FileAccess.Read,FileShare.ReadWrite|FileShare.Delete),fixture);}
             public void Dispose(){}
         }
         internal static async Task Run(string root)
@@ -114,6 +114,22 @@ namespace CodexUserData
                 await StabilityProbe.Until(()=>completions==2,"new session completion missing",12000);
                 Check(completions==2,"newly discovered session runs and completes without historical replay");
                 Check(messages.Sum(m=>m.Activity.CompletedTasks)==2,"queued publications preserve completion events even after newer snapshots");
+                string archived=Path.Combine(host,"archived_sessions",Path.GetFileName(file));
+                string archivedPath="/fixture/archived_sessions/"+Path.GetFileName(file);
+                fixture.BlockedRead=archivedPath;File.Move(file,archived);monitor.Rescan();
+                await StabilityProbe.Until(()=>!monitor.View.Connected,"blocked archive read not reported",15000);
+                Check(monitor.View.Records.Any(c=>c.Id==id&&c.Events.Count==2),"moving a log retains its ledger until archive read completes");
+                fixture.BlockedRead=null;
+                await StabilityProbe.Until(()=>monitor.View.Records.Any(c=>c.Path==archivedPath&&c.Events.Count==2)&&!monitor.View.Records.Any(c=>c.Id==id&&c.Path!=archivedPath),"archive move did not reconcile",20000);
+                Check(UsageUnion.Snapshot(monitor.View.Records,"all",DateTime.Now,"test").TotalTokens==350,"archive move retains exactly one copy of usage");
+                File.Delete(archived);fixture.IncompleteDirectory="/fixture/sessions/2020/01";int scans=fixture.FullScans;monitor.Rescan();
+                await StabilityProbe.Until(()=>fixture.FullScans>scans,"partial scan not started",10000);await Task.Delay(6000);
+                Check(monitor.View.Records.Any(c=>c.Id==id&&c.Events.Count==2),"missing recursive directory makes scan incomplete and preserves absent ledger");
+                fixture.IncompleteDirectory=null;monitor.Rescan();
+                await StabilityProbe.Until(()=>!monitor.View.Records.Any(c=>c.Id==id),"authoritative remote deletion did not remove ledger",15000);
+                Check(UsageUnion.Snapshot(monitor.View.Records,"all",DateTime.Now,"test").TotalTokens==0,"complete traversal publishes deleted usage immediately");
+                var persisted=new LocalCodexUsage(Path.Combine(root,"remote-cache","monitor"),Path.Combine(root,"remote-cache","monitor","usage.json.gz"),true,true);
+                Check(!persisted.Export().Any(c=>c.Id==id),"remote deletion is persisted before restart");
             }
             await Task.Delay(500);
             string error=SftpFiles.Error(new IOException("private-server/private-user/private-prompt"));Check(!error.Contains("private"),"remote errors do not leak raw server or path text");

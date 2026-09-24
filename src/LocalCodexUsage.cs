@@ -6,6 +6,7 @@ using System.IO.Compression;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
 using System.Web.Script.Serialization;
 
 namespace CodexUserData
@@ -39,6 +40,8 @@ namespace CodexUserData
         public List<LocalUsageEvent> Events = new List<LocalUsageEvent>();
         // An irrelevant or oversized partial line has already been classified. Retain only
         // its byte checkpoint/hash in memory; cache restarts still resume at the last newline.
+        internal readonly object MilestoneIdentity=new object();
+        internal long MilestoneVersion;
         internal long SkippedOffset;
         internal string SkippedTail;
     }
@@ -98,6 +101,30 @@ namespace CodexUserData
             return result;
         }
     }
+    internal sealed class MilestoneLedgerMemo
+    {
+        private sealed class Stamp
+        {
+            internal object Identity;internal string Id,Parent;internal long Version,Started;internal bool Meta;internal int Count,Invalid;
+            internal Stamp(LogCursor c){Identity=c.MilestoneIdentity;Id=c.Id;Parent=c.Parent;Version=c.MilestoneVersion;Started=c.Started;Meta=c.Meta;Count=c.Events.Count;Invalid=c.Invalid;}
+            internal bool Same(LogCursor c){return Identity==c.MilestoneIdentity&&Id==c.Id&&Parent==c.Parent&&Version==c.MilestoneVersion&&Started==c.Started&&Meta==c.Meta&&Count==c.Events.Count&&Invalid==c.Invalid;}
+        }
+        private Dictionary<string,Stamp> stamps=new Dictionary<string,Stamp>();
+        private MilestoneInput value;private long readAt;private int failures;
+        internal MilestoneInput Get(Dictionary<string,LogCursor> records,DateTime now,int failed,CancellationToken cancel)
+        {
+            cancel.ThrowIfCancellationRequested();long at=LocalCodexUsage.Unix(now);
+            bool same=value!=null&&failed==failures&&at>=readAt&&at<value.NextChangeAt&&stamps.Count==records.Count;
+            if(same)foreach(var pair in records){cancel.ThrowIfCancellationRequested();Stamp stamp;if(!stamps.TryGetValue(pair.Key,out stamp)||!stamp.Same(pair.Value)){same=false;break;}}
+            if(!same)
+            {
+                var next=LocalCodexUsage.BuildMilestones(records,now,failed,cancel);
+                var nextStamps=new Dictionary<string,Stamp>();foreach(var pair in records)nextStamps[pair.Key]=new Stamp(pair.Value);
+                value=next;stamps=nextStamps;failures=failed;
+            }
+            readAt=at;return value;
+        }
+    }
     internal sealed class LocalCodexUsage
     {
         private readonly string root, cachePath;
@@ -110,6 +137,7 @@ namespace CodexUserData
         internal long LastBytesRead { get; private set; }
         internal int DataVersion {get;private set;}
         private readonly UsageSnapshotMemo snapshots=new UsageSnapshotMemo();
+        private readonly MilestoneLedgerMemo milestones=new MilestoneLedgerMemo();
         private int lastFailures;
         private static readonly DateTime Epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
@@ -228,6 +256,7 @@ namespace CodexUserData
         }
         internal void ReadStream(LogCursor cursor, LogFile file, Stream stream, Func<bool> cancel, long budget)
         {
+                int oldCount=cursor.Events.Count,oldInvalid=cursor.Invalid;bool oldMeta=cursor.Meta;string oldParent=cursor.Parent;long oldStarted=cursor.Started;
                 long length = file.Length; long limit = Math.Min(length, Math.Max(cursor.Offset,cursor.SkippedOffset) + budget);
                 string head = Fingerprint(stream, 0, (int)Math.Min(512, length));
                 bool reset = cursor.Offset > length || (cursor.Head != null && cursor.Head != head && cursor.Length >= 512) || (cursor.Path == file.Path && cursor.Created != file.Created) || (cursor.Length == length && cursor.Modified != file.Modified && cursor.Offset == length);
@@ -278,6 +307,7 @@ namespace CodexUserData
                     cursor.SkippedTail=skip?Fingerprint(stream,Math.Max(0,baseOffset-64),(int)Math.Min(64,baseOffset)):null;
                     line.Dispose(); cursor.Tail=Fingerprint(stream,Math.Max(0,cursor.Offset-64),(int)Math.Min(64,cursor.Offset));
                     cursor.Length=length; cursor.Modified=file.Modified;dirty=true;DataVersion++;
+                    if(reset||oldCount!=cursor.Events.Count||oldInvalid!=cursor.Invalid||oldMeta!=cursor.Meta||oldParent!=cursor.Parent||oldStarted!=cursor.Started)cursor.MilestoneVersion++;
                 }
             dirty=true;
         }
@@ -351,6 +381,17 @@ namespace CodexUserData
             lastFailures=failed;SaveCache(false);
         }
         internal UsageSnapshot Snapshot(string range,DateTime now){return snapshots.Get(cursors,DataVersion,range,now,lastFailures);}
+        internal MilestoneInput GetMilestones(DateTime now,CancellationToken cancel)
+        {return milestones.Get(cursors,now,lastFailures,cancel);}
+        // Only a complete remote traversal may prune the numeric cache; never touch logs.
+        internal bool RemoteReadComplete(string path,long length)
+        {LogCursor cursor;return cursors.TryGetValue(path,out cursor)&&Math.Max(cursor.Offset,cursor.SkippedOffset)>=length;}
+        internal bool ReconcileRemote(HashSet<string> paths)
+        {
+            bool removed=false;
+            foreach(string key in cursors.Keys.Where(k=>!paths.Contains(k)).ToArray()){cursors.Remove(key);removed=true;}
+            if(removed){dirty=true;DataVersion++;}return removed;
+        }
         internal List<LogCursor> Export(){return cursors.Values.Select(CopyCursor).ToList();}
         internal static LogCursor CopyCursor(LogCursor value)
         {
@@ -394,19 +435,8 @@ namespace CodexUserData
                 if(cursor.TaskRunning&&cursor.TaskStarted>0&&cursor.TaskStarted<=until&&touched<=until&&touched+180>until)
                 {result.ActiveTasks++;result.ActivityUntil=Math.Max(result.ActivityUntil,touched+180);result.NextChangeAt=Math.Min(result.NextChangeAt,touched+180);}
                 if(cursor.TaskRunning){if(cursor.TaskStarted>until)result.NextChangeAt=Math.Min(result.NextChangeAt,cursor.TaskStarted);if(touched>until)result.NextChangeAt=Math.Min(result.NextChangeAt,touched);}
-                int inherited=0;
-                if(!String.IsNullOrEmpty(cursor.Parent))
-                {
-                    LogCursor parent;
-                    if(!cursors.TryGetValue(cursor.Parent,out parent)) {deferred++;missingParent++;continue;}
-                    if(!parent.Meta || cursor.Parent==cursor.Id || cursor.Started==0) {deferred++;unverifiedParent++;continue;}
-                    // Forks can restamp inherited events to fork time: match their ordered raw signatures against the parent, not timestamps alone.
-                    var signatures=parent.Events.Where(e=>e.Time<=cursor.Started).Select(e=>e.Signature).ToList(); int at=0;
-                    foreach(LocalUsageEvent item in cursor.Events)
-                    {
-                        int match=signatures.IndexOf(item.Signature,at); if(match<0)break;at=match+1;inherited++;
-                    }
-                }
+                int inherited;int exclusion=InheritedPrefix(cursors,cursor,out inherited,CancellationToken.None);
+                if(exclusion!=0){deferred++;if(exclusion==2)missingParent++;else unverifiedParent++;continue;}
                 bool used=false;long cursorLatest=0;
                 foreach(LocalUsageEvent item in cursor.Events.Skip(inherited))
                 {
@@ -463,6 +493,37 @@ namespace CodexUserData
             result.CommonWarning=result.Warning;
             if(result.InferredRecords>0)result.Warning+=(result.Warning.Length>0?"\n":"")+result.InferredRecords+" 条旧记录由累计计数差值还原。";
             return result;
+        }
+        // Shared with Aggregate so forks have exactly the same effective event denominator.
+        private static int InheritedPrefix(Dictionary<string,LogCursor> records,LogCursor cursor,out int inherited,CancellationToken cancel)
+        {
+            inherited=0;if(!cursor.Meta)return 1;if(String.IsNullOrEmpty(cursor.Parent))return 0;
+            LogCursor parent;if(!records.TryGetValue(cursor.Parent,out parent))return 2;
+            if(!parent.Meta||cursor.Parent==cursor.Id||cursor.Started==0)return 3;
+            var signatures=new List<string>();foreach(var e in parent.Events){cancel.ThrowIfCancellationRequested();if(e.Time<=cursor.Started)signatures.Add(e.Signature);}
+            int at=0;foreach(var item in cursor.Events)
+            {cancel.ThrowIfCancellationRequested();int match=signatures.IndexOf(item.Signature,at);if(match<0)break;at=match+1;inherited++;}
+            return 0;
+        }
+        internal static MilestoneInput BuildMilestones(Dictionary<string,LogCursor> records,DateTime now,int failed,CancellationToken cancel)
+        {
+            var result=new MilestoneInput();long until=Unix(now);int excluded=0,invalid=0;
+            foreach(var cursor in records.Values)
+            {
+                cancel.ThrowIfCancellationRequested();invalid+=cursor.Invalid;int inherited;
+                if(InheritedPrefix(records,cursor,out inherited,cancel)!=0){excluded++;continue;}
+                for(int i=inherited;i<cursor.Events.Count;i++)
+                {
+                    cancel.ThrowIfCancellationRequested();var item=cursor.Events[i];
+                    if(item.Time>until){result.NextChangeAt=Math.Min(result.NextChangeAt,item.Time);continue;}
+                    long tokens=checked(item.Input+item.Output);if(tokens==0)continue;
+                    result.Events.Add(new MilestoneEvent{From=item.Time,To=item.Time,Tokens=tokens,Precision=item.Inferred?1:0});
+                }
+            }
+            var warnings=new List<string>();if(failed>0)warnings.Add(failed+" 个日志文件或目录读取失败，保留上次可读数据。");
+            if(excluded>0)warnings.Add(excluded+" 个会话缺少可核验标识或父会话关系，暂未计入。");
+            if(invalid>0)warnings.Add(invalid+" 条记录无法解析或校验，其余可核验记录仍参与统计。");
+            result.Warning=String.Join("\n",warnings);return result;
         }
         private void LoadCache()
         {

@@ -35,6 +35,9 @@ namespace CodexUserData
         private readonly Queue<string> directories=new Queue<string>();
         private readonly HashSet<string> visited=new HashSet<string>(StringComparer.Ordinal);
         private readonly Queue<string> history=new Queue<string>();private readonly HashSet<string> queued=new HashSet<string>(StringComparer.Ordinal);
+        private readonly HashSet<string> scanPaths=new HashSet<string>(StringComparer.Ordinal);
+        private HashSet<string> reconcilePaths;private bool fullScan;private int scanRequested,reconcileCheckedVersion=-1;
+        internal void Rescan(){Interlocked.Exchange(ref scanRequested,1);}
         private IRemoteFiles files;private IEnumerator<LogFile> listing;private string listingPath;
         private long nextScan,nextActivity,lastPublish,syncedAt;private int roundRobin;private bool scanned,discoveryFailed,scanning,initialDiscoveryDone,ledgerChanged;
         private readonly Stopwatch clock=Stopwatch.StartNew();private volatile RemoteView view=new RemoteView();
@@ -51,8 +54,8 @@ namespace CodexUserData
         private void Queue(string path){if(queued.Add(path))history.Enqueue(path);}
         private void BeginScan()
         {
-            directories.Clear();visited.Clear();discoveryFailed=false;scanning=true;nextScan=clock.ElapsedMilliseconds+30000;
-            directories.Enqueue(files.Root.TrimEnd('/')+"/sessions");directories.Enqueue(files.Root.TrimEnd('/')+"/archived_sessions");
+            directories.Clear();visited.Clear();scanPaths.Clear();reconcilePaths=null;reconcileCheckedVersion=-1;discoveryFailed=false;scanning=true;fullScan=true;nextScan=clock.ElapsedMilliseconds+30000;
+            directories.Enqueue(files.Root);
         }
         private void DiscoverBatch()
         {
@@ -62,17 +65,24 @@ namespace CodexUserData
             {
                 if(listing==null)
                 {
-                    if(directories.Count==0){scanned=true;initialDiscoveryDone=true;scanning=false;return;}
+                    if(directories.Count==0){scanned=true;initialDiscoveryDone=true;scanning=false;if(fullScan&&!discoveryFailed)reconcilePaths=new HashSet<string>(scanPaths,StringComparer.Ordinal);fullScan=false;return;}
                     listingPath=directories.Dequeue();if(!visited.Add(listingPath))continue;
                     listing=files.List(listingPath).GetEnumerator();
                 }
                 bool more;
                 try{more=listing.MoveNext();}
-                catch(SftpPathNotFoundException){more=false;}
-                catch(DirectoryNotFoundException){more=false;}
+                catch(SftpPathNotFoundException){if(fullScan)discoveryFailed=true;more=false;}
+                catch(DirectoryNotFoundException){if(fullScan)discoveryFailed=true;more=false;}
                 if(!more){listing.Dispose();listing=null;continue;}
                 var item=listing.Current;
-                if(item.Directory){if(item.Path.Count(c=>c=='/')-files.Root.Count(c=>c=='/')<10)directories.Enqueue(item.Path);continue;}
+                if(item.Directory)
+                {
+                    if(listingPath==files.Root&&!item.Path.EndsWith("/sessions",StringComparison.Ordinal)&&!item.Path.EndsWith("/archived_sessions",StringComparison.Ordinal))continue;
+                    if(item.Path.Count(c=>c=='/')-files.Root.Count(c=>c=='/')<10)directories.Enqueue(item.Path);else if(fullScan)discoveryFailed=true;
+                    continue;
+                }
+                if(listingPath==files.Root)continue;
+                if(fullScan)scanPaths.Add(item.Path);if(reconcilePaths!=null)reconcilePaths.Add(item.Path);
                 LogFile old;bool changed=!known.TryGetValue(item.Path,out old)||old.Length!=item.Length||old.Modified!=item.Modified;
                 item.Live=old!=null?old.Live:initialDiscoveryDone&&!known.Keys.Any(p=>LogFile.SessionId(p)==LogFile.SessionId(item.Path));
                 known[item.Path]=item;if(changed)Queue(item.Path);
@@ -124,6 +134,24 @@ namespace CodexUserData
                 if(tail.Baseline&&tail.Offset>=meta.Length){if(tail.State.Completed)tail.Notified=tail.State.Key;tail.Baseline=false;}
             }
         }
+        private void ReconcileLedger()
+        {
+            if(reconcilePaths==null||history.Count>0||discoveryFailed||reconcileCheckedVersion==ledger.DataVersion)return;
+            reconcileCheckedVersion=ledger.DataVersion;
+            // Read moved/archive copies completely before dropping their former ledger paths.
+            // An unfinished line is deliberately conservative and postpones removal.
+            foreach(string path in reconcilePaths)
+            {
+                LogFile meta;if(!known.TryGetValue(path,out meta))return;
+                if(!ledger.RemoteReadComplete(path,meta.Length))return;
+            }
+            foreach(string path in known.Keys.Where(p=>!reconcilePaths.Contains(p)).ToArray()){known.Remove(path);tails.Remove(path);}
+            if(ledger.ReconcileRemote(reconcilePaths))
+            {
+                ledgerChanged=true;ledger.SaveCache(true);lastPublish=clock.ElapsedMilliseconds-5000;
+            }
+            reconcilePaths=null;
+        }
         private ActivityReport Report(bool online)
         {
             long now=LocalCodexUsage.Unix(DateTime.UtcNow);var report=new ActivityReport{ObservedAt=now,MonitoringUnavailable=!online||!scanned||discoveryFailed||known.Count==0};
@@ -166,7 +194,7 @@ namespace CodexUserData
                     {
                         if(files==null){files=factory();files.Connect();BeginScan();scanned=false;nextActivity=0;}
                         if(clock.ElapsedMilliseconds>=nextActivity){ActivityBatch();nextActivity=clock.ElapsedMilliseconds+interval;Publish(true,"远程已连接",false);}
-                        if(scanned&&directories.Count==0&&listing==null&&clock.ElapsedMilliseconds>=nextScan)BeginScan();
+                        if(scanned&&directories.Count==0&&listing==null&&(clock.ElapsedMilliseconds>=nextScan||Interlocked.Exchange(ref scanRequested,0)!=0))BeginScan();
                         DiscoverBatch();
                         if(history.Count>0)
                         {
@@ -182,6 +210,7 @@ namespace CodexUserData
                                 if(after<meta.Length&&after>before)Queue(path);
                             }
                         }
+                        ReconcileLedger();
                         if(clock.ElapsedMilliseconds-lastPublish>=5000||view.Records.Count==0&&scanned)
                         {
                             syncedAt=LocalCodexUsage.Unix(DateTime.UtcNow);ledger.SaveCache(false);lastPublish=clock.ElapsedMilliseconds;
@@ -193,7 +222,7 @@ namespace CodexUserData
                     catch(OperationCanceledException){break;}
                     catch(Exception ex)
                     {
-                        if(listing!=null){listing.Dispose();listing=null;}if(files!=null){files.Dispose();files=null;}
+                        reconcilePaths=null;discoveryFailed=true;if(listing!=null){listing.Dispose();listing=null;}if(files!=null){files.Dispose();files=null;}
                         blocked=ex is HostTrustException||ex is SshAuthenticationException||ex is System.Security.Cryptography.CryptographicException||ex is FormatException||ex is ArgumentException;
                         Publish(false,SftpFiles.Error(ex),true);ledger.SaveCache(true);
                         if(!blocked){reconnectDelay=retry*1000;retry=Math.Min(60,retry*2);}

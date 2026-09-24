@@ -35,10 +35,11 @@ internal static class ReleaseProbe
   return selected.Invoke(instance,args);
  }
  static object Get(object o,string key){return o.GetType().GetProperty(key).GetValue(o,null);}
- static T InternalField<T>(string type,object instance,string key)
+ static T InternalField<T>(string type,object instance,string key,string fieldType=null)
  {
   var m=Regex.Match(map,@"CodexUserData\."+Regex.Escape(type)+"::"+Regex.Escape(key)+@" -> ([^\r\n]+)");
-  return (T)instance.GetType().GetFields(BindingFlags.Instance|BindingFlags.Public|BindingFlags.NonPublic).Single(f=>f.Name==m.Groups[1].Value.Trim()&&f.FieldType==typeof(T)).GetValue(instance);
+  var expected=fieldType==null?typeof(T):TypeFor(fieldType);
+  return (T)instance.GetType().GetFields(BindingFlags.Instance|BindingFlags.Public|BindingFlags.NonPublic).Single(f=>f.Name==m.Groups[1].Value.Trim()&&f.FieldType==expected).GetValue(instance);
  }
  static void SetInternal<T>(string type,object instance,string key,T value)
  {
@@ -334,6 +335,42 @@ internal static class ReleaseProbe
   var widget=(Window)New("WidgetWindow",prefs,true);try{Call("WidgetWindow",widget,"ApplySnapshot",data);var body=(FrameworkElement)widget.Content;body.Measure(new Size(600,700));body.Arrange(new Rect(0,0,600,700));body.UpdateLayout();Check(body.ActualHeight>0,"protected dashboard renders the cached usage snapshot");}finally{widget.Close();}
   File.WriteAllText(Path.Combine(dir,"verification.json"),"{\"passed\":true,\"scope\":\"period\",\"checks\":"+checks+"}");Console.WriteLine("PERIOD RELEASE CHECKS: "+checks);
  }
+ static void MilestoneOnly(string dir)
+ {
+  Check(assembly.GetType("CodexUserData.MilestoneEngine")==null,"milestone implementation remains obfuscated");
+  var json=new JavaScriptSerializer();string home=Path.Combine(dir,"milestone-fixture"),logs=Path.Combine(home,"sessions");Directory.CreateDirectory(logs);
+  string id="00000000-0000-0000-0000-000000000456";DateTime now=DateTime.UtcNow;string start=now.AddHours(-3).ToString("o"),finish=now.AddHours(-2).ToString("o");
+  File.WriteAllText(Path.Combine(logs,"rollout-"+id+".jsonl"),json.Serialize(new{type="session_meta",timestamp=start,payload=new{id=id,timestamp=start}})+"\n"+
+   json.Serialize(new{type="event_msg",timestamp=start,payload=new{type="token_count",info=new{last_token_usage=new{input_tokens=40000000,output_tokens=0}}}})+"\n"+
+   json.Serialize(new{type="event_msg",timestamp=finish,payload=new{type="token_count",info=new{last_token_usage=new{input_tokens=200000000,output_tokens=0}}}})+"\n");
+  var reader=New("LocalCodexUsage",home,Path.Combine(dir,"milestone-usage.gz"),false);Call("LocalCodexUsage",reader,"Read","all",now,null,null);
+  var input=Call("LocalCodexUsage",reader,"GetMilestones",now,System.Threading.CancellationToken.None);string folder=Path.Combine(dir,"milestone-cache");var engine=New("MilestoneEngine",folder);long at=DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+  var snapshot=Call("MilestoneEngine",engine,"Get",input,"fixture","fixture",at,System.Threading.CancellationToken.None);
+  Check((long)Get(snapshot,"TotalTokens")==240000000L&&(long)Call("MilestoneSnapshot",snapshot,"Completed",100000000L)==2,"protected milestones retain cumulative tokens and threshold count");
+  var first=Call("MilestoneSnapshot",snapshot,"Stage",100000000L,1L,at);var second=Call("MilestoneSnapshot",snapshot,"Stage",100000000L,2L,at);
+  Check((long)Call("MilestoneStage",first,"get_DurationMin")==3600L&&!(bool)Call("MilestoneStage",second,"get_DurationKnown"),"protected milestones distinguish reported elapsed time from same-report unknown duration");
+  var restarted=New("MilestoneEngine",folder);var reloaded=Call("MilestoneEngine",restarted,"Get",input,"fixture","fixture",at,System.Threading.CancellationToken.None);
+  Check((int)Call("MilestoneEngine",restarted,"get_Builds")==0&&(long)Get(reloaded,"TotalTokens")==240000000L,"protected numeric milestone cache validates and reloads after restart");
+  var curveIndex=InternalField<object>("MilestoneSnapshot",reloaded,"Curve","MilestoneCurveSeries");
+  Check(InternalField<long[]>("MilestoneCurveSeries",curveIndex,"Totals").Last()==240000000L,"protected cumulative index retains the complete historical baseline");
+  var prefs=New("Preferences");Set(prefs,"MilestoneStep",500000000L);Set(prefs,"CodexHome",home);Set(prefs,"Source","local");Set(prefs,"LiveQuota",false);Set(prefs,"OrbAnimation","off");
+  Check((long)Get(Call("Preferences",prefs,"Clone"),"MilestoneStep")==500000000L,"milestone preference schema survives obfuscation");
+  new Application{ShutdownMode=ShutdownMode.OnExplicitShutdown};var widget=(Window)New("WidgetWindow",prefs,true);
+  try
+  {
+   widget.Show();Call("WidgetWindow",widget,"OpenHistory");var history=InternalField<Window>("WidgetWindow",widget,"historyWindow");
+   var panel=widget.GetType().GetFields(BindingFlags.Instance|BindingFlags.NonPublic).Select(f=>f.GetValue(widget)).First(value=>value!=null&&TypeFor("MilestonePanel").IsInstanceOfType(value));
+   var element=(FrameworkElement)panel;element.Visibility=Visibility.Visible;Call("MilestonePanel",panel,"Refresh");
+   Check(WaitForUi(()=>!InternalField<bool>("MilestonePanel",panel,"loading")),"protected milestone page finishes background loading");
+   var title=InternalField<TextBlock>("MilestonePanel",panel,"currentTitle");Check(title.Text.Contains("1"),"protected milestone page renders its current stage");
+   var curve=InternalField<object>("WidgetWindow",widget,"milestoneCurvePanel","MilestoneCurvePanel");((FrameworkElement)curve).Visibility=Visibility.Visible;Call("MilestoneCurvePanel",curve,"Refresh");
+   Check(WaitForUi(()=>InternalField<object>("MilestoneCurvePanel",curve,"snapshot","MilestoneSnapshot")!=null),"protected independent cumulative milestone page loads");
+   history.Close();Check(InternalField<bool>("MilestonePanel",panel,"disposed"),"protected milestone page releases its lifecycle on close");
+   Check(InternalField<bool>("MilestoneCurvePanel",curve,"disposed"),"protected cumulative curve releases its lifecycle on close");
+  }
+  finally{widget.Close();}
+  File.WriteAllText(Path.Combine(dir,"verification.json"),"{\"passed\":true,\"scope\":\"milestone\",\"checks\":"+checks+"}");Console.WriteLine("MILESTONE RELEASE CHECKS: "+checks);
+ }
  [STAThread] static int Main(string[] args)
  {
   try{
@@ -341,6 +378,7 @@ internal static class ReleaseProbe
    assembly=Assembly.LoadFrom(Path.GetFullPath(args[0]));map=File.ReadAllText(args[1]);string dir=args[2];Directory.CreateDirectory(dir);
    if(args.Contains("--floating-only")){FloatingEffectsOnly(dir);return 0;}
    if(args.Contains("--period-only")){PeriodOnly(dir);return 0;}
+   if(args.Contains("--milestone-only")){MilestoneOnly(dir);return 0;}
    Check(assembly.GetType("CodexUserData.WidgetWindow")==null&&Regex.Matches(map,@"^\[CodexUserData\].+ -> \[CodexUserData\]",RegexOptions.Multiline).Count>20,"implementation types are renamed");
    var json=new JavaScriptSerializer();var prefs=New("Preferences");Set(prefs,"MinimizeToTray",true);Set(prefs,"PriceOverrides",new Dictionary<string,decimal[]>{{"fixture-model",new[]{1m,.1m,0m,2m}}});
    string settings=json.Serialize(prefs);var clone=Call("Preferences",prefs,"Clone");Check(settings.Contains("\"MinimizeToTray\":true")&&(bool)Get(clone,"MinimizeToTray")&&((IDictionary)Get(clone,"PriceOverrides")).Contains("fixture-model"),"settings and custom-price schema survive obfuscation");

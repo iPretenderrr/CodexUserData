@@ -293,6 +293,87 @@ WHERE r.date >= ?1 AND r.date <= ?2
 
         private static readonly DateTime Epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
+        internal sealed class MilestoneReader : IDisposable
+        {
+            private readonly string path,app;private ReadConnection db;private string identity,stamp;private long version=-1,readAt;private DateTime day;
+            private MilestoneInput cached;
+            internal MilestoneReader(string path,string app){this.path=path;this.app=app??String.Empty;}
+            [StructLayout(LayoutKind.Sequential)]
+            private struct FileIdentity
+            {
+                internal uint Attributes,CreatedLow,CreatedHigh,AccessLow,AccessHigh,WrittenLow,WrittenHigh,Volume,SizeHigh,SizeLow,Links,IndexHigh,IndexLow;
+            }
+            [DllImport("kernel32.dll",SetLastError=true)]
+            private static extern bool GetFileInformationByHandle(Microsoft.Win32.SafeHandles.SafeFileHandle handle,out FileIdentity info);
+            private void Inspect(out string id,out string changed)
+            {
+                // data_version belongs to an open connection. File IDs additionally detect replacement
+                // at the same path, even when the new database reuses SQLite's old change counter.
+                using(var file=new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.ReadWrite|FileShare.Delete))
+                {
+                    FileIdentity info;if(!GetFileInformationByHandle(file.SafeFileHandle,out info))throw new IOException("无法检查数据库文件标识。");
+                    id=info.Volume+"/"+info.IndexHigh+"/"+info.IndexLow+"/"+info.CreatedHigh+"/"+info.CreatedLow;
+                    changed=info.WrittenHigh+"/"+info.WrittenLow+"/"+info.SizeHigh+"/"+info.SizeLow;
+                }
+            }
+            private long DataVersion(){using(var row=db.Prepare("PRAGMA data_version")){row.ReadRow();return row.Int64(0);}}
+            internal MilestoneInput Read(DateTime now,System.Threading.CancellationToken cancel)
+            {
+                cancel.ThrowIfCancellationRequested();DateTime local=now.Kind==DateTimeKind.Utc?now.ToLocalTime():DateTime.SpecifyKind(now,DateTimeKind.Local);
+                long at=ToUnixSeconds(local);string fileId,fileStamp;Inspect(out fileId,out fileStamp);
+                if(db==null||identity!=fileId){Dispose();db=new ReadConnection(path);db.Execute("PRAGMA query_only=ON");identity=fileId;cached=null;}
+                long current=DataVersion();
+                // Also handle an in-place external replacement whose SQLite header counter is equal.
+                if(cached!=null&&current==version&&stamp!=fileStamp){Dispose();db=new ReadConnection(path);db.Execute("PRAGMA query_only=ON");current=DataVersion();cached=null;}
+                if(cached!=null&&current==version&&day==local.Date&&at>=readAt&&at<cached.NextChangeAt){readAt=at;return cached;}
+                var result=new MilestoneInput();
+                result.NextChangeAt=ToUnixSeconds(local.Date.AddDays(1));
+                long rollupBoundary=ToUnixSeconds(local.Date.AddHours(23).AddMinutes(59));if(at<rollupBoundary)result.NextChangeAt=Math.Min(result.NextChangeAt,rollupBoundary);
+                string lastRollup=(local.Hour==23&&local.Minute==59?local.Date:local.Date.AddDays(-1)).ToString("yyyy-MM-dd",CultureInfo.InvariantCulture);
+                var archived=new Dictionary<DateTime,long>();var details=new List<MilestoneEvent>();
+                // One union query, one consistent transaction; never query once per date or milestone.
+                string sql="SELECT 0,l.created_at,NULL,"+FreshInput("l")+",l.output_tokens,l.cache_read_tokens,l.cache_creation_tokens FROM proxy_request_logs l WHERE (?1='' OR (CASE WHEN l.app_type='claude-desktop' THEN 'claude' ELSE l.app_type END)=?1) AND "+EffectiveLogFilter+
+                    " UNION ALL SELECT 1,0,l.date,"+FreshInput("l")+",l.output_tokens,l.cache_read_tokens,l.cache_creation_tokens FROM usage_daily_rollups l WHERE (?1='' OR (CASE WHEN l.app_type='claude-desktop' THEN 'claude' ELSE l.app_type END)=?1)";
+                db.Execute("BEGIN");
+                try
+                {
+                    using(var rows=db.Prepare(sql))
+                    {
+                        rows.Bind(1,app);while(rows.Next())
+                        {
+                            cancel.ThrowIfCancellationRequested();long tokens=checked(rows.Int64(3)+rows.Int64(4)+rows.Int64(5)+rows.Int64(6));
+                            if(rows.Int64(0)==0)
+                            {
+                                long time=rows.Int64(1);if(time>at){result.NextChangeAt=Math.Min(result.NextChangeAt,time);continue;}
+                                if(tokens!=0)details.Add(new MilestoneEvent{From=time,To=time,Tokens=tokens,Precision=0});
+                            }
+                            else
+                            {
+                                string text=rows.Text(2);DateTime date;
+                                if(!DateTime.TryParseExact(text,"yyyy-MM-dd",CultureInfo.InvariantCulture,DateTimeStyles.None,out date))throw new InvalidDataException("历史用量汇总日期无效。");
+                                if(String.CompareOrdinal(text,lastRollup)>0){result.NextChangeAt=Math.Min(result.NextChangeAt,ToUnixSeconds(date.AddHours(23).AddMinutes(59)));continue;}
+                                long previous;archived.TryGetValue(date,out previous);archived[date]=checked(previous+tokens);
+                            }
+                        }
+                    }
+                }
+                finally{db.Execute("ROLLBACK");}
+                foreach(var item in details)
+                {
+                    cancel.ThrowIfCancellationRequested();DateTime date=Epoch.AddSeconds(item.From).ToLocalTime().Date;long total;
+                    if(archived.TryGetValue(date,out total))archived[date]=checked(total+item.Tokens);else result.Events.Add(item);
+                }
+                foreach(var item in archived)
+                {
+                    cancel.ThrowIfCancellationRequested();if(item.Value==0)continue;
+                    // Mixed detail/archive days remain a date interval; archived usage has no clock time.
+                    result.Events.Add(new MilestoneEvent{From=ToUnixSeconds(item.Key),To=ToUnixSeconds(item.Key.AddDays(1))-1,Tokens=item.Value,Precision=2});
+                }
+                string finalId,finalStamp;Inspect(out finalId,out finalStamp);if(finalId!=fileId)throw new IOException("数据库在读取期间已替换，请重试。");
+                cached=result;version=current;identity=fileId;stamp=fileStamp;day=local.Date;readAt=at;return result;
+            }
+            public void Dispose(){if(db!=null){db.Dispose();db=null;}cached=null;}
+        }
         internal static UsageSnapshot Read(string dbPath, string range, string app, DateTime now)
         {
             if (String.IsNullOrWhiteSpace(dbPath) || !File.Exists(dbPath))

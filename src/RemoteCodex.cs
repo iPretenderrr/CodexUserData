@@ -121,7 +121,41 @@ namespace CodexUserData
         private readonly Dictionary<string,Dictionary<string,LogCursor>> records=new Dictionary<string,Dictionary<string,LogCursor>>();
         private readonly Dictionary<string,UsageSnapshotMemo> snapshots=new Dictionary<string,UsageSnapshotMemo>();
         private readonly Dictionary<string,int> conflicts=new Dictionary<string,int>();
-        internal void Clear(){local=remote=null;records.Clear();snapshots.Clear();conflicts.Clear();}
+        private sealed class SourceStamp
+        {
+            internal object Identity;internal string Id,Parent,Path;internal long Version,Started;internal bool Meta;internal int Count,Invalid;
+            internal SourceStamp(LogCursor c){Identity=c.MilestoneIdentity;Id=c.Id;Parent=c.Parent;Path=c.Path;Version=c.MilestoneVersion;Started=c.Started;Meta=c.Meta;Count=c.Events.Count;Invalid=c.Invalid;}
+            internal bool Same(LogCursor c){return Identity==c.MilestoneIdentity&&Id==c.Id&&Parent==c.Parent&&Path==c.Path&&Version==c.MilestoneVersion&&Started==c.Started&&Meta==c.Meta&&Count==c.Events.Count&&Invalid==c.Invalid;}
+        }
+        private SourceStamp[] milestoneLocal,milestoneRemote;
+        private readonly Dictionary<string,MilestoneLedgerMemo> milestoneMemos=new Dictionary<string,MilestoneLedgerMemo>();
+        private readonly Dictionary<string,Dictionary<string,LogCursor>> milestoneRecords=new Dictionary<string,Dictionary<string,LogCursor>>();
+        private readonly Dictionary<string,int> milestoneConflicts=new Dictionary<string,int>();
+        private readonly Dictionary<string,MilestoneInput> milestoneWarnings=new Dictionary<string,MilestoneInput>();
+        private static bool SameSource(SourceStamp[] stamps,List<LogCursor> values,System.Threading.CancellationToken cancel)
+        {if(stamps==null||stamps.Length!=values.Count)return false;for(int i=0;i<stamps.Length;i++){cancel.ThrowIfCancellationRequested();if(!stamps[i].Same(values[i]))return false;}return true;}
+        internal void Clear(){local=remote=null;records.Clear();snapshots.Clear();conflicts.Clear();milestoneLocal=milestoneRemote=null;milestoneMemos.Clear();milestoneRecords.Clear();milestoneConflicts.Clear();milestoneWarnings.Clear();}
+        internal MilestoneInput GetMilestones(List<LogCursor> native,List<LogCursor> server,string view,DateTime now,System.Threading.CancellationToken cancel)
+        {
+            cancel.ThrowIfCancellationRequested();
+            // Activity publications copy cursor lists. Compare numeric summaries, not those list identities.
+            if(!SameSource(milestoneLocal,native,cancel)||!SameSource(milestoneRemote,server,cancel))
+            {
+                milestoneMemos.Clear();milestoneRecords.Clear();milestoneConflicts.Clear();milestoneWarnings.Clear();
+                milestoneLocal=native.Select(c=>new SourceStamp(c)).ToArray();milestoneRemote=server.Select(c=>new SourceStamp(c)).ToArray();
+            }
+            if(!milestoneRecords.ContainsKey(view))
+            {
+                int count;var merged=UsageUnion.Merge(view=="local"?native:view=="remote"?server:native.Concat(server),out count,cancel);
+                cancel.ThrowIfCancellationRequested();milestoneRecords[view]=merged;milestoneMemos[view]=new MilestoneLedgerMemo();milestoneConflicts[view]=count;
+            }
+            var value=milestoneMemos[view].Get(milestoneRecords[view],now,0,cancel);
+            if(milestoneConflicts[view]==0)return value;
+            MilestoneInput warned;
+            if(!milestoneWarnings.TryGetValue(view,out warned)||!Object.ReferenceEquals(warned.Events,value.Events))
+            {warned=new MilestoneInput{Events=value.Events,NextChangeAt=value.NextChangeAt,Warning=value.Warning+"\n部分跨端会话身份冲突，保留较完整记录，其余待核对。"};milestoneWarnings[view]=warned;}
+            return warned;
+        }
         internal UsageSnapshot Get(List<LogCursor> native,List<LogCursor> server,string view,string range,DateTime now,string label)
         {
             if(!Object.ReferenceEquals(local,native)||!Object.ReferenceEquals(remote,server))
@@ -139,21 +173,21 @@ namespace CodexUserData
     internal static class UsageUnion
     {
         private static string EventKey(LocalUsageEvent e){return e.Time.ToString(CultureInfo.InvariantCulture)+"|"+e.Model+"|"+e.Effort+"|"+e.Signature;}
-        internal static Dictionary<string,LogCursor> Merge(IEnumerable<LogCursor> records,out int conflicts)
+        internal static Dictionary<string,LogCursor> Merge(IEnumerable<LogCursor> records,out int conflicts,System.Threading.CancellationToken cancel=default(System.Threading.CancellationToken))
         {
             conflicts=0;var result=new Dictionary<string,LogCursor>(StringComparer.OrdinalIgnoreCase);
             foreach(var group in records.GroupBy(c=>c.Id,StringComparer.OrdinalIgnoreCase))
             {
-                var candidates=group.OrderByDescending(c=>c.Meta).ThenByDescending(c=>c.Events.Count).ToList();var combined=LocalCodexUsage.CopyCursor(candidates[0]);
+                cancel.ThrowIfCancellationRequested();var candidates=group.OrderByDescending(c=>c.Meta).ThenByDescending(c=>c.Events.Count).ToList();var combined=LocalCodexUsage.CopyCursor(candidates[0]);
                 // Event multiplicities preserve two real calls with equal counters/timestamps.
-                var counts=new Dictionary<string,int>();foreach(var e in combined.Events){string k=EventKey(e);counts[k]=counts.ContainsKey(k)?counts[k]+1:1;}
+                var counts=new Dictionary<string,int>();foreach(var e in combined.Events){cancel.ThrowIfCancellationRequested();string k=EventKey(e);counts[k]=counts.ContainsKey(k)?counts[k]+1:1;}
                 foreach(var next in candidates.Skip(1))
                 {
                     if(next.Meta&&combined.Meta&&(next.Parent!=combined.Parent||next.Started!=combined.Started)){conflicts++;continue;}
                     var seen=new Dictionary<string,int>();
                     foreach(var e in next.Events)
                     {
-                        string k=EventKey(e);int occurrence=seen.ContainsKey(k)?seen[k]+1:1;seen[k]=occurrence;int present;counts.TryGetValue(k,out present);
+                        cancel.ThrowIfCancellationRequested();string k=EventKey(e);int occurrence=seen.ContainsKey(k)?seen[k]+1:1;seen[k]=occurrence;int present;counts.TryGetValue(k,out present);
                         if(occurrence>present){combined.Events.Add(e);counts[k]=occurrence;}
                     }
                     combined.Quotas.AddRange(next.Quotas);

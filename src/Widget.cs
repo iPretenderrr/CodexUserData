@@ -1,9 +1,10 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Automation;
@@ -75,6 +76,13 @@ namespace CodexUserData
         private HistoryPanel largeHistory;
         private Window historyWindow;
         private QuotaHistoryPanel quotaHistoryPanel;
+        private MilestonePanel milestonePanel;
+        private MilestoneCurvePanel milestoneCurvePanel;
+        private readonly object milestoneGate=new object();
+        private readonly MilestoneEngine milestones=new MilestoneEngine(Path.Combine(Program.DataFolder,"milestones"));
+        private readonly UsageUnionCache milestoneUnion=new UsageUnionCache();
+        private UsageDatabase.MilestoneReader milestoneDatabase;
+        private string milestoneDatabaseKey,milestoneUnionScope;
         private SettingsWindow settingsWindow;
         private readonly StackPanel body;
         private readonly UniformGrid cards;
@@ -156,7 +164,7 @@ namespace CodexUserData
             timer.Tick+=delegate{RefreshData();};StateChanged+=delegate{if(WindowState==WindowState.Minimized&&prefs.MinimizeToTray){MinimizeWindow();return;}if(WindowState==WindowState.Normal){RestoreHistory();if(snapshot!=null)ApplySnapshot(snapshot);RefreshData();}};
             preferenceTimer.Tick+=delegate{preferenceTimer.Stop();Persist();};
             activityStatusClock.Tick+=delegate{UpdateActivityStatus();};IsVisibleChanged+=delegate{UpdateActivityClock();};StateChanged+=delegate{UpdateActivityClock();};
-            Closing+=delegate{closed=true;timer.Stop();activityStatusClock.Stop();if(activity!=null)activity.Dispose();if(remote!=null)remote.Dispose();if(ball!=null)ball.Dispose();quota.Dispose();Persist();if(historyWindow!=null)historyWindow.Close();if(coverageWindow!=null)coverageWindow.Close();};
+            Closing+=delegate{closed=true;timer.Stop();activityStatusClock.Stop();ReleaseMilestoneReader();if(activity!=null)activity.Dispose();if(remote!=null)remote.Dispose();if(ball!=null)ball.Dispose();quota.Dispose();Persist();if(historyWindow!=null)historyWindow.Close();if(coverageWindow!=null)coverageWindow.Close();};
             BuildCards();UpdateButtons();UpdateSource();Reflow();
         }
         private void BuildCards()
@@ -216,6 +224,8 @@ namespace CodexUserData
         {
             readyRanges=null;customRangeRevision++;cacheCustomRangeRevision++;
             revision++;snapshot=null;quota.AcceptUsage(null,Scope());heroValue.Text="—";heroExact.Text="";heroExact.Visibility=Visibility.Collapsed;heroLabel.Text=PeriodName()+" · "+LabelFor(heroKey);foreach(var text in values.Values)text.Text="—";SetCoverageNotice("",false,false);heroNote.Text="等待当前范围的数据";modelPanel.Apply(null);history.Apply(null,Scope());if(largeHistory!=null)largeHistory.Apply(null,Scope());Persist();RefreshUsage(false);
+            if(milestonePanel!=null)milestonePanel.SourceChanged();
+            if(milestoneCurvePanel!=null)milestoneCurvePanel.Refresh();
         }
         private void OpenSettings()
         {
@@ -233,9 +243,78 @@ namespace CodexUserData
             Theme.Apply(prefs);quota.ApplyTheme();UpdateCompletionViews();
         }
         private string Scope(){return prefs.Source=="local"?(prefs.Remote.Enabled?(prefs.UsageView=="local"?"本机 Codex":prefs.UsageView=="remote"?"服务器 Codex":"Codex · 合计"):"本地 Codex"): "CC Switch · "+(String.IsNullOrEmpty(prefs.App)?"全部应用":prefs.App);}
+        private string MilestoneScope()
+        {
+            // Paths and server identity are hashed locally; cache names contain no
+            // account names, credentials or source paths. Period buttons are excluded.
+            return RemoteOptions.Hash(prefs.Source=="local"?"local\n"+Path.GetFullPath(prefs.CodexHome).TrimEnd('\\','/').ToUpperInvariant()+"\n"+(prefs.Remote.Enabled?prefs.UsageView+"\n"+prefs.Remote.Identity:"local"):
+                "ccswitch\n"+Path.GetFullPath(prefs.Database).ToUpperInvariant()+"\n"+prefs.App);
+        }
+        private Task<MilestoneSnapshot> LoadMilestones(CancellationToken cancel)
+        {
+            if(coverageReadFailed&&snapshot==null)return Task.FromException<MilestoneSnapshot>(new IOException("当前来源尚未读取成功，请查看首页统计说明。"));
+            string identity=MilestoneScope(),label=Scope(),selected=prefs.Source,home=prefs.CodexHome,db=prefs.Database,application=prefs.App,view=prefs.UsageView;
+            var remoteReader=remote;bool enabled=prefs.Remote.Enabled;string lastFailure=coverageReadFailed?"最近一次用量刷新失败，保留已读取的记录。":coverageIncomplete?"当前用量有未计入的记录，请查看首页统计说明。":"";
+            return Task.Run(()=>
+            {
+                // The panel coalesces requests. This gate also isolates a late read
+                // from a freshly reopened history window and its reader disposal.
+                lock(milestoneGate)
+                {
+                    cancel.ThrowIfCancellationRequested();MilestoneInput input;string sync="";DateTime now=DateTime.Now;
+                    if(selected!="local")
+                    {
+                        if(milestoneDatabase==null||milestoneDatabaseKey!=identity)
+                        {if(milestoneDatabase!=null)milestoneDatabase.Dispose();milestoneDatabase=new UsageDatabase.MilestoneReader(db,application);milestoneDatabaseKey=identity;}
+                        input=milestoneDatabase.Read(now,cancel);
+                    }
+                    else
+                    {
+                        List<LogCursor> native=null;
+                        lock(usageGate)
+                        {
+                            cancel.ThrowIfCancellationRequested();
+                            if(local==null||localRoot!=home)
+                            {
+                                var reader=new LocalCodexUsage(home,Path.Combine(Program.DataFolder,"local-codex-cache.json.gz"));reader.Update(null,()=>cancel.IsCancellationRequested);
+                                // Do not publish a new reader until its first scan succeeds;
+                                // otherwise a failed initial load could later look like zero usage.
+                                local=reader;localRoot=home;
+                            }
+                            if(!enabled||view=="local")input=local.GetMilestones(now,cancel);
+                            else
+                            {
+                                if(exportedReader!=local||exportedVersion!=local.DataVersion){exportedRecords=local.Export();exportedReader=local;exportedVersion=local.DataVersion;}
+                                native=exportedRecords;input=null;
+                            }
+                        }
+                        if(input==null)
+                        {
+                            if(milestoneUnionScope!=identity){milestoneUnion.Clear();milestoneUnionScope=identity;}
+                            var state=remoteReader==null?null:remoteReader.View;
+                            input=milestoneUnion.GetMilestones(native,state==null?new List<LogCursor>():state.Records,view,now,cancel);
+                            if(state==null)sync="服务器尚未同步，当前历史可能不完整。";
+                            else if(!state.Connected||state.Discovering||state.Records.Count==0)sync=state.Status;
+                        }
+                    }
+                    cancel.ThrowIfCancellationRequested();var result=milestones.Get(input,identity,label,LocalCodexUsage.Unix(now),cancel);
+                    return result.WithStatus(label,String.Join("\n",new[]{result.Warning,lastFailure,sync}.Where(s=>!String.IsNullOrWhiteSpace(s))),result.ObservedAt,result.NextChangeAt);
+                }
+            },cancel);
+        }
+        private void ReleaseMilestoneReader()
+        {
+            // Never wait for a database worker from the UI close handler.
+            Task.Run(()=>{lock(milestoneGate){if(milestoneDatabase!=null)milestoneDatabase.Dispose();milestoneDatabase=null;milestoneDatabaseKey=null;}});
+        }
         private void SetTrendRange(int value){customRangeRevision++;prefs.TrendDays=value;if(history.IsVisible)history.SetRange(value);if(largeHistory!=null&&largeHistory.IsVisible)largeHistory.SetRange(value);SchedulePersist();}
         private void SetCacheTrendRange(int value){cacheCustomRangeRevision++;prefs.CacheTrendDays=value;if(history.IsVisible)history.SetCacheRange(value);if(largeHistory!=null&&largeHistory.IsVisible)largeHistory.SetCacheRange(value);SchedulePersist();}
         private void SetTrendAggregation(string value){prefs.TrendAggregation=value;if(history.IsVisible)history.SetAggregation(value);if(largeHistory!=null&&largeHistory.IsVisible)largeHistory.SetAggregation(value);SchedulePersist();}
+        private void SetMilestoneStep(long value)
+        {
+            MilestoneEngine.CheckStep(value);prefs.MilestoneStep=value;
+            if(milestoneCurvePanel!=null)milestoneCurvePanel.SetStep(value);if(milestonePanel!=null)milestonePanel.SetStep(value);SchedulePersist();
+        }
         private void SetHeatAggregation(string value){prefs.HeatmapAggregation=value;if(history.IsVisible)history.SetHeatAggregation(value);if(largeHistory!=null&&largeHistory.IsVisible)largeHistory.SetHeatAggregation(value);SchedulePersist();}
         private async void RequestCustomRange(HistoryPanel panel,DateTime from,DateTime to,bool cache)
         {
@@ -401,14 +480,16 @@ namespace CodexUserData
             if(historyWindow!=null){WindowInteraction.ResumeReveal(historyWindow);if(!historyWindow.IsVisible)historyWindow.Show();if(historyWindow.WindowState==WindowState.Minimized)historyWindow.WindowState=WindowState.Normal;historyWindow.Activate();return;}
             largeHistory=new HistoryPanel{Margin=new Thickness(20,10,20,20)};largeHistory.RangeChanged+=SetTrendRange;largeHistory.CacheRangeChanged+=SetCacheTrendRange;largeHistory.AggregationChanged+=SetTrendAggregation;largeHistory.HeatAggregationChanged+=SetHeatAggregation;largeHistory.CustomRangeRequested+=delegate(DateTime from,DateTime to){RequestCustomRange(largeHistory,from,to,false);};largeHistory.CacheCustomRangeRequested+=delegate(DateTime from,DateTime to){RequestCustomRange(largeHistory,from,to,true);};largeHistory.IsVisibleChanged+=delegate{if(largeHistory!=null&&largeHistory.IsVisible){largeHistory.SetRange(prefs.TrendDays);largeHistory.SetCacheRange(prefs.CacheTrendDays);}};largeHistory.Configure(true,true,prefs.TrendDays,prefs.TrendAggregation,prefs.HeatmapAggregation,prefs.CacheTrendDays);largeHistory.Apply(snapshot,Scope());
             quotaHistoryPanel=new QuotaHistoryPanel(quota.HistoryStore,()=>QuotaHistoryStore.Scope(prefs.CodexHome),()=>quota.HistoryError);
-            var content=new Grid();content.Children.Add(largeHistory);content.Children.Add(quotaHistoryPanel);quotaHistoryPanel.Visibility=Visibility.Collapsed;
+            milestonePanel=new MilestonePanel(LoadMilestones,MilestoneScope,prefs.MilestoneStep,SetMilestoneStep){Margin=new Thickness(20,12,20,20)};
+            milestoneCurvePanel=new MilestoneCurvePanel(LoadMilestones,MilestoneScope,prefs.MilestoneStep,SetMilestoneStep){Margin=new Thickness(20,12,20,20)};milestoneCurvePanel.EnableRangeControls();
+            var content=new Grid();content.Children.Add(largeHistory);content.Children.Add(quotaHistoryPanel);content.Children.Add(milestonePanel);content.Children.Add(milestoneCurvePanel);quotaHistoryPanel.Visibility=milestonePanel.Visibility=milestoneCurvePanel.Visibility=Visibility.Collapsed;
             var layout=new DockPanel();var tabs=new WrapPanel{Margin=new Thickness(20,8,20,0)};DockPanel.SetDock(tabs,Dock.Top);layout.Children.Add(tabs);
-            var usageTab=Theme.Button("用量","每日用量与趋势",70);var quotaTab=Theme.Button("额度","额度历史曲线",70);usageTab.Margin=new Thickness(0,0,6,0);tabs.Children.Add(usageTab);tabs.Children.Add(quotaTab);
+            var usageTab=Theme.Button("用量","每日用量与趋势",70);var quotaTab=Theme.Button("额度","额度历史曲线",70);var milestoneTab=Theme.Button("里程碑","各段 Token 用量与耗时",70);var curveTab=Theme.Button("累计里程碑","累计曲线上的里程碑与阶段耗时",94);usageTab.Margin=quotaTab.Margin=milestoneTab.Margin=new Thickness(0,0,6,0);tabs.Children.Add(usageTab);tabs.Children.Add(quotaTab);tabs.Children.Add(milestoneTab);tabs.Children.Add(curveTab);
             var scroller=new ScrollViewer{Content=content,VerticalScrollBarVisibility=ScrollBarVisibility.Auto,HorizontalScrollBarVisibility=ScrollBarVisibility.Disabled};layout.Children.Add(scroller);scroller.ScrollChanged+=delegate(object sender,ScrollChangedEventArgs e){if(e.ViewportHeightChange!=0&&quotaHistoryPanel!=null)quotaHistoryPanel.SetViewportHeight(scroller.ViewportHeight);};
-            Action<bool> selectQuota=show=>{largeHistory.Visibility=show?Visibility.Collapsed:Visibility.Visible;quotaHistoryPanel.Visibility=show?Visibility.Visible:Visibility.Collapsed;usageTab.Background=show?Theme.Surface:Theme.Hover;quotaTab.Background=show?Theme.Hover:Theme.Surface;scroller.ScrollToTop();};
-            usageTab.Click+=delegate{selectQuota(false);};quotaTab.Click+=delegate{selectQuota(true);};selectQuota(false);
+            Action<int> selectTab=index=>{largeHistory.Visibility=index==0?Visibility.Visible:Visibility.Collapsed;quotaHistoryPanel.Visibility=index==1?Visibility.Visible:Visibility.Collapsed;milestonePanel.Visibility=index==2?Visibility.Visible:Visibility.Collapsed;milestoneCurvePanel.Visibility=index==3?Visibility.Visible:Visibility.Collapsed;usageTab.Background=index==0?Theme.Hover:Theme.Surface;quotaTab.Background=index==1?Theme.Hover:Theme.Surface;milestoneTab.Background=index==2?Theme.Hover:Theme.Surface;curveTab.Background=index==3?Theme.Hover:Theme.Surface;scroller.ScrollToTop();};
+            usageTab.Click+=delegate{selectTab(0);};quotaTab.Click+=delegate{selectTab(1);};milestoneTab.Click+=delegate{selectTab(2);};curveTab.Click+=delegate{selectTab(3);};selectTab(0);
             var styled=new StyledWindow{Title="用量与额度趋势",Width=880,Height=850,MinWidth=340,MinHeight=420,MaxHeight=SystemParameters.WorkArea.Height,Background=Theme.Background,Foreground=Theme.Ink,FontFamily=FontFamily,Owner=this,WindowStartupLocation=WindowStartupLocation.CenterOwner,ShowInTaskbar=false};
-            styled.SetBody(layout,"用量与额度趋势","USAGE INSIGHTS",true);historyWindow=styled;historyWindow.Loaded+=delegate{if(historyWindow!=null)ClampWindow(historyWindow);};historyWindow.Closed+=delegate{historyWindow=null;largeHistory=null;quotaHistoryPanel=null;};historyWindow.Show();
+            styled.SetBody(layout,"用量与额度趋势","USAGE INSIGHTS",true);historyWindow=styled;historyWindow.Loaded+=delegate{if(historyWindow!=null)ClampWindow(historyWindow);};historyWindow.Closed+=delegate{if(milestoneCurvePanel!=null)milestoneCurvePanel.Dispose();milestoneCurvePanel=null;if(milestonePanel!=null)milestonePanel.Dispose();milestonePanel=null;ReleaseMilestoneReader();historyWindow=null;largeHistory=null;quotaHistoryPanel=null;};historyWindow.Show();
         }
         private void RefreshData(){RefreshUsage(true);}
         // Price updates reuse the parsed ledger and database query path; they do not force
@@ -476,6 +557,8 @@ namespace CodexUserData
         }
         internal void ApplySnapshot(UsageSnapshot s)
         {
+            if(milestonePanel!=null)milestonePanel.Refresh();
+            if(milestoneCurvePanel!=null)milestoneCurvePanel.Refresh();
             snapshot=s;prefs.KnownModels=prefs.KnownModels.Concat(s.KnownModels).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();ModelColors.EnsureModels(prefs.KnownModels.Concat(s.Models.Select(model=>model.Model)));quota.Accept(prefs.Remote.Enabled&&combinedSnapshot!=null?combinedSnapshot.Quotas:s.Quotas);quota.AcceptUsage(prefs.Remote.Enabled?combinedSnapshot:s,prefs.Remote.Enabled?"Codex · 合计":Scope());UpdateBall();if(!preview&&(!IsVisible||WindowState==WindowState.Minimized))return;heroLabel.Text=PeriodName()+" · "+LabelFor(heroKey);heroValue.Text=Format(heroKey,s,false);heroValue.ToolTip=Format(heroKey,s,true);
             heroExact.Text=heroKey=="tokens"&&!s.DataUnavailable?"("+TokenText.Exact(s.TotalTokens)+")":"";heroExact.Visibility=heroKey=="tokens"&&!prefs.Collapsed&&!s.DataUnavailable?Visibility.Visible:Visibility.Collapsed;
             heroNote.Text=s.DataUnavailable?"当前来源尚未读取成功":"API 估算 "+ModelColors.Money(s.EquivalentUsd,s.UnpricedTokens,s.TotalTokens)+" · USD";

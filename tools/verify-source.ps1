@@ -1,4 +1,4 @@
-param([string]$OutputDirectory=(Join-Path $PSScriptRoot '..\.build\source-verification'),[switch]$IslandOnly,[switch]$QuotaOnly,[switch]$FloatingOnly,[switch]$HtmlOnly,[switch]$RemoteOnly,[switch]$PeriodOnly,[switch]$PriceOnly)
+param([string]$OutputDirectory=(Join-Path $PSScriptRoot '..\.build\source-verification'),[switch]$IslandOnly,[switch]$QuotaOnly,[switch]$FloatingOnly,[switch]$HtmlOnly,[switch]$RemoteOnly,[switch]$PeriodOnly,[switch]$PriceOnly,[switch]$MilestoneOnly)
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
 $destination=[IO.Path]::GetFullPath($OutputDirectory)
@@ -25,5 +25,5 @@ $sources+=@(Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*StabilityProbe.cs
 # Source checks avoid re-obfuscating the application for each small regression fix.
 & (Join-Path $framework 'csc.exe') /nologo /target:exe /platform:x64 /optimize+ /codepage:65001 /main:CodexUserData.StabilityProbe ('/out:'+$binary) @refs @sources
 if($LASTEXITCODE -ne 0){throw 'Source regression compilation failed'}
-if($PriceOnly){& $binary $destination --price-only}elseif($PeriodOnly){& $binary $destination --period-only}elseif($RemoteOnly){& $binary $destination --remote-only}elseif($HtmlOnly){& $binary $destination --html-only}elseif($FloatingOnly){& $binary $destination --floating-only}elseif($QuotaOnly){& $binary $destination --quota-only}elseif($IslandOnly){& $binary $destination --island-only}else{& $binary $destination}
+if($MilestoneOnly){& $binary $destination --milestone-only}elseif($PriceOnly){& $binary $destination --price-only}elseif($PeriodOnly){& $binary $destination --period-only}elseif($RemoteOnly){& $binary $destination --remote-only}elseif($HtmlOnly){& $binary $destination --html-only}elseif($FloatingOnly){& $binary $destination --floating-only}elseif($QuotaOnly){& $binary $destination --quota-only}elseif($IslandOnly){& $binary $destination --island-only}else{& $binary $destination}
 if($LASTEXITCODE -ne 0){throw 'Source regression failed'}
