@@ -73,6 +73,20 @@ internal static class ReleaseProbe
  }
  [StructLayout(LayoutKind.Sequential)] struct WindowRect {public int Left,Top,Right,Bottom;}
  [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr window,out WindowRect rect);
+ [StructLayout(LayoutKind.Sequential)] struct MonitorWork {public int Size;public WindowRect Monitor,Work;public uint Flags;}
+ [DllImport("user32.dll")] static extern IntPtr MonitorFromWindow(IntPtr window,uint flags);
+ [DllImport("user32.dll")] static extern bool GetMonitorInfo(IntPtr monitor,ref MonitorWork info);
+ [DllImport("user32.dll")] static extern int GetWindowRgn(IntPtr window,IntPtr region);
+ [DllImport("gdi32.dll")] static extern IntPtr CreateRectRgn(int left,int top,int right,int bottom);
+ [DllImport("gdi32.dll")] static extern int GetRgnBox(IntPtr region,out WindowRect bounds);
+ [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr value);
+ static bool FillsWorkArea(Window window)
+ {
+  var handle=new System.Windows.Interop.WindowInteropHelper(window).Handle;var info=new MonitorWork{Size=Marshal.SizeOf(typeof(MonitorWork))};WindowRect rect;
+  if(!GetMonitorInfo(MonitorFromWindow(handle,2),ref info)||!GetWindowRect(handle,out rect))return false;
+  if(System.Windows.Shell.WindowChrome.GetWindowChrome(window)!=null){var region=CreateRectRgn(0,0,0,0);try{WindowRect clip;if(GetWindowRgn(handle,region)!=2||GetRgnBox(region,out clip)!=2)return false;int x=rect.Left,y=rect.Top;rect=new WindowRect{Left=x+clip.Left,Top=y+clip.Top,Right=x+clip.Right,Bottom=y+clip.Bottom};}finally{DeleteObject(region);}}
+  return Math.Abs(rect.Left-info.Work.Left)<=1&&Math.Abs(rect.Top-info.Work.Top)<=1&&Math.Abs(rect.Right-info.Work.Right)<=1&&Math.Abs(rect.Bottom-info.Work.Bottom)<=1;
+ }
  [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr window,uint message,IntPtr w,IntPtr l);
  static bool ClearCorners(Window window,int width,int height)
  {
@@ -217,12 +231,13 @@ internal static class ReleaseProbe
   Call("WindowInteraction",null,"ShowFrom",a,b,new Action(()=>{}),new Action(()=>{}));Call("WindowInteraction",null,"ShowFrom",b,a,new Action(()=>{}),new Action(()=>{}));Pump(500);
   Check(b.IsVisible&&!a.IsVisible,"reversing a window transfer cancels the obsolete destination");
   Call("WindowInteraction",null,"ToggleMaximize",b);
-  Check(b.WindowState==WindowState.Normal,"maximize waits for the transition midpoint");
+  Check(b.WindowState==WindowState.Maximized,"maximize applies native bounds immediately");
   Check(WaitForUi(()=>b.WindowState==WindowState.Maximized&&((FrameworkElement)b.Content).Opacity==1),"maximize transition completes with visible content");
   Call("WindowInteraction",null,"ToggleMaximize",b);
   Check(WaitForUi(()=>b.WindowState==WindowState.Normal&&((FrameworkElement)b.Content).Opacity==1),"restore transition returns to normal bounds");
   Call("WindowInteraction",null,"ToggleMaximize",b);Call("WindowInteraction",null,"CompleteReveal",b);Pump(400);
-  Check(b.WindowState==WindowState.Normal&&((FrameworkElement)b.Content).Opacity==1,"starting native interaction cancels a pending maximize");
+  Check(b.WindowState==WindowState.Maximized&&((FrameworkElement)b.Content).Opacity==1,"native interaction preserves the already applied maximize state");
+  Call("WindowInteraction",null,"ToggleMaximize",b);Call("WindowInteraction",null,"ToggleMaximize",b);Call("WindowInteraction",null,"ToggleMaximize",b);Pump(180);Check(b.WindowState==WindowState.Normal,"rapid maximize reversals honor the final state");
   Call("WindowInteraction",null,"ShowFrom",a,b,new Action(()=>{}),new Action(()=>{}));CallAs("WindowInteraction",null,"Hide",new[]{typeof(Window),typeof(Action)},a,null);Pump(500);
   Check(!a.IsVisible,"hiding an incoming destination prevents its delayed reappearance");
   Set(prefs,"OrbAnimation","off");Call("Theme",null,"Apply",prefs);b.Show();Call("WindowInteraction",null,"ChangeShape",b,new Action(()=>{b.Width=360;}));Check(b.Width==360&&((FrameworkElement)b.Content).Opacity==1,"disabled animations apply shape changes immediately");a.Close();b.Close();
@@ -335,6 +350,31 @@ internal static class ReleaseProbe
   var widget=(Window)New("WidgetWindow",prefs,true);try{Call("WidgetWindow",widget,"ApplySnapshot",data);var body=(FrameworkElement)widget.Content;body.Measure(new Size(600,700));body.Arrange(new Rect(0,0,600,700));body.UpdateLayout();Check(body.ActualHeight>0,"protected dashboard renders the cached usage snapshot");}finally{widget.Close();}
   File.WriteAllText(Path.Combine(dir,"verification.json"),"{\"passed\":true,\"scope\":\"period\",\"checks\":"+checks+"}");Console.WriteLine("PERIOD RELEASE CHECKS: "+checks);
  }
+ static void ModelShareOnly(string dir)
+ {
+  Check(assembly.GetType("CodexUserData.ModelSharePanel")==null,"model share implementation remains obfuscated");
+  var json=new JavaScriptSerializer();var day=json.Deserialize("{\"Date\":\"2026-09-20\",\"Tokens\":100,\"Models\":[{\"Model\":\"fixture-a\",\"Tokens\":30},{\"Model\":\"fixture-a\",\"Tokens\":40},{\"Model\":\"fixture-b\",\"Tokens\":20}]}",TypeFor("DailyUsage"));
+  var parts=(Dictionary<string,long>)Call("ModelShareValues",null,"Tokens",day);Check(parts["fixture-a"]==70&&parts["fixture-b"]==20&&parts["unknown"]==10,"protected model share groups efforts and keeps unclassified tokens");
+  Check(Math.Abs((double)Call("ModelShareValues",null,"Percent",70L,100L)-70)<.001,"protected model percentage uses the token denominator");
+  var input=Array.CreateInstance(TypeFor("DailyUsage"),2);input.SetValue(day,0);input.SetValue(day,1);var cumulative=(Array)Call("ModelShareValues",null,"Aggregate",input,"cumulative");var weekly=(Array)Call("ModelShareValues",null,"Aggregate",input,"weekly");
+  Check((long)Get(cumulative.GetValue(0),"Tokens")==100&&(long)Get(cumulative.GetValue(1),"Tokens")==200&&weekly.Length==1&&(long)Get(weekly.GetValue(0),"Tokens")==200,"protected weekly and cumulative modes aggregate tokens correctly");
+  var data=json.Deserialize("{\"SourceName\":\"Generated fixture\",\"Daily\":[{\"Date\":\"2026-09-20\",\"Tokens\":100,\"Models\":[{\"Model\":\"fixture-a\",\"Tokens\":70},{\"Model\":\"fixture-b\",\"Tokens\":30}]}]}",TypeFor("UsageSnapshot"));
+  string home=Path.Combine(dir,"share-fixture");Directory.CreateDirectory(Path.Combine(home,"sessions"));var prefs=New("Preferences");Set(prefs,"CodexHome",home);Set(prefs,"Source","local");Set(prefs,"LiveQuota",false);Set(prefs,"OrbAnimation","off");
+  new Application{ShutdownMode=ShutdownMode.OnExplicitShutdown};var widget=(Window)New("WidgetWindow",prefs,true);
+  try
+  {
+   Call("WidgetWindow",widget,"ApplySnapshot",data);widget.Show();Call("WidgetWindow",widget,"OpenHistory");var history=InternalField<Window>("WidgetWindow",widget,"historyWindow");var page=(FrameworkElement)InternalField<object>("WidgetWindow",widget,"modelSharePanel","ModelSharePanel");
+   Check(page.Visibility==Visibility.Collapsed,"protected model share is independent and initially hidden");page.Visibility=Visibility.Visible;Pump(80);history.UpdateLayout();
+   var chart=(FrameworkElement)InternalField<object>("ModelSharePanel",page,"chart","UsageChart");Check((bool)Call("UsageChart",chart,"get_IsShare")&&(int)Call("UsageChart",chart,"get_GeometryBuilds")>0,"protected percentage curve renders its cached geometry");
+   Check(!history.AllowsTransparency&&System.Windows.Shell.WindowChrome.GetWindowChrome(history)!=null&&ResizeEdges(history),"protected history uses a native frame with all eight resize edges");
+   Call("WindowInteraction",null,"ToggleMaximize",history);Check(history.WindowState==WindowState.Maximized&&((FrameworkElement)history.Content).Opacity==1,"protected history maximizes without a fade midpoint");Pump(60);Check(FillsWorkArea(history),"protected visible maximize respects the current monitor taskbar work area");
+   var shell=(Border)history.Content;Check(shell.CornerRadius==new CornerRadius(0)&&shell.RenderTransform.Value.IsIdentity,"protected maximize has square corners and no second content transform");
+   Call("WindowInteraction",null,"ToggleMaximize",history);Check(history.WindowState==WindowState.Normal&&shell.CornerRadius==new CornerRadius(14),"protected history restores with rounded corners");
+   history.Close();Check(InternalField<bool>("ModelSharePanel",page,"disposed"),"protected model share page disposes on close");
+  }
+  finally{widget.Close();}
+  File.WriteAllText(Path.Combine(dir,"verification.json"),"{\"passed\":true,\"scope\":\"model-share\",\"checks\":"+checks+"}");Console.WriteLine("MODEL SHARE RELEASE CHECKS: "+checks);
+ }
  static void MilestoneOnly(string dir)
  {
   Check(assembly.GetType("CodexUserData.MilestoneEngine")==null,"milestone implementation remains obfuscated");
@@ -378,7 +418,7 @@ internal static class ReleaseProbe
    assembly=Assembly.LoadFrom(Path.GetFullPath(args[0]));map=File.ReadAllText(args[1]);string dir=args[2];Directory.CreateDirectory(dir);
    if(args.Contains("--floating-only")){FloatingEffectsOnly(dir);return 0;}
    if(args.Contains("--period-only")){PeriodOnly(dir);return 0;}
-   if(args.Contains("--milestone-only")){MilestoneOnly(dir);return 0;}
+   if(args.Contains("--model-share-only")){ModelShareOnly(dir);return 0;}if(args.Contains("--milestone-only")){MilestoneOnly(dir);return 0;}
    Check(assembly.GetType("CodexUserData.WidgetWindow")==null&&Regex.Matches(map,@"^\[CodexUserData\].+ -> \[CodexUserData\]",RegexOptions.Multiline).Count>20,"implementation types are renamed");
    var json=new JavaScriptSerializer();var prefs=New("Preferences");Set(prefs,"MinimizeToTray",true);Set(prefs,"PriceOverrides",new Dictionary<string,decimal[]>{{"fixture-model",new[]{1m,.1m,0m,2m}}});
    string settings=json.Serialize(prefs);var clone=Call("Preferences",prefs,"Clone");Check(settings.Contains("\"MinimizeToTray\":true")&&(bool)Get(clone,"MinimizeToTray")&&((IDictionary)Get(clone,"PriceOverrides")).Contains("fixture-model"),"settings and custom-price schema survive obfuscation");

@@ -51,6 +51,42 @@ namespace CodexUserData
             return "$"+value.ToString(value<.0001?"0.##E+0":value<.01?"0.######":"0.##",CultureInfo.InvariantCulture);
         }
     }
+    internal static class ModelShareValues
+    {
+        internal static Dictionary<string,long> Tokens(DailyUsage day)
+        {
+            var values=new Dictionary<string,long>(StringComparer.OrdinalIgnoreCase);long classified=0;
+            foreach(var model in day.Models)
+            {
+                if(model.Tokens<=0)continue;string name=String.IsNullOrWhiteSpace(model.Model)?"unknown":model.Model;long prior;values.TryGetValue(name,out prior);values[name]=checked(prior+model.Tokens);classified=checked(classified+model.Tokens);
+            }
+            // Keep usage without a model visible instead of inflating known models.
+            if(day.Tokens>classified){long prior;values.TryGetValue("unknown",out prior);values["unknown"]=checked(prior+day.Tokens-classified);}return values;
+        }
+        internal static double Percent(long tokens,long total){return total>0?100.0*((double)tokens/total):0;}
+        internal static DailyUsage[] Aggregate(DailyUsage[] source,string mode)
+        {
+            if(mode=="daily")return source;
+            // Aggregate token counts first. Averaging daily percentages gives a
+            // low-usage day the same weight as a high-usage day and is misleading.
+            var result=new List<DailyUsage>();var totals=new Dictionary<string,long>(StringComparer.OrdinalIgnoreCase);string week=null;
+            foreach(var day in source)
+            {
+                DateTime date=DateTime.ParseExact(day.Date.Substring(0,10),"yyyy-MM-dd",CultureInfo.InvariantCulture);
+                string key=date.AddDays(-(int)date.DayOfWeek).ToString("yyyy-MM-dd",CultureInfo.InvariantCulture);
+                if(mode=="weekly"&&week!=key){totals.Clear();week=key;result.Add(new DailyUsage{Date=key,DisplayLabel=UsageTrendSeries.WeekLabel(date)});}
+                foreach(var item in Tokens(day)){long previous;totals.TryGetValue(item.Key,out previous);totals[item.Key]=checked(previous+item.Value);}
+                var point=mode=="weekly"?result[result.Count-1]:new DailyUsage{Date=day.Date,DisplayLabel="累计至 "+day.Date};
+                point.Tokens=totals.Values.Sum();point.Models=totals.Select(p=>new ModelUsage{Model=p.Key,Tokens=p.Value}).ToList();if(mode!="weekly")result.Add(point);
+            }
+            return result.ToArray();
+        }
+        internal static string Description(DailyUsage day)
+        {
+            var parts=Tokens(day);long total=parts.Values.Sum();
+            return total==0?"该时段无用量，不计算占比":String.Join("，",parts.Select(p=>p.Key+" "+Percent(p.Value,total).ToString("0.0",CultureInfo.InvariantCulture)+"%"));
+        }
+    }
     internal sealed class ChartComparison
     {
         internal bool Available;
@@ -171,10 +207,11 @@ namespace CodexUserData
         private bool HeatColumns {get{return IsHeatmap&&HeatMode!="daily";}}
         internal bool IsCost {get;private set;}
         internal bool IsRate {get;private set;}
+        internal bool IsShare {get;private set;}
         private int through;
         internal string HighlightedModel {get;private set;}
         internal int GeometryBuilds {get;private set;}
-        private sealed class Layer {internal string Model;internal StreamGeometry Area,Line;internal double[] Upper;}
+        private sealed class Layer {internal string Model;internal StreamGeometry Area,Line;internal double[] Upper;internal Point[] Dots;}
         private readonly List<Layer> layers=new List<Layer>();
         internal void Highlight(string model){if(HighlightedModel==model)return;HighlightedModel=model;AutomationProperties.SetItemStatus(this,model==null?"全部模型":"高亮："+model);InvalidateVisual();}
         internal int Selected=-1,Hovered=-1;
@@ -226,18 +263,23 @@ namespace CodexUserData
             protected override bool IsControlElementCore(){return true;}
             protected override bool IsContentElementCore(){return true;}
         }
-        internal void SetData(DailyUsage[] days,int count,bool hourly=false,int availableHours=24,bool cost=false,string heatMode="daily",bool rate=false)
+        internal void SetData(DailyUsage[] days,int count,bool hourly=false,int availableHours=24,bool cost=false,string heatMode="daily",bool rate=false,bool share=false)
         {
             string hoveredDate=Hovered>=0&&Hovered<Days.Length?Days[Hovered].Date:null;
-            int oldCount=WindowDays;Days=days??new DailyUsage[0];IsHourly=hourly;IsRate=!IsHeatmap&&rate;IsCost=!IsRate&&cost;HeatMode=IsHeatmap&&(heatMode=="weekly"||heatMode=="cumulative")?heatMode:"daily";through=hourly?Math.Max(0,Math.Min(Days.Length,availableHours)):Days.Length;string next=hourly+"/"+through+"/"+IsCost+"/"+IsRate+"/"+HeatMode+"/"+Signature(Days);WindowDays=count;
+            int oldCount=WindowDays;Days=days??new DailyUsage[0];IsHourly=hourly;IsShare=!IsHeatmap&&share;IsRate=!IsHeatmap&&!IsShare&&rate;IsCost=!IsRate&&!IsShare&&cost;HeatMode=IsHeatmap&&(heatMode=="weekly"||heatMode=="cumulative")?heatMode:"daily";through=hourly?Math.Max(0,Math.Min(Days.Length,availableHours)):Days.Length;string next=hourly+"/"+through+"/"+IsCost+"/"+IsRate+"/"+IsShare+"/"+HeatMode+"/"+Signature(Days);WindowDays=count;
             bool dataChanged=next!=signature;if(!dataChanged&&oldCount==count)return;signature=next;cachedDrawing=null;layers.Clear();
             // A different visible period does not change the underlying model series.
             if(dataChanged)
             {
-                series.Clear();if(!IsRate){foreach(string model in Days.SelectMany(d=>d.Models).Select(m=>m.Model).Distinct().OrderBy(m=>m))series[model]=new double[Days.Length];
+                series.Clear();if(IsShare)
+                {
+                    var parts=Days.Select(ModelShareValues.Tokens).ToArray();foreach(string model in parts.SelectMany(d=>d.Keys).Distinct(StringComparer.OrdinalIgnoreCase))series[model]=new double[Days.Length];
+                    for(int i=0;i<Days.Length;i++){long total=parts[i].Values.Sum();foreach(var entry in series){long value;parts[i].TryGetValue(entry.Key,out value);entry.Value[i]=total>0?ModelShareValues.Percent(value,total):Double.NaN;}}
+                }
+                else if(!IsRate){foreach(string model in Days.SelectMany(d=>d.Models).Select(m=>m.Model).Distinct().OrderBy(m=>m))series[model]=new double[Days.Length];
                 for(int i=0;i<Days.Length;i++)foreach(var m in Days[i].Models)series[m.Model][i]+=IsCost?(double)m.EquivalentUsd:m.Tokens;}
             }
-            AutomationProperties.SetName(this,IsHeatmap?(IsCost?"每日 API 估算费用热度图":"每日用量热度图"):(IsRate?"缓存命中率趋势":IsCost?"API 估算费用趋势 · USD":"Token 用量趋势"));
+            AutomationProperties.SetName(this,IsHeatmap?(IsCost?"每日 API 估算费用热度图":"每日用量热度图"):(IsShare?"模型 Token 占比曲线":IsRate?"缓存命中率趋势":IsCost?"API 估算费用趋势 · USD":"Token 用量趋势"));
             if(Selected>=Days.Length)Selected=-1;Hovered=hoveredDate==null?-1:Array.FindIndex(Days,d=>d.Date==hoveredDate);if(Hovered<0)tip.IsOpen=false;else UpdateTip(Days[Hovered]);if(IsHeatmap&&ActualWidth>0)Height=HeatHeight(ActualWidth);InvalidateVisual();
         }
         internal double HeatHeight(double width)
@@ -251,11 +293,18 @@ namespace CodexUserData
             if(index<0||index>=Days.Length){if(Hovered!=-1){Hovered=-1;tip.IsOpen=false;InvalidateVisual();}return;}
             if(!clicked&&Hovered==index)return;Hovered=index;if(clicked)Selected=index;
             DailyUsage day=Days[index];UpdateTip(day);tip.PlacementTarget=this;tip.Placement=PlacementMode.Mouse;tip.IsOpen=IsMouseOver;
-            AutomationProperties.SetHelpText(this,Label(day)+"，"+(IsRate?ChartValue.CacheRate(day).ToString("0.0",CultureInfo.InvariantCulture)+"% 缓存命中率":IsCost?ChartValue.Money(ChartValue.Of(day,true))+" USD · API 估算":TokenText.Full(day.Tokens)+" Tokens"));if(Pick!=null)Pick(index,clicked);InvalidateVisual();
+            AutomationProperties.SetHelpText(this,Label(day)+"，"+(IsShare?ModelShareValues.Description(day):IsRate?ChartValue.CacheRate(day).ToString("0.0",CultureInfo.InvariantCulture)+"% 缓存命中率":IsCost?ChartValue.Money(ChartValue.Of(day,true))+" USD · API 估算":TokenText.Full(day.Tokens)+" Tokens"));if(Pick!=null)Pick(index,clicked);InvalidateVisual();
         }
         private static string Label(DailyUsage day){return String.IsNullOrEmpty(day.DisplayLabel)?day.Date:day.DisplayLabel;}
         private void UpdateTip(DailyUsage day)
         {
+            if(IsShare)
+            {
+                var parts=ModelShareValues.Tokens(day);long total=parts.Values.Sum();
+                if(total==0){tip.Content=Label(day)+"\n该时段无用量，不计算占比";return;}
+                var ordered=parts.OrderByDescending(p=>p.Value);var shown=HighlightedModel==null?ordered.Take(8):ordered.Where(p=>String.Equals(p.Key,HighlightedModel,StringComparison.OrdinalIgnoreCase));
+                tip.Content=Label(day)+"\n"+String.Join("\n",shown.Select(p=>p.Key+"  "+ModelShareValues.Percent(p.Value,total).ToString("0.0",CultureInfo.InvariantCulture)+"%"))+(HighlightedModel!=null&&!parts.ContainsKey(HighlightedModel)?HighlightedModel+"  0.0%":"")+(HighlightedModel==null&&parts.Count>8?"\n其余模型点击查看":"")+"\n点击固定该时段占比";return;
+            }
             if(IsRate){long eligible=day.Input+day.CacheRead+day.CacheWrite;tip.Content=Label(day)+"\n"+ChartValue.CacheRate(day).ToString("0.0",CultureInfo.InvariantCulture)+"% 缓存命中率\n缓存读取 "+TokenText.Compact(day.CacheRead)+" / 可缓存输入 "+TokenText.Compact(eligible);return;}
             string tokens=TokenText.Compact(day.Tokens)+" Tokens",cost=ChartValue.Money(ChartValue.Of(day,true))+" USD · API 估算";tip.Content=Label(day)+"\n"+(IsCost?cost+"\n"+tokens:tokens+"\n"+cost)+"\n点击固定下方明细";
         }
@@ -277,7 +326,7 @@ namespace CodexUserData
             if(IsHeatmap){if(HeatColumns)return new Point(plot.Left+index*pitch+cell/2,plot.Bottom-pitch+cell/2);int position=index+offset;return new Point(plot.Left+(position/7)*pitch+cell/2,plot.Top+(position%7)*pitch+cell/2);}
             return new Point(IsHourly?plot.Left+(index+.5)*plot.Width/24:plot.Left+(index-first)*plot.Width/Math.Max(1,Days.Length-first-1),plot.Bottom-MetricValue(Days[index])/max*plot.Height);
         }
-        private double MetricValue(DailyUsage day){return IsRate?ChartValue.CacheRate(day):(double)ChartValue.Of(day,IsCost);}
+        private double MetricValue(DailyUsage day){return IsShare?100:IsRate?ChartValue.CacheRate(day):(double)ChartValue.Of(day,IsCost);}
         private void Text(DrawingContext dc,string text,double x,double y,double size,Brush color)
         {
             dc.DrawText(new FormattedText(text,CultureInfo.InvariantCulture,FlowDirection.LeftToRight,new Typeface("Segoe UI, Microsoft YaHei UI"),size,color,VisualTreeHelper.GetDpi(this).PixelsPerDip),new Point(x,y));
@@ -295,7 +344,7 @@ namespace CodexUserData
             {
                 int active=Hovered>=first?Hovered:Selected>=first?Selected:-1;
                 if(active>=first&&active<through){Point point=PointFor(active);dc.DrawLine(new Pen(Theme.Muted,.8),new Point(point.X,plot.Top),new Point(point.X,plot.Bottom));
-                    foreach(var layer in layers){if(HighlightedModel!=null&&HighlightedModel!=layer.Model)continue;point.Y=plot.Bottom-layer.Upper[active-first]/max*plot.Height;dc.DrawEllipse(IsRate?Theme.Accent:ModelColors.For(layer.Model),new Pen(Theme.Ink,.8),point,3,3);}}
+                    foreach(var layer in layers){if(HighlightedModel!=null&&!String.Equals(HighlightedModel,layer.Model,IsShare?StringComparison.OrdinalIgnoreCase:StringComparison.Ordinal)||Double.IsNaN(layer.Upper[active-first]))continue;point.Y=plot.Bottom-layer.Upper[active-first]/max*plot.Height;dc.DrawEllipse(IsRate?Theme.Accent:ModelColors.For(layer.Model),new Pen(Theme.Ink,.8),point,3,3);}}
             }
         }
         private void DrawHeatmap(DrawingContext dc)
@@ -340,9 +389,9 @@ namespace CodexUserData
         {
             first=IsHourly?0:Math.Max(0,Days.Length-WindowDays);int count=through-first;
             double left=IsCost?72:46;plot=new Rect(left,14,Math.Max(1,ActualWidth-left-8),Math.Max(40,ActualHeight-44));
-            max=IsRate?100:NiceMax(count>0?Days.Skip(first).Take(count).Max(d=>MetricValue(d)):0);
+            max=IsRate||IsShare?100:NiceMax(count>0?Days.Skip(first).Take(count).Max(d=>MetricValue(d)):0);
             var dashed=new Pen(Theme.Line,.7){DashStyle=new DashStyle(new double[]{3,4},0)};
-            for(int line=0;line<=4;line++){double y=plot.Bottom-plot.Height*line/4;dc.DrawLine(dashed,new Point(plot.Left,y),new Point(plot.Right,y));Text(dc,IsRate?(max*line/4).ToString("0",CultureInfo.InvariantCulture)+"%":ChartValue.Axis(max*line/4,IsCost),0,y-6,9,Theme.Muted);}
+            for(int line=0;line<=4;line++){double y=plot.Bottom-plot.Height*line/4;dc.DrawLine(dashed,new Point(plot.Left,y),new Point(plot.Right,y));Text(dc,IsRate||IsShare?(max*line/4).ToString("0",CultureInfo.InvariantCulture)+"%":ChartValue.Axis(max*line/4,IsCost),0,y-6,9,Theme.Muted);}
             if(IsHourly)
             {
                 foreach(int hour in new[]{0,6,12,18,23}){double x=plot.Left+hour*plot.Width/24;Text(dc,hour.ToString("00")+":00",Math.Min(plot.Right-28,x),plot.Bottom+8,9,Theme.Muted);}
@@ -353,6 +402,16 @@ namespace CodexUserData
                 int labels=Math.Max(2,Math.Min(7,(int)(plot.Width/65)));for(int i=0;i<labels;i++){int index=first+(int)Math.Round((count-1)*i/(double)(labels-1));Point point=PointFor(index);string label=AxisDate(Days[index].Date);double labelWidth=label.Length>5?62:31;Text(dc,label,Math.Max(plot.Left,Math.Min(plot.Right-labelWidth,point.X-labelWidth/2)),plot.Bottom+8,9,Theme.Muted);}
             }
             layers.Clear();GeometryBuilds++;if(count<=0)return;
+            if(IsShare)
+            {
+                foreach(string name in series.Keys.OrderBy(ModelOrder).ThenBy(m=>m))
+                {
+                    double[] values=series[name].Skip(first).Take(count).ToArray();if(!values.Any(v=>v>0))continue;
+                    var dots=new List<Point>();for(int i=0;i<count;i++)if(!Double.IsNaN(values[i])&&(i==0||Double.IsNaN(values[i-1]))&&(i==count-1||Double.IsNaN(values[i+1]))){Point p=PointFor(first+i);p.Y=plot.Bottom-values[i]/max*plot.Height;dots.Add(p);}
+                    layers.Add(new Layer{Model=name,Upper=values,Line=Curve(values),Dots=dots.ToArray()});
+                }
+                if(layers.Count==0)Text(dc,"该范围内无模型用量",plot.Left+12,plot.Top+12,11,Theme.Muted);return;
+            }
             if(IsRate){double[] values=Days.Skip(first).Take(count).Select(MetricValue).ToArray();layers.Add(new Layer{Model="cache-hit-rate",Upper=values,Area=Band(values,new double[count]),Line=Curve(values)});return;}
             double[] lower=new double[count];var names=series.Keys.OrderBy(ModelOrder).ThenBy(m=>m).ToArray();
             foreach(string name in names)
@@ -372,13 +431,19 @@ namespace CodexUserData
         private static int ModelOrder(string name){switch(name){case "gpt-6-astra":return 0;case "gpt-6-sol":return 1;case "gpt-6-luna":return 2;case "gpt-5.6-sol":case "gpt-5.6":return 3;case "gpt-5.5":return 4;case "gpt-5.6-terra":return 5;case "gpt-5.6-luna":return 6;default:return 7;}}
         private void DrawAreas(DrawingContext dc)
         {
+            if(IsShare)
+            {
+                foreach(var layer in layers){bool active=String.Equals(HighlightedModel,layer.Model,StringComparison.OrdinalIgnoreCase);Brush color=ModelColors.For(layer.Model);dc.PushOpacity(HighlightedModel==null||active?1:.16);dc.DrawGeometry(null,new Pen(color,active?2.8:1.8){LineJoin=PenLineJoin.Round},layer.Line);foreach(var dot in layer.Dots)dc.DrawEllipse(color,null,dot,2.8,2.8);dc.Pop();}return;
+            }
             // Hover changes opacity only. Shared frozen paths keep highlighting fast even at 180 days.
             if(IsRate&&layers.Count>0){dc.PushOpacity(.2);dc.DrawGeometry(Theme.Accent,null,layers[0].Area);dc.Pop();dc.DrawGeometry(null,new Pen(Theme.Accent,2),layers[0].Line);return;}
             foreach(var layer in layers){bool active=HighlightedModel==layer.Model;dc.PushOpacity(HighlightedModel==null?.92:active?1:.15);dc.DrawGeometry(ModelColors.For(layer.Model),active?new Pen(Theme.Ink,1.1):null,layer.Area);dc.Pop();}
         }
         private StreamGeometry Curve(double[] values)
         {
-            var shape=new StreamGeometry();using(var context=shape.Open()){Point firstPoint=PointFor(first);firstPoint.Y=plot.Bottom-values[0]/max*plot.Height;context.BeginFigure(firstPoint,false,false);Point previous=firstPoint;for(int i=1;i<values.Length;i++){Point next=PointFor(first+i);next.Y=plot.Bottom-values[i]/max*plot.Height;Segment(context,previous,next);previous=next;}}shape.Freeze();return shape;
+            // No-usage buckets have no percentage: split paths at NaN rather than
+            // interpolating a false share through the gap. Smoothstep stays bounded.
+            var shape=new StreamGeometry();using(var context=shape.Open()){bool connected=false;Point previous=new Point();for(int i=0;i<values.Length;i++){if(Double.IsNaN(values[i])){connected=false;continue;}Point next=PointFor(first+i);next.Y=plot.Bottom-values[i]/max*plot.Height;if(connected)Segment(context,previous,next);else context.BeginFigure(next,false,false);previous=next;connected=true;}}shape.Freeze();return shape;
         }
         private StreamGeometry Band(double[] upper,double[] lower)
         {
@@ -620,21 +685,21 @@ namespace CodexUserData
         {
             Background=Brushes.Transparent;
             sourceLabel=Theme.Text("近 180 天 · 等待数据",10,Theme.Muted);sourceLabel.TextWrapping=TextWrapping.Wrap;sourceLabel.Margin=new Thickness(0,12,0,8);AutomationProperties.SetAutomationId(sourceLabel,"ChartSource");Children.Add(sourceLabel);
-            modelFilter=new ChoiceButton(modelChoices,"图表模型筛选");modelFilter.Select("");Children.Add(modelFilter);
+            modelFilter=new ChoiceButton(modelChoices,"图表模型筛选"){HorizontalAlignment=HorizontalAlignment.Left,Height=30,Padding=new Thickness(10,3,10,3),Template=Theme.RoundTemplate(typeof(Button),15),BorderBrush=Theme.Line,BorderThickness=new Thickness(1),Background=Theme.Surface};modelFilter.Select("");Children.Add(modelFilter);
             modelFilter.Changed+=SetModel;
             var metricButtons=new WrapPanel{Margin=new Thickness(-2,6,0,0)};Children.Add(metricButtons);
             tokensMetric=Theme.Button("Tokens","按 Tokens 查看图表",74);costMetric=Theme.Button("API 估算 · USD","按 API 估算费用查看图表",132);
             tokensMetric.Margin=costMetric.Margin=new Thickness(2,2,4,2);tokensMetric.FontSize=costMetric.FontSize=11;tokensMetric.Click+=delegate{SetMetric(false);};costMetric.Click+=delegate{SetMetric(true);};metricButtons.Children.Add(tokensMetric);metricButtons.Children.Add(costMetric);
             AutomationProperties.SetAutomationId(tokensMetric,"ChartMetricTokens");AutomationProperties.SetAutomationId(costMetric,"ChartMetricCost");
             var heatBody=new StackPanel();heatCard=Card(heatBody);heatCard.Margin=new Thickness(0,8,0,0);Children.Add(heatCard);
-            heatHeader=ChartHeader();heatBody.Children.Add(heatHeader);heatModes=AggregationSelector(heatAggregations,"热度图",delegate(string key){SetHeatAggregation(key);if(HeatAggregationChanged!=null)HeatAggregationChanged(key);});Grid.SetColumn(heatModes,1);heatHeader.Children.Add(heatModes);
+            heatHeader=ChartHeader();heatBody.Children.Add(heatHeader);heatModes=Theme.AggregationSelector(heatAggregations,"热度图",delegate(string key){SetHeatAggregation(key);if(HeatAggregationChanged!=null)HeatAggregationChanged(key);});Grid.SetColumn(heatModes,1);heatHeader.Children.Add(heatModes);
             heatTitle=Theme.Text("近 180 天用量热度图",13,Theme.Ink);heatTitle.TextWrapping=TextWrapping.Wrap;heatTitle.TextTrimming=TextTrimming.CharacterEllipsis;heatTitle.Margin=new Thickness(0,0,8,0);heatHeader.Children.Add(heatTitle);heatHint=Theme.Text("固定近 180 天 · 色阶表示 Tokens · 细条表示模型占比",10,Theme.Muted);heatHint.TextWrapping=TextWrapping.Wrap;heatHint.Margin=new Thickness(0,5,0,6);heatBody.Children.Add(heatHint);
             heat=new UsageChart(true);heatBody.Children.Add(heat);heatBody.Children.Add(DetailViewport(heatDetail));
             var trendBody=new StackPanel();trendCard=Card(trendBody);trendCard.Margin=new Thickness(0,9,0,0);Children.Add(trendCard);
             trendHeader=ChartHeader();trendBody.Children.Add(trendHeader);
             trendActions=new WrapPanel{HorizontalAlignment=HorizontalAlignment.Right};Grid.SetColumn(trendActions,1);trendHeader.Children.Add(trendActions);
             var clearSelection=Theme.Button("清除选择","清除曲线时段选择",66);clearSelection.FontSize=11;clearSelection.Height=27;clearSelection.Margin=new Thickness(0,0,6,0);clearSelection.ToolTip="清除固定时段（Esc）";trendActions.Children.Add(clearSelection);
-            trendActions.Children.Add(AggregationSelector(trendAggregations,"曲线图",delegate(string key){SetAggregation(key);if(AggregationChanged!=null)AggregationChanged(key);}));
+            trendActions.Children.Add(Theme.AggregationSelector(trendAggregations,"曲线图",delegate(string key){SetAggregation(key);if(AggregationChanged!=null)AggregationChanged(key);}));
             clearSelection.Click+=delegate{trendSelection.Clear();};trendTitle=Theme.Text("Token 用量趋势",13,Theme.Ink);trendTitle.TextWrapping=TextWrapping.Wrap;trendHeader.Children.Add(trendTitle);AutomationProperties.SetAutomationId(trendTitle,"TrendMetricTitle");
             // Wrap period buttons as the window shrinks; a horizontal StackPanel would clip the last options.
             var buttons=new WrapPanel{Margin=new Thickness(-2,9,0,8)};trendBody.Children.Add(buttons);
@@ -661,7 +726,7 @@ namespace CodexUserData
             coverage=new Border{Child=coverageBody,Margin=new Thickness(2,10,0,0),Visibility=Visibility.Collapsed};Children.Add(coverage);
             heatSelection=new ChartDetailSelection(heat,heatDetail);trendSelection=new ChartDetailSelection(trend,trendDetail,false,false);
             PreviewMouseWheel+=delegate{heatSelection.PauseForScroll();trendSelection.PauseForScroll();cacheTrend.HoverPausedUntil=DateTime.UtcNow.AddMilliseconds(350);};
-            SizeChanged+=delegate{ReflowChartHeaders();heat.Height=heat.HeatHeight(Math.Max(180,ActualWidth-24));trend.Height=ActualWidth<420?280:ActualWidth<760?330:380;cacheTrend.Height=ActualWidth<420?220:ActualWidth<760?250:280;summary.Columns=ActualWidth<360?2:3;};SetRange(30);SetCacheRange(30);SetHeatAggregation("daily");SetAggregation("daily");SetMetric(false);
+            SizeChanged+=delegate{foreach(var chip in legendItems.Values)Theme.FitChip(chip,Math.Max(40,ActualWidth-24));ReflowChartHeaders();heat.Height=heat.HeatHeight(Math.Max(180,ActualWidth-24));trend.Height=ActualWidth<420?280:ActualWidth<760?330:380;cacheTrend.Height=ActualWidth<420?220:ActualWidth<760?250:280;summary.Columns=ActualWidth<360?2:3;};SetRange(30);SetCacheRange(30);SetHeatAggregation("daily");SetAggregation("daily");SetMetric(false);
         }
         private static Grid ChartHeader()
         {
@@ -674,15 +739,6 @@ namespace CodexUserData
         private static void PlaceHeaderActions(FrameworkElement actions,bool stacked)
         {
             Grid.SetRow(actions,stacked?1:0);Grid.SetColumn(actions,stacked?0:1);Grid.SetColumnSpan(actions,stacked?2:1);actions.Margin=stacked?new Thickness(0,5,0,0):new Thickness(0);actions.HorizontalAlignment=HorizontalAlignment.Right;
-        }
-        private static WrapPanel AggregationSelector(Dictionary<string,Button> target,string chart,Action<string> select)
-        {
-            var panel=new WrapPanel{HorizontalAlignment=HorizontalAlignment.Right};
-            foreach(var entry in new[]{new KeyValuePair<string,string>("daily","每日"),new KeyValuePair<string,string>("weekly","每周"),new KeyValuePair<string,string>("cumulative","累计")})
-            {
-                string key=entry.Key;var button=Theme.Button(entry.Value,chart+"展示方式："+entry.Value,38);button.Height=27;button.FontSize=10;button.Padding=new Thickness(5,3,5,3);button.Margin=new Thickness(1,0,1,0);button.Click+=delegate{select(key);};AutomationProperties.SetAutomationId(button,(chart=="热度图"?"Heat":"Trend")+"Aggregation"+key);target[key]=button;panel.Children.Add(button);
-            }
-            return panel;
         }
         private static FrameworkElement DetailViewport(UsageDetails detail)
         {
@@ -858,13 +914,12 @@ namespace CodexUserData
                 legend.Children.Clear();legendItems.Clear();
                 foreach(string model in totals.Keys.OrderBy(k=>k))
                 {
-                    string key=model;var item=Theme.Button("","突出模型 "+key,40);item.Height=27;item.Margin=new Thickness(0,3,6,0);item.Background=Theme.Background;item.Padding=new Thickness(7,3,7,3);item.ToolTip="悬停高亮，点击固定 / 取消";
+                    string key=model;var item=Theme.LegendChip(key,ModelColors.For(key),null,key+"\n悬停高亮，点击固定 / 取消");Theme.FitChip(item,Math.Max(40,ActualWidth-24));
                     item.MouseEnter+=delegate{Highlight(key);};item.MouseLeave+=delegate{Highlight(pinnedModel);};item.GotKeyboardFocus+=delegate{Highlight(key);};item.LostKeyboardFocus+=delegate{Highlight(pinnedModel);};
                     item.Click+=delegate{pinnedModel=pinnedModel==key?null:key;Highlight(pinnedModel);};legendItems[key]=item;legend.Children.Add(item);
                 }
                 if(pinnedModel!=null&&!totals.ContainsKey(pinnedModel))pinnedModel=null;Highlight(pinnedModel);
             }
-            foreach(var pair in totals){if(legendItems[pair.Key].Content is TextBlock)continue;var label=Theme.Text("● "+pair.Key,10,ModelColors.For(pair.Key));legendItems[pair.Key].Content=label;}
         }
         private void OpenCustomRange(bool cache)
         {
@@ -878,6 +933,6 @@ namespace CodexUserData
             if(cache){BeginCacheCustomRange(selectedFrom,selectedTo,scope);if(CacheCustomRangeRequested!=null)CacheCustomRangeRequested(selectedFrom,selectedTo);else if(original!=null)ApplyCacheCustomRange(original,scope,selectedFrom,selectedTo);}
             else{BeginCustomRange(selectedFrom,selectedTo,scope);if(CustomRangeRequested!=null)CustomRangeRequested(selectedFrom,selectedTo);else if(original!=null)ApplyCustomRange(original,scope,selectedFrom,selectedTo);}
         }
-        private void Highlight(string model){trend.Highlight(model);foreach(var pair in legendItems)pair.Value.Opacity=model==null||pair.Key==model?1:.45;}
+        private void Highlight(string model){trend.Highlight(model);foreach(var pair in legendItems){pair.Value.Opacity=model==null||pair.Key==model?1:.45;Theme.SelectChip(pair.Value,pair.Key==pinnedModel);}}
     }
 }

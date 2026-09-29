@@ -33,6 +33,7 @@ namespace CodexUserData
         private MilestoneSnapshot snapshot;
         private CancellationTokenSource cancellation;
         private Window owner;
+        private bool ownerMinimized;
         private bool loading,pending,disposed,narrow;
         private int generation;
         private long step,selected,pageEnd;
@@ -63,7 +64,7 @@ namespace CodexUserData
             history.Children.Add(detail);records.Content=rows;history.Children.Add(records);records.Expanded+=delegate{records.Header="收起记录";RenderRows();};records.Collapsed+=delegate{records.Header="展开记录";rows.Children.Clear();};chart.Pick+=Select;
             SizeChanged+=delegate{bool value=ActualWidth<480;if(narrow!=value){narrow=value;progress.Width=progress.Height=narrow?84:108;progress.Margin=new Thickness(0,0,narrow?12:20,0);currentAmount.FontSize=narrow?22:30;RenderRows();RenderDetail();}};
             timer=new DispatcherTimer(DispatcherPriority.Background,Dispatcher){Interval=TimeSpan.FromMinutes(1)};timer.Tick+=delegate{UpdateCurrent();Refresh();};
-            Loaded+=delegate{if(disposed)return;owner=Window.GetWindow(this);if(owner!=null)owner.StateChanged+=OwnerStateChanged;Refresh();};Unloaded+=delegate{Suspend();DetachOwner();};
+            Loaded+=delegate{if(disposed)return;owner=Window.GetWindow(this);ownerMinimized=owner!=null&&owner.WindowState==WindowState.Minimized;if(owner!=null)owner.StateChanged+=OwnerStateChanged;Refresh();};Unloaded+=delegate{Suspend();DetachOwner();};
             IsVisibleChanged+=delegate{if(IsVisible){if(!disposed)Refresh();}else Suspend();};
             Render(true);
         }
@@ -98,7 +99,7 @@ namespace CodexUserData
         private void Suspend()
         {generation++;pending=false;timer.Stop();chart.ClearHover();if(cancellation!=null)cancellation.Cancel();}
         private bool Active {get{return !disposed&&IsLoaded&&IsVisible&&(owner==null||owner.WindowState!=WindowState.Minimized);}}
-        private void OwnerStateChanged(object sender,EventArgs e){if(Active)Refresh();else Suspend();}
+        private void OwnerStateChanged(object sender,EventArgs e){bool minimized=owner!=null&&owner.WindowState==WindowState.Minimized;if(minimized==ownerMinimized)return;ownerMinimized=minimized;if(minimized)Suspend();else if(Active)Refresh();}
         private void DetachOwner(){if(owner!=null)owner.StateChanged-=OwnerStateChanged;owner=null;}
         internal void Refresh()
         {

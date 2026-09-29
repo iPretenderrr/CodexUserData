@@ -43,6 +43,8 @@ namespace CodexUserData
         private int exportedVersion=-1;
         private List<LogCursor> exportedRecords;
         private readonly UsageUnionCache unionCache=new UsageUnionCache();
+        // Custom chart workers share usageGate, but never mutate the refresh cache.
+        private readonly UsageUnionCache chartUnionCache=new UsageUnionCache();
         private bool refreshPending,scanPending;
         private Dictionary<string,UsageSnapshot> readyRanges;
         private DateTime rangesObserved;
@@ -78,6 +80,7 @@ namespace CodexUserData
         private QuotaHistoryPanel quotaHistoryPanel;
         private MilestonePanel milestonePanel;
         private MilestoneCurvePanel milestoneCurvePanel;
+        private ModelSharePanel modelSharePanel;
         private readonly object milestoneGate=new object();
         private readonly MilestoneEngine milestones=new MilestoneEngine(Path.Combine(Program.DataFolder,"milestones"));
         private readonly UsageUnionCache milestoneUnion=new UsageUnionCache();
@@ -226,6 +229,7 @@ namespace CodexUserData
             revision++;snapshot=null;quota.AcceptUsage(null,Scope());heroValue.Text="—";heroExact.Text="";heroExact.Visibility=Visibility.Collapsed;heroLabel.Text=PeriodName()+" · "+LabelFor(heroKey);foreach(var text in values.Values)text.Text="—";SetCoverageNotice("",false,false);heroNote.Text="等待当前范围的数据";modelPanel.Apply(null);history.Apply(null,Scope());if(largeHistory!=null)largeHistory.Apply(null,Scope());Persist();RefreshUsage(false);
             if(milestonePanel!=null)milestonePanel.SourceChanged();
             if(milestoneCurvePanel!=null)milestoneCurvePanel.Refresh();
+            if(modelSharePanel!=null)modelSharePanel.Apply(null,MilestoneScope(),Scope());
         }
         private void OpenSettings()
         {
@@ -319,29 +323,42 @@ namespace CodexUserData
         private async void RequestCustomRange(HistoryPanel panel,DateTime from,DateTime to,bool cache)
         {
             if(closed||panel==null)return;
-            UsageRangeSpec spec=UsageRangeSpec.Create(from,to);string key=spec.Key,scope=Scope();int request=cache?++cacheCustomRangeRevision:++customRangeRevision;Func<bool> current=()=>request==(cache?cacheCustomRangeRevision:customRangeRevision);string selected=prefs.Source,application=prefs.App,db=prefs.Database,home=prefs.CodexHome,view=prefs.UsageView;var remoteReader=remote;var prices=prefs.PriceOverrides;
+            string scope=Scope();int request=cache?++cacheCustomRangeRevision:++customRangeRevision;Func<bool> current=()=>request==(cache?cacheCustomRangeRevision:customRangeRevision);
             try
             {
-                UsageSnapshot value=await Task.Run(()=>
-                {
-                    ApiPrices.Configure(prices);
-                    if(selected!="local")return UsageDatabase.Read(db,key,application,DateTime.Now);
-                    lock(usageGate)
-                    {
-                        if(local==null||localRoot!=home)
-                        {
-                            local=new LocalCodexUsage(home,Path.Combine(Program.DataFolder,"local-codex-cache.json.gz"));localRoot=home;
-                            local.Update(null,()=>closed||!current());
-                        }
-                        if(remoteReader==null)return local.Snapshot(key,DateTime.Now);
-                        if(exportedReader!=local||exportedVersion!=local.DataVersion){exportedRecords=local.Export();exportedReader=local;exportedVersion=local.DataVersion;}
-                        var state=remoteReader.View;var localRecords=exportedRecords??new List<LogCursor>();return unionCache.Get(localRecords,state.Records,view,key,DateTime.Now,view=="local"?"本机 Codex":view=="remote"?"服务器 Codex":"Codex · 合计");
-                    }
-                });
+                UsageSnapshot value=await ReadChartRange(from,to,CancellationToken.None,()=>!current());
                 if(!closed&&current()&&String.Equals(scope,Scope(),StringComparison.Ordinal)){if(cache&&panel.MatchesCacheCustomRange(from,to,scope))panel.ApplyCacheCustomRange(value,scope,from,to);else if(!cache&&panel.MatchesCustomRange(from,to,scope))panel.ApplyCustomRange(value,scope,from,to);}
             }
             catch(OperationCanceledException){if(!closed&&current()){if(cache&&panel.MatchesCacheCustomRange(from,to,scope))panel.FailCacheCustomRange("读取已取消。",scope);else if(!cache&&panel.MatchesCustomRange(from,to,scope))panel.FailCustomRange("读取已取消。",scope);}}
             catch(Exception ex){if(!closed&&current()){if(cache&&panel.MatchesCacheCustomRange(from,to,scope))panel.FailCacheCustomRange(ex.Message,scope);else if(!cache&&panel.MatchesCustomRange(from,to,scope))panel.FailCustomRange(ex.Message,scope);}}
+        }
+        private Task<UsageSnapshot> ReadChartRange(DateTime from,DateTime to,CancellationToken cancel,Func<bool> superseded=null)
+        {
+            string key=UsageRangeSpec.Create(from,to).Key,selected=prefs.Source,application=prefs.App,db=prefs.Database,home=prefs.CodexHome,view=prefs.UsageView;var remoteReader=remote;var prices=prefs.PriceOverrides;bool remoteEnabled=prefs.Remote.Enabled;
+            Func<bool> stopped=()=>closed||cancel.IsCancellationRequested||(superseded!=null&&superseded());
+            // Share the established source query with every custom chart. Capture
+            // source settings before the worker starts, and publish only complete reads.
+            return Task.Run(()=>
+            {
+                if(stopped())throw new OperationCanceledException();ApiPrices.Configure(prices);UsageSnapshot result;
+                if(selected!="local")result=UsageDatabase.Read(db,key,application,DateTime.Now);
+                else lock(usageGate)
+                {
+                    if(stopped())throw new OperationCanceledException();
+                    if(local==null||localRoot!=home){var reader=new LocalCodexUsage(home,Path.Combine(Program.DataFolder,"local-codex-cache.json.gz"));reader.Update(null,stopped);if(stopped())throw new OperationCanceledException();local=reader;localRoot=home;}
+                    if(!remoteEnabled||view=="local")result=local.Snapshot(key,DateTime.Now);
+                    else
+                    {
+                        if(exportedReader!=local||exportedVersion!=local.DataVersion){exportedRecords=local.Export();exportedReader=local;exportedVersion=local.DataVersion;}var state=remoteReader==null?null:remoteReader.View;
+                        result=chartUnionCache.Get(exportedRecords??new List<LogCursor>(),state==null?new List<LogCursor>():state.Records,view,key,DateTime.Now,view=="remote"?"服务器 Codex":"Codex · 合计");
+                        // An unready server is not permission to relabel local usage
+                        // as remote. Keep cached data, and attach status on a copy.
+                        bool serverEmpty=state==null||!state.Records.Any(c=>c.Meta&&c.Events.Count>0);
+                        if(state==null||!state.Connected||state.Discovering||serverEmpty){result=result.Copy();result.Warning=String.Join("\n",new[]{result.Warning,state==null||String.IsNullOrWhiteSpace(state.Status)?"服务器尚未同步，远程用量暂不可用。":state.Status}.Where(s=>!String.IsNullOrWhiteSpace(s)));result.DataUnavailable=view=="remote"&&serverEmpty;}
+                    }
+                }
+                if(stopped())throw new OperationCanceledException();return result;
+            },cancel);
         }
         private void SchedulePersist(){if(preview)return;preferenceTimer.Stop();preferenceTimer.Start();}
         private bool ApplyCachedRange()
@@ -482,14 +499,17 @@ namespace CodexUserData
             quotaHistoryPanel=new QuotaHistoryPanel(quota.HistoryStore,()=>QuotaHistoryStore.Scope(prefs.CodexHome),()=>quota.HistoryError);
             milestonePanel=new MilestonePanel(LoadMilestones,MilestoneScope,prefs.MilestoneStep,SetMilestoneStep){Margin=new Thickness(20,12,20,20)};
             milestoneCurvePanel=new MilestoneCurvePanel(LoadMilestones,MilestoneScope,prefs.MilestoneStep,SetMilestoneStep){Margin=new Thickness(20,12,20,20)};milestoneCurvePanel.EnableRangeControls();
-            var content=new Grid();content.Children.Add(largeHistory);content.Children.Add(quotaHistoryPanel);content.Children.Add(milestonePanel);content.Children.Add(milestoneCurvePanel);quotaHistoryPanel.Visibility=milestonePanel.Visibility=milestoneCurvePanel.Visibility=Visibility.Collapsed;
+            modelSharePanel=new ModelSharePanel((from,to,cancel)=>ReadChartRange(from,to,cancel),MilestoneScope){Margin=new Thickness(20,12,20,20)};modelSharePanel.Apply(snapshot,MilestoneScope(),Scope());
+            if(coverageReadFailed)modelSharePanel.FailRefresh(coverageDetails,MilestoneScope());
+            var content=new Grid();content.Children.Add(largeHistory);content.Children.Add(quotaHistoryPanel);content.Children.Add(milestonePanel);content.Children.Add(milestoneCurvePanel);content.Children.Add(modelSharePanel);quotaHistoryPanel.Visibility=milestonePanel.Visibility=milestoneCurvePanel.Visibility=modelSharePanel.Visibility=Visibility.Collapsed;
             var layout=new DockPanel();var tabs=new WrapPanel{Margin=new Thickness(20,8,20,0)};DockPanel.SetDock(tabs,Dock.Top);layout.Children.Add(tabs);
             var usageTab=Theme.Button("用量","每日用量与趋势",70);var quotaTab=Theme.Button("额度","额度历史曲线",70);var milestoneTab=Theme.Button("里程碑","各段 Token 用量与耗时",70);var curveTab=Theme.Button("累计里程碑","累计曲线上的里程碑与阶段耗时",94);usageTab.Margin=quotaTab.Margin=milestoneTab.Margin=new Thickness(0,0,6,0);tabs.Children.Add(usageTab);tabs.Children.Add(quotaTab);tabs.Children.Add(milestoneTab);tabs.Children.Add(curveTab);
             var scroller=new ScrollViewer{Content=content,VerticalScrollBarVisibility=ScrollBarVisibility.Auto,HorizontalScrollBarVisibility=ScrollBarVisibility.Disabled};layout.Children.Add(scroller);scroller.ScrollChanged+=delegate(object sender,ScrollChangedEventArgs e){if(e.ViewportHeightChange!=0&&quotaHistoryPanel!=null)quotaHistoryPanel.SetViewportHeight(scroller.ViewportHeight);};
-            Action<int> selectTab=index=>{largeHistory.Visibility=index==0?Visibility.Visible:Visibility.Collapsed;quotaHistoryPanel.Visibility=index==1?Visibility.Visible:Visibility.Collapsed;milestonePanel.Visibility=index==2?Visibility.Visible:Visibility.Collapsed;milestoneCurvePanel.Visibility=index==3?Visibility.Visible:Visibility.Collapsed;usageTab.Background=index==0?Theme.Hover:Theme.Surface;quotaTab.Background=index==1?Theme.Hover:Theme.Surface;milestoneTab.Background=index==2?Theme.Hover:Theme.Surface;curveTab.Background=index==3?Theme.Hover:Theme.Surface;scroller.ScrollToTop();};
-            usageTab.Click+=delegate{selectTab(0);};quotaTab.Click+=delegate{selectTab(1);};milestoneTab.Click+=delegate{selectTab(2);};curveTab.Click+=delegate{selectTab(3);};selectTab(0);
-            var styled=new StyledWindow{Title="用量与额度趋势",Width=880,Height=850,MinWidth=340,MinHeight=420,MaxHeight=SystemParameters.WorkArea.Height,Background=Theme.Background,Foreground=Theme.Ink,FontFamily=FontFamily,Owner=this,WindowStartupLocation=WindowStartupLocation.CenterOwner,ShowInTaskbar=false};
-            styled.SetBody(layout,"用量与额度趋势","USAGE INSIGHTS",true);historyWindow=styled;historyWindow.Loaded+=delegate{if(historyWindow!=null)ClampWindow(historyWindow);};historyWindow.Closed+=delegate{if(milestoneCurvePanel!=null)milestoneCurvePanel.Dispose();milestoneCurvePanel=null;if(milestonePanel!=null)milestonePanel.Dispose();milestonePanel=null;ReleaseMilestoneReader();historyWindow=null;largeHistory=null;quotaHistoryPanel=null;};historyWindow.Show();
+            var shareTab=Theme.Button("模型占比","各模型在每个时段的 Token 占比",84);shareTab.Margin=new Thickness(6,0,0,0);tabs.Children.Add(shareTab);
+            Action<int> selectTab=index=>{largeHistory.Visibility=index==0?Visibility.Visible:Visibility.Collapsed;quotaHistoryPanel.Visibility=index==1?Visibility.Visible:Visibility.Collapsed;milestonePanel.Visibility=index==2?Visibility.Visible:Visibility.Collapsed;milestoneCurvePanel.Visibility=index==3?Visibility.Visible:Visibility.Collapsed;modelSharePanel.Visibility=index==4?Visibility.Visible:Visibility.Collapsed;usageTab.Background=index==0?Theme.Hover:Theme.Surface;quotaTab.Background=index==1?Theme.Hover:Theme.Surface;milestoneTab.Background=index==2?Theme.Hover:Theme.Surface;curveTab.Background=index==3?Theme.Hover:Theme.Surface;shareTab.Background=index==4?Theme.Hover:Theme.Surface;scroller.ScrollToTop();};
+            usageTab.Click+=delegate{selectTab(0);};quotaTab.Click+=delegate{selectTab(1);};milestoneTab.Click+=delegate{selectTab(2);};curveTab.Click+=delegate{selectTab(3);};shareTab.Click+=delegate{selectTab(4);};selectTab(0);
+            var styled=new StyledWindow{UseNativeFrame=true,Title="用量与额度趋势",Width=880,Height=850,MinWidth=340,MinHeight=420,Background=Theme.Background,Foreground=Theme.Ink,FontFamily=FontFamily,Owner=this,WindowStartupLocation=WindowStartupLocation.CenterOwner,ShowInTaskbar=false};
+            styled.SetBody(layout,"用量与额度趋势","USAGE INSIGHTS",true);historyWindow=styled;historyWindow.Loaded+=delegate{if(historyWindow!=null)ClampWindow(historyWindow);};historyWindow.Closed+=delegate{if(modelSharePanel!=null)modelSharePanel.Dispose();modelSharePanel=null;if(milestoneCurvePanel!=null)milestoneCurvePanel.Dispose();milestoneCurvePanel=null;if(milestonePanel!=null)milestonePanel.Dispose();milestonePanel=null;ReleaseMilestoneReader();historyWindow=null;largeHistory=null;quotaHistoryPanel=null;};historyWindow.Show();
         }
         private void RefreshData(){RefreshUsage(true);}
         // Price updates reuse the parsed ledger and database query path; they do not force
@@ -531,12 +551,12 @@ namespace CodexUserData
                     }
                     return available[range];
                 });
-                if(!closed&&version==revision){readyRanges=available;rangesObserved=observed;combinedSnapshot=total;if(total!=null)quota.AcceptRemote(total.Quotas);ApplySnapshot(result);status.Text="已更新 "+DateTime.Now.ToString("HH:mm:ss")+" · "+prefs.RefreshSeconds+" 秒";}
+                if(!closed&&version==revision){readyRanges=available;rangesObserved=observed;combinedSnapshot=total;if(total!=null)quota.AcceptRemote(total.Quotas);SetCoverageNotice(result.Warning,false,result.CoverageWarnings>0);if(modelSharePanel!=null)modelSharePanel.RefreshSucceeded();ApplySnapshot(result);status.Text="已更新 "+DateTime.Now.ToString("HH:mm:ss")+" · "+prefs.RefreshSeconds+" 秒";}
             }
             catch(OperationCanceledException){}
             catch(Exception ex)
             {
-                if(!closed&&version==revision){status.Text="读取失败 · 保留上次数据";SetCoverageNotice(ex.Message,true,false);if(snapshot==null)heroNote.Text="当前来源尚未读取成功";}
+                if(!closed&&version==revision){status.Text="读取失败 · 保留上次数据";SetCoverageNotice(ex.Message,true,false);if(modelSharePanel!=null)modelSharePanel.FailRefresh(ex.Message,MilestoneScope());if(snapshot==null)heroNote.Text="当前来源尚未读取成功";}
             }
             finally{busy=false;if(!closed&&(refreshPending||version!=revision)){bool again=scanPending;refreshPending=scanPending=false;RefreshUsage(again);}}
         }
@@ -557,6 +577,7 @@ namespace CodexUserData
         }
         internal void ApplySnapshot(UsageSnapshot s)
         {
+            if(modelSharePanel!=null)modelSharePanel.Apply(s,MilestoneScope(),Scope());
             if(milestonePanel!=null)milestonePanel.Refresh();
             if(milestoneCurvePanel!=null)milestoneCurvePanel.Refresh();
             snapshot=s;prefs.KnownModels=prefs.KnownModels.Concat(s.KnownModels).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();ModelColors.EnsureModels(prefs.KnownModels.Concat(s.Models.Select(model=>model.Model)));quota.Accept(prefs.Remote.Enabled&&combinedSnapshot!=null?combinedSnapshot.Quotas:s.Quotas);quota.AcceptUsage(prefs.Remote.Enabled?combinedSnapshot:s,prefs.Remote.Enabled?"Codex · 合计":Scope());UpdateBall();if(!preview&&(!IsVisible||WindowState==WindowState.Minimized))return;heroLabel.Text=PeriodName()+" · "+LabelFor(heroKey);heroValue.Text=Format(heroKey,s,false);heroValue.ToolTip=Format(heroKey,s,true);
@@ -565,7 +586,7 @@ namespace CodexUserData
             heroNote.ToolTip=ApiPrices.Basis+"\n估算基准，不代表订阅实际扣费。";
             hero.ToolTip=prefs.Source=="local"?"Token = 输入（包含缓存）+ 输出；推理包含在输出中。\n最新记录："+s.LatestRecord:"Token = 未缓存输入 + 输出 + 缓存读取 + 缓存创建。\n最新记录："+s.LatestRecord;
             foreach(var item in values){bool unavailable=item.Key=="cost"&&!s.CostAvailable;item.Value.Text=Format(item.Key,s,false);item.Value.FontSize=unavailable&&prefs.Source=="local"?13:19;item.Value.ToolTip=unavailable?"日志未提供实际费用；上方 API 估算按模型单价计算。":Format(item.Key,s,true);labels[item.Key].Text=LabelFor(item.Key);}
-            SetCoverageNotice(s.Warning,false,s.CoverageWarnings>0);Reflow();UpdateActivityStatus();
+            if(!coverageReadFailed)SetCoverageNotice(s.Warning,false,s.CoverageWarnings>0);Reflow();UpdateActivityStatus();
             if(!prefs.Collapsed){if(prefs.ShowModels)modelPanel.Apply(s);if(prefs.ShowHeatmap||prefs.ShowTrend)history.Apply(s,Scope());}if(largeHistory!=null)largeHistory.Apply(s,Scope());
         }
         private void SetCoverageNotice(string details,bool readFailed,bool incomplete)

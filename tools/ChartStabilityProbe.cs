@@ -79,6 +79,7 @@ namespace CodexUserData
             try
             {
                 window.Show();await Task.Delay(60);window.UpdateLayout();
+                var chips=StabilityProbe.Field<System.Collections.Generic.Dictionary<string,Button>>(panel,"legendItems");var chip=chips.Values.First();StabilityProbe.Check(chip.Height==30&&chip.BorderThickness.Left==1,"usage legends use the shared model chip styling");chip.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));StabilityProbe.Check(chip.BorderBrush==Theme.Accent,"usage model chip shows a pinned selection border");chip.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                 var trend=StabilityProbe.Field<UsageChart>(panel,"trend");var heat=StabilityProbe.Field<UsageChart>(panel,"heat");var cacheTrend=StabilityProbe.Field<UsageChart>(panel,"cacheTrend");var detail=StabilityProbe.Field<UsageDetails>(panel,"trendDetail");
                 var cacheRangeButtons=StabilityProbe.Field<System.Collections.Generic.Dictionary<int,Button>>(panel,"cacheRanges");var cacheCustomButton=StabilityProbe.Field<Button>(panel,"cacheCustomRangeButton");
                 StabilityProbe.Check(cacheTrend.IsRate&&!cacheTrend.IsHourly&&cacheTrend.WindowDays==14&&cacheTrend.Days.Length==data.Daily.Length&&AutomationProperties.GetItemStatus(cacheRangeButtons[14])=="已选中","cache hit chart keeps an independent persisted preset range");

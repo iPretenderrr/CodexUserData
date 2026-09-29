@@ -101,3 +101,5 @@
 !/tools/MilestoneDataStabilityProbe.cs
 !/tools/MilestoneUiStabilityProbe.cs
 !/tools/MilestoneCurveStabilityProbe.cs
+!/src/ModelSharePanel.cs
+!/tools/ModelShareStabilityProbe.cs

@@ -32,6 +32,7 @@ namespace CodexUserData
         private MilestoneSnapshot snapshot;
         private CancellationTokenSource cancellation;
         private Window owner;
+        private bool ownerMinimized;
         private string knownScope;
         private bool loading,pending,pumpQueued,disposed,followNow;
         private int generation;
@@ -55,7 +56,7 @@ namespace CodexUserData
             chart.Pick+=Select;PreviewKeyDown+=delegate(object sender,KeyEventArgs e){if(e.Key==Key.Escape){ClearSelection();e.Handled=true;}};
             chart.SizeChanged+=delegate{RenderDetail();};
             timer=new DispatcherTimer(DispatcherPriority.Background,Dispatcher){Interval=TimeSpan.FromMinutes(1)};timer.Tick+=delegate{Refresh();};
-            Loaded+=delegate{if(disposed)return;DetachOwner();owner=Window.GetWindow(this);if(owner!=null)owner.StateChanged+=OwnerStateChanged;Refresh();};
+            Loaded+=delegate{if(disposed)return;DetachOwner();owner=Window.GetWindow(this);ownerMinimized=owner!=null&&owner.WindowState==WindowState.Minimized;if(owner!=null)owner.StateChanged+=OwnerStateChanged;Refresh();};
             Unloaded+=delegate{Suspend();DetachOwner();};IsVisibleChanged+=delegate{if(IsVisible){RenderDetail();Refresh();}else Suspend();};Render();
         }
         private bool Active {get{return !disposed&&IsLoaded&&IsVisible&&(owner==null||owner.WindowState!=WindowState.Minimized);}}
@@ -173,7 +174,7 @@ namespace CodexUserData
             previous.Visibility=next.Visibility=selectedFirst==selectedLast?Visibility.Collapsed:Visibility.Visible;previous.IsEnabled=selected>selectedFirst;next.IsEnabled=selected<selectedLast;detail.Visibility=Visibility.Visible;AutomationProperties.SetItemStatus(chart,text);
         }
         private void Suspend(){generation++;pending=false;timer.Stop();chart.ClearHover();if(cancellation!=null)cancellation.Cancel();}
-        private void OwnerStateChanged(object sender,EventArgs e){if(Active)Refresh();else Suspend();}
+        private void OwnerStateChanged(object sender,EventArgs e){bool minimized=owner!=null&&owner.WindowState==WindowState.Minimized;if(minimized==ownerMinimized)return;ownerMinimized=minimized;if(minimized)Suspend();else if(Active)Refresh();}
         private void DetachOwner(){if(owner!=null)owner.StateChanged-=OwnerStateChanged;owner=null;}
         public void Dispose(){if(disposed)return;disposed=true;Suspend();DetachOwner();snapshot=null;ClearSelection();chart.SetData(null,step,from,to);}
     }

@@ -129,14 +129,33 @@ namespace CodexUserData
     }
     internal class StyledWindow : Window
     {
+        internal bool UseNativeFrame {get;set;}
         internal void SetBody(UIElement body,string caption,string eyebrow,bool resize)
         {
-            WindowStyle=WindowStyle.None;AllowsTransparency=true;Background=Brushes.Transparent;ResizeMode=resize?ResizeMode.CanResize:ResizeMode.NoResize;Theme.InstallStyles(this);
+            bool native=UseNativeFrame&&resize;
+            WindowStyle=native?WindowStyle.SingleBorderWindow:WindowStyle.None;AllowsTransparency=!native;Background=native?(Brush)Theme.WindowBackground:Brushes.Transparent;ResizeMode=resize?ResizeMode.CanResize:ResizeMode.NoResize;Theme.InstallStyles(this);
+            // Large chart windows keep a native (non-layered) frame so Windows
+            // can compose maximize/restore as one transition. Other floating
+            // and translucent dialogs retain their existing presentation.
+            if(native)System.Windows.Shell.WindowChrome.SetWindowChrome(this,new System.Windows.Shell.WindowChrome{CaptionHeight=0,ResizeBorderThickness=new Thickness(7),GlassFrameThickness=new Thickness(0),CornerRadius=new CornerRadius(14),UseAeroCaptionButtons=false});
             var border=new Border{Background=Theme.WindowBackground,CornerRadius=new CornerRadius(14),BorderThickness=new Thickness(1),BorderBrush=Theme.Frame};var root=new Grid();border.Child=root;Content=border;
             root.RowDefinitions.Add(new RowDefinition{Height=GridLength.Auto});root.RowDefinitions.Add(new RowDefinition());root.RowDefinitions.Add(new RowDefinition{Height=GridLength.Auto});
             var header=new DockPanel{Margin=new Thickness(18,12,12,10),Background=Brushes.Transparent};root.Children.Add(header);
             var close=Theme.ToolbarButton("close","关闭"+caption);close.Click+=delegate{WindowInteraction.Close(this);};DockPanel.SetDock(close,Dock.Right);header.Children.Add(close);
-            if(resize){var maximize=Theme.ToolbarButton("maximize","最大化 / 还原");maximize.Click+=delegate{WindowInteraction.ToggleMaximize(this);};StateChanged+=delegate{maximize.Content=Theme.ToolbarIcon(WindowState==WindowState.Maximized?"restore":"maximize");};DockPanel.SetDock(maximize,Dock.Right);header.Children.Add(maximize);}
+            if(resize)
+            {
+                var maximize=Theme.ToolbarButton("maximize","最大化 / 还原");maximize.Click+=delegate{WindowInteraction.ToggleMaximize(this);};
+                Action syncFrame=delegate
+                {
+                    bool maximized=WindowState==WindowState.Maximized;
+                    border.CornerRadius=new CornerRadius(maximized?0:14);
+                    if(native)border.Margin=WindowInteraction.MaximizedFramePadding(this);
+                    maximize.Content=Theme.ToolbarIcon(maximized?"restore":"maximize");
+                };
+                StateChanged+=delegate{WindowInteraction.CompleteReveal(this);syncFrame();};
+                if(native)SizeChanged+=delegate{border.Margin=WindowInteraction.MaximizedFramePadding(this);};
+                syncFrame();DockPanel.SetDock(maximize,Dock.Right);header.Children.Add(maximize);
+            }
             var title=new StackPanel();title.Children.Add(Theme.Text("●  "+eyebrow,9,Theme.Muted));var text=Theme.Text(caption,17,Theme.Ink);text.Margin=new Thickness(0,5,0,0);title.Children.Add(text);header.Children.Add(title);
             WindowInteraction.Header(this,header,()=>{if(resize)WindowInteraction.ToggleMaximize(this);});WindowInteraction.Attach(this);
             Grid.SetRow(body,1);root.Children.Add(body);

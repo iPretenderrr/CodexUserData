@@ -4,6 +4,7 @@ using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Documents;
 using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Media;
@@ -49,6 +50,26 @@ namespace CodexUserData
             var selected=new Trigger{Property=FrameworkElement.TagProperty,Value="selected"};selected.Setters.Add(new Setter(Border.BackgroundProperty,new DynamicResourceExtension("ThemeHover"),"Shell"));selected.Setters.Add(new Setter(Border.BorderBrushProperty,new DynamicResourceExtension("ThemeAccent"),"Shell"));template.Triggers.Add(selected);
             var pressed=new Trigger{Property=ButtonBase.IsPressedProperty,Value=true};pressed.Setters.Add(new Setter(Border.BackgroundProperty,new DynamicResourceExtension("ThemeHover"),"Shell"));template.Triggers.Add(pressed);
             button.Template=template;button.Content=ToolbarIcon(icon);return button;
+        }
+        // Shared chart legend control: keep selection, spacing and truncation
+        // consistent on the dashboard and the dedicated trend pages.
+        internal static Button LegendChip(string label,Brush color,string value,string tooltip)
+        {
+            var button=Button(label,tooltip,30);button.Height=30;button.FontSize=11;button.Foreground=Ink;button.Padding=new Thickness(10,3,10,3);button.BorderThickness=new Thickness(1);button.Template=RoundTemplate(typeof(Button),15);button.Margin=new Thickness(0,0,7,7);
+            var text=new TextBlock{TextTrimming=TextTrimming.CharacterEllipsis};text.Inlines.Add(new Run("●  "){Foreground=color});text.Inlines.Add(new Run(label));if(!String.IsNullOrEmpty(value))text.Inlines.Add(new Run("   "+value){Foreground=Muted});button.Content=text;SelectChip(button,false);return button;
+        }
+        internal static void SelectChip(Button button,bool selected)
+        {button.Background=selected?Hover:Surface;button.BorderBrush=selected?Accent:Line;AutomationProperties.SetItemStatus(button,selected?"已选中":"未选中");}
+        internal static void FitChip(Button button,double available)
+        {double width=Math.Max(40,available-6);button.MaxWidth=width;var text=button.Content as TextBlock;if(text!=null)text.MaxWidth=Math.Max(20,width-22);}
+        internal static WrapPanel AggregationSelector(Dictionary<string,Button> target,string chart,Action<string> select)
+        {
+            var panel=new WrapPanel{HorizontalAlignment=HorizontalAlignment.Right};
+            foreach(var entry in new[]{new[]{"daily","每日"},new[]{"weekly","每周"},new[]{"cumulative","累计"}})
+            {
+                string key=entry[0];var button=Button(entry[1],chart+"展示方式："+entry[1],38);button.Height=27;button.FontSize=10;button.Padding=new Thickness(5,3,5,3);button.Margin=new Thickness(1,0,1,0);button.Click+=delegate{select(key);};AutomationProperties.SetAutomationId(button,(chart=="热度图"?"Heat":chart=="模型占比"?"ModelShare":"Trend")+"Aggregation"+key);target[key]=button;panel.Children.Add(button);
+            }
+            return panel;
         }
         internal static FrameworkElement ToolbarIcon(string name)
         {

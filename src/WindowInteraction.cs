@@ -71,7 +71,34 @@ namespace CodexUserData
             window.BeginAnimation(NativeProgressProperty,null);window.SetValue(NativeProgressProperty,1.0);window.Opacity=state.NativeOpacity;state.NativeFade=false;
         }
         [StructLayout(LayoutKind.Sequential)] private struct Bounds { public int Left,Top,Right,Bottom; }
+        [StructLayout(LayoutKind.Sequential)] private struct NativePoint {public int X,Y;}
+        [StructLayout(LayoutKind.Sequential)] private struct MinMaxInfo {public NativePoint Reserved,MaxSize,MaxPosition,MinTrackSize,MaxTrackSize;}
+        [StructLayout(LayoutKind.Sequential)] private struct MonitorInfo {public int Size;public Bounds Monitor,Work;public uint Flags;}
+        [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr hwnd,uint flags);
+        [DllImport("user32.dll")] private static extern bool GetMonitorInfo(IntPtr monitor,ref MonitorInfo info);
         [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr hwnd,out Bounds rect);
+        internal static Rect MaximizedBounds(Rect monitor,Rect work)
+        {return new Rect(work.Left-monitor.Left,work.Top-monitor.Top,work.Width,work.Height);}
+        internal static Thickness MaximizedFramePadding(Window window)
+        {
+            if(window.WindowState!=WindowState.Maximized)return new Thickness(0);
+            var handle=new WindowInteropHelper(window).Handle;var source=HwndSource.FromHwnd(handle);
+            var info=new MonitorInfo{Size=Marshal.SizeOf(typeof(MonitorInfo))};Bounds frame;
+            if(source==null||!GetWindowRect(handle,out frame)||!GetMonitorInfo(MonitorFromWindow(handle,2),ref info))return new Thickness(0);
+            // The native resize frame extends beyond the visible work area.
+            // Keep content inside WindowChrome's clip, using this monitor's DPI.
+            var scale=source.CompositionTarget.TransformFromDevice;
+            return new Thickness(Math.Max(0,info.Work.Left-frame.Left)*scale.M11,Math.Max(0,info.Work.Top-frame.Top)*scale.M22,Math.Max(0,frame.Right-info.Work.Right)*scale.M11,Math.Max(0,frame.Bottom-info.Work.Bottom)*scale.M22);
+        }
+        private static bool SetMaximizedWorkArea(IntPtr hwnd,IntPtr message)
+        {
+            var info=new MonitorInfo{Size=Marshal.SizeOf(typeof(MonitorInfo))};
+            if(!GetMonitorInfo(MonitorFromWindow(hwnd,2),ref info))return false;
+            // WM_GETMINMAXINFO uses physical pixels relative to this monitor.
+            // WPF's borderless windows otherwise maximize over the taskbar.
+            var bounds=MaximizedBounds(new Rect(info.Monitor.Left,info.Monitor.Top,info.Monitor.Right-info.Monitor.Left,info.Monitor.Bottom-info.Monitor.Top),new Rect(info.Work.Left,info.Work.Top,info.Work.Right-info.Work.Left,info.Work.Bottom-info.Work.Top));
+            var limits=(MinMaxInfo)Marshal.PtrToStructure(message,typeof(MinMaxInfo));limits.MaxPosition=new NativePoint{X=(int)bounds.X,Y=(int)bounds.Y};limits.MaxSize=new NativePoint{X=(int)bounds.Width,Y=(int)bounds.Height};Marshal.StructureToPtr(limits,message,false);return true;
+        }
         internal static void Attach(Window window,Action finished=null,Action starting=null)
         {
             EnableMotion(window);
@@ -88,9 +115,10 @@ namespace CodexUserData
                 var source=HwndSource.FromHwnd(new WindowInteropHelper(window).Handle);
                 source.AddHook(delegate(IntPtr hwnd,int message,IntPtr wp,IntPtr lp,ref bool handled)
                 {
+                    if(message==0x24&&window is StyledWindow&&window.AllowsTransparency&&window.ResizeMode!=ResizeMode.NoResize){handled=SetMaximizedWorkArea(hwnd,lp);return IntPtr.Zero;}
                     if(message==0x231){CompleteReveal(window);if(starting!=null)starting();}
                     if(message==0x232 && finished!=null)finished(); // WM_EXITSIZEMOVE: save once after the native loop.
-                    if(message!=0x84 || window.WindowState!=WindowState.Normal || window.ResizeMode==ResizeMode.NoResize)return IntPtr.Zero;
+                    if(message!=0x84 || window.WindowState!=WindowState.Normal || window.ResizeMode==ResizeMode.NoResize||System.Windows.Shell.WindowChrome.GetWindowChrome(window)!=null)return IntPtr.Zero;
                     Bounds rect;if(!GetWindowRect(hwnd,out rect))return IntPtr.Zero;
                     long packed=lp.ToInt64();int x=(short)(packed&0xffff),y=(short)((packed>>16)&0xffff);
                     double scale=source.CompositionTarget.TransformToDevice.M11;int edge=(int)Math.Ceiling(7*scale);
@@ -146,7 +174,7 @@ namespace CodexUserData
         }
         internal static void PrepareReveal(Window window)
         {
-            if(IsClosed(window))return;var state=Visual(window);if(state.CompletingDialog)return;state.Revision++;state.Prepared=true;Reset(window,state);if(!CanAnimate||state.View==null)return;
+            if(IsClosed(window))return;var state=Visual(window);if(state.CompletingDialog)return;state.Revision++;state.Prepared=true;Reset(window,state);if(!CanAnimate||state.View==null||System.Windows.Shell.WindowChrome.GetWindowChrome(window)!=null)return;
             // Hide the content before the first compositor frame. This prevents a full-size frame
             // appearing briefly before the opening animation starts.
             PrepareNativeReveal(window,state);state.View.Opacity=0;state.Scale.ScaleX=state.Scale.ScaleY=state.NextRevealScale;state.NextRevealScale=.94;state.Shift.Y=7;
@@ -197,8 +225,14 @@ namespace CodexUserData
         }
         internal static void ToggleMaximize(Window window)
         {
+            if(IsClosed(window))return;var state=Visual(window);if(state.CompletingDialog)return;
             var target=window.WindowState==WindowState.Maximized?WindowState.Normal:WindowState.Maximized;
-            ChangeShape(window,()=>window.WindowState=target);
+            // Resizing a chart window is not a form replacement. Apply the native
+            // bounds immediately and let WPF coalesce layout, without fading and
+            // scaling the entire large transparent tree around a forced layout.
+            state.Revision++;state.Prepared=false;Reset(window,state);window.WindowState=target;
+            // Do not animate the content a second time after Windows has resized
+            // the frame; even a small translation looks like a second jump.
         }
         internal static void ShowFrom(Window target,Window source,Action prepare,Action shown)
         {
@@ -240,7 +274,9 @@ namespace CodexUserData
         {
             if(IsClosed(window)||!window.IsVisible)return;var state=Visual(window);if(state.CompletingDialog)return;state.Prepared=false;state.Dismissing=false;int revision=++state.Revision;
             bool native=state.NativeFade;
-            if(!CanAnimate||state.View==null){Reset(window,state);return;}
+            // Native frames already participate in the desktop compositor. A root
+            // entrance would expose their opaque backing before the content arrives.
+            if(!CanAnimate||state.View==null||System.Windows.Shell.WindowChrome.GetWindowChrome(window)!=null){Reset(window,state);return;}
             double opacity=state.View.Opacity,scale=state.Scale.ScaleX,shift=state.Shift.Y;
             state.View.BeginAnimation(UIElement.OpacityProperty,null);state.Scale.BeginAnimation(ScaleTransform.ScaleXProperty,null);state.Scale.BeginAnimation(ScaleTransform.ScaleYProperty,null);state.Shift.BeginAnimation(TranslateTransform.YProperty,null);
             state.View.Opacity=opacity;state.Scale.ScaleX=state.Scale.ScaleY=scale;state.Shift.Y=shift;
