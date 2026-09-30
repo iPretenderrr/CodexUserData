@@ -36,6 +36,7 @@ namespace CodexUserData
         }
         internal static async Task Run(string root)
         {
+            await ModelShareViewsStabilityProbe.Run(root);
             string scope="share-demo";int calls=0;UsageSnapshot value=Fixture();
             var panel=new ModelSharePanel((from,to,cancel)=>{calls++;return Task.FromResult(value);},()=>scope);panel.Apply(value,scope,"演示来源");
             var window=new Window{Width=900,Height=770,Content=new Border{Padding=new Thickness(16),Background=Theme.Background,Child=panel},Background=Theme.Background,ShowActivated=false,ShowInTaskbar=false};

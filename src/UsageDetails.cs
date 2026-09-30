@@ -64,7 +64,7 @@ namespace CodexUserData
                 }
             }
             Reflow();
-            if(ModelRows==0)body.Children.Add(Theme.Text("该时段暂无已记录用量",11,Theme.Muted));
+            if(ModelRows==0)body.Children.Add(Theme.Text(day.Tokens>0?"已记录用量，但日志未提供型号信息":"该时段暂无已记录用量",11,Theme.Muted));
         }
         private static void Metric(Panel parent,string label,string value,Brush color,string id,bool small=false)
         {

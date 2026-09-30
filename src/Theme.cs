@@ -71,6 +71,15 @@ namespace CodexUserData
             }
             return panel;
         }
+        internal static WrapPanel ChartViewSelector(Dictionary<string,Button> target,string idPrefix,Action<string> select)
+        {
+            var panel=new WrapPanel{HorizontalAlignment=HorizontalAlignment.Right};
+            foreach(var item in new[]{new[]{"curve","曲线"},new[]{"bars","堆叠柱"},new[]{"treemap","矩形图"}})
+            {
+                string key=item[0];var button=Button(item[1],key=="treemap"?"按所选区间总量展示模型面积":"切换为"+item[1],key=="curve"?46:58);button.Height=27;button.FontSize=11;button.Margin=new Thickness(2,0,0,4);button.Click+=delegate{select(key);};AutomationProperties.SetAutomationId(button,idPrefix+"View"+key);target.Add(key,button);panel.Children.Add(button);
+            }
+            return panel;
+        }
         internal static FrameworkElement ToolbarIcon(string name)
         {
             string data;

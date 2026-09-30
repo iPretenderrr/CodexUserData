@@ -66,7 +66,10 @@
 !/src/SettingsWindow.cs
 !/src/ReleaseUpdate.cs
 !/src/PriceCatalog.cs
-!/src/ModelColorRegistry.cs
+!/src/ModelPaletteCatalog.cs
+!/src/ModelColors.cs
+!/model-palette.json
+!/tools/build-model-palette.js
 !/src/Diagnostics.cs
 !/src/Theme.cs
 !/src/ThemeEditor.cs
@@ -102,4 +105,8 @@
 !/tools/MilestoneUiStabilityProbe.cs
 !/tools/MilestoneCurveStabilityProbe.cs
 !/src/ModelSharePanel.cs
+!/src/ModelShareChart.cs
 !/tools/ModelShareStabilityProbe.cs
+!/tools/ModelShareViewsStabilityProbe.cs
+!/tools/UsageViewsStabilityProbe.cs
+!/tools/ModelColorStabilityProbe.cs

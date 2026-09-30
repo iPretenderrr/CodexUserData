@@ -1,4 +1,4 @@
-﻿param([string]$OutputDirectory=(Join-Path $PSScriptRoot '..\.build\source-verification'),[switch]$IslandOnly,[switch]$QuotaOnly,[switch]$FloatingOnly,[switch]$HtmlOnly,[switch]$RemoteOnly,[switch]$PeriodOnly,[switch]$PriceOnly,[switch]$MilestoneOnly,[switch]$ModelShareOnly)
+﻿param([string]$OutputDirectory=(Join-Path $PSScriptRoot '..\.build\source-verification'),[switch]$IslandOnly,[switch]$QuotaOnly,[switch]$FloatingOnly,[switch]$HtmlOnly,[switch]$RemoteOnly,[switch]$PeriodOnly,[switch]$PriceOnly,[switch]$MilestoneOnly,[switch]$ModelShareOnly,[switch]$ColorOnly)
 $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
 $destination=[IO.Path]::GetFullPath($OutputDirectory)
@@ -14,6 +14,7 @@ Copy-Item -LiteralPath (Join-Path $web 'runtimes\win-x64\native\WebView2Loader.d
 $sshDlls=@(Get-ChildItem -LiteralPath (Join-Path $root 'vendor/ssh') -Filter '*.dll')
 foreach($dll in $sshDlls){$refs+=('/r:'+$dll.FullName);Copy-Item -LiteralPath $dll.FullName -Destination $destination -Force}
 $refs+=('/r:'+(Join-Path $framework 'System.Security.dll'))
+$refs+=('/resource:'+(Join-Path $root 'model-palette.json')+',CodexUserData.ModelPalette.json')
 $binary=Join-Path $destination 'StabilityProbe.exe'
 if(Test-Path -LiteralPath (Join-Path $PSScriptRoot 'FakeQuotaHelper.cs')){
  & (Join-Path $framework 'csc.exe') /nologo /target:exe /platform:x64 /codepage:65001 ('/out:'+(Join-Path $destination 'FakeQuotaHelper.exe')) (Join-Path $PSScriptRoot 'FakeQuotaHelper.cs')
@@ -25,5 +26,5 @@ $sources+=@(Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*StabilityProbe.cs
 # Source checks avoid re-obfuscating the application for each small regression fix.
 & (Join-Path $framework 'csc.exe') /nologo /target:exe /platform:x64 /optimize+ /codepage:65001 /main:CodexUserData.StabilityProbe ('/out:'+$binary) @refs @sources
 if($LASTEXITCODE -ne 0){throw 'Source regression compilation failed'}
-if($ModelShareOnly){& $binary $destination --model-share-only}elseif($MilestoneOnly){& $binary $destination --milestone-only}elseif($PriceOnly){& $binary $destination --price-only}elseif($PeriodOnly){& $binary $destination --period-only}elseif($RemoteOnly){& $binary $destination --remote-only}elseif($HtmlOnly){& $binary $destination --html-only}elseif($FloatingOnly){& $binary $destination --floating-only}elseif($QuotaOnly){& $binary $destination --quota-only}elseif($IslandOnly){& $binary $destination --island-only}else{& $binary $destination}
+if($ColorOnly){& $binary $destination --color-only}elseif($ModelShareOnly){& $binary $destination --model-share-only}elseif($MilestoneOnly){& $binary $destination --milestone-only}elseif($PriceOnly){& $binary $destination --price-only}elseif($PeriodOnly){& $binary $destination --period-only}elseif($RemoteOnly){& $binary $destination --remote-only}elseif($HtmlOnly){& $binary $destination --html-only}elseif($FloatingOnly){& $binary $destination --floating-only}elseif($QuotaOnly){& $binary $destination --quota-only}elseif($IslandOnly){& $binary $destination --island-only}else{& $binary $destination}
 if($LASTEXITCODE -ne 0){throw 'Source regression failed'}

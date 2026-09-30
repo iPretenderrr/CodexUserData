@@ -167,7 +167,7 @@ namespace CodexUserData
             var project=Theme.Button("打开 GitHub 项目主页","打开 CodexUserData GitHub 仓库",180);project.HorizontalAlignment=HorizontalAlignment.Left;project.Margin=new Thickness(0,14,0,0);about.Children.Add(project);
             project.Click+=delegate{try{System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo{FileName="https://github.com/iPretenderrr/CodexUserData",UseShellExecute=true});}catch(Exception ex){error.Text="无法打开项目主页："+ex.Message;}};
             Label(about,"软件更新");
-            var updateMessage=Theme.Text("点击后查询 GitHub 最新公开版本。",11,Theme.Muted);updateMessage.TextWrapping=TextWrapping.Wrap;about.Children.Add(updateMessage);
+            var updateMessage=Theme.Text("点击后查询最新公开版本并更新模型配色。",11,Theme.Muted);updateMessage.TextWrapping=TextWrapping.Wrap;about.Children.Add(updateMessage);
             var updateActions=new StackPanel{Orientation=Orientation.Horizontal,Margin=new Thickness(0,8,0,0)};about.Children.Add(updateActions);
             var checkUpdate=Theme.Button("检查更新","查询最新公开版本",100);updateActions.Children.Add(checkUpdate);
             var openRelease=Theme.Button("打开版本页面","在浏览器查看此版本",120);openRelease.IsEnabled=false;openRelease.Margin=new Thickness(8,0,0,0);updateActions.Children.Add(openRelease);
@@ -178,7 +178,13 @@ namespace CodexUserData
                 if(closed||updateCheck!=null)return;var pending=new CancellationTokenSource();updateCheck=pending;checkUpdate.IsEnabled=false;updateMessage.Text="正在检查更新…";
                 try
                 {
-                    var found=await ReleaseUpdate.CheckAsync(pending.Token);if(closed||!Object.ReferenceEquals(updateCheck,pending))return;
+                    // Start independently: a release API failure must not prevent
+                    // a valid palette update, and closing settings cancels both.
+                    var paletteTask=ModelPaletteCatalog.RefreshAsync(pending.Token,true);
+                    var releaseTask=ReleaseUpdate.CheckAsync(pending.Token);
+                    await System.Threading.Tasks.Task.WhenAll(releaseTask,paletteTask);
+                    var found=releaseTask.Result;
+                    if(closed||!Object.ReferenceEquals(updateCheck,pending))return;
                     latestRelease=found;updateMessage.Text=found.Describe(GetType().Assembly.GetName().Version);releaseNotes.Text=found.Notes;releaseNotes.Visibility=Visibility.Visible;openRelease.IsEnabled=true;
                 }
                 catch(OperationCanceledException){if(!closed)updateMessage.Text="更新检查已取消。";}

@@ -68,7 +68,7 @@ namespace CodexUserData
         }
         private void AddModels(IEnumerable<string> names)
         {
-            string[] ordered=names.Where(m=>!String.IsNullOrWhiteSpace(m)).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(m=>m).ToArray();ModelColors.EnsureModels(ordered);
+            string[] ordered=names.Where(m=>!String.IsNullOrWhiteSpace(m)).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(m=>m).ToArray();
             foreach(string model in ordered)
             {
                 if(rows.ContainsKey(model))continue;

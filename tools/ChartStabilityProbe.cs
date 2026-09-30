@@ -33,6 +33,7 @@ namespace CodexUserData
         }
         internal static async Task Run(string root)
         {
+            await UsageViewsStabilityProbe.Run(root);
             var data=Fixture();var today=DateTime.Today;
             var comparison=ChartComparison.Calculate(data.Daily,7,today,false,false);
             StabilityProbe.Check(comparison.Available&&comparison.Current==84000&&comparison.Previous==77000,"complete-period comparison excludes today's large partial sample and compares equal seven-day windows");

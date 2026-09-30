@@ -54,6 +54,8 @@ namespace CodexUserData
         private readonly object usageGate=new object();
         private string localRoot;
         private readonly DispatcherTimer timer=new DispatcherTimer();
+        private readonly DispatcherTimer paletteTimer=new DispatcherTimer{Interval=TimeSpan.FromHours(24)};
+        private readonly CancellationTokenSource paletteCancellation=new CancellationTokenSource();
         private readonly DispatcherTimer preferenceTimer=new DispatcherTimer{Interval=TimeSpan.FromMilliseconds(400)};
         private readonly DispatcherTimer activityStatusClock=new DispatcherTimer{Interval=TimeSpan.FromSeconds(1)};
         private ActivityReport activityReport;
@@ -165,10 +167,17 @@ namespace CodexUserData
             SizeChanged+=delegate{Reflow();if(ready&&!preview&&!changingLayout&&WindowState==WindowState.Normal)AdaptToSize();};KeyDown+=delegate(object s,KeyEventArgs e){if(e.Key==Key.F5)RefreshData();};
             Loaded+=delegate{ready=true;if(!preview)AdaptToSize();ClampToMonitor();Persist();if(!preview){timer.Interval=TimeSpan.FromSeconds(prefs.RefreshSeconds);timer.Start();quota.CompletionChanged+=UpdateCompletionViews;PreviewMouseMove+=delegate{quota.AcknowledgeCompletion();};quota.Start();EnsureActivity();RefreshData();if(prefs.BallMode)OpenBall();}};
             timer.Tick+=delegate{RefreshData();};StateChanged+=delegate{if(WindowState==WindowState.Minimized&&prefs.MinimizeToTray){MinimizeWindow();return;}if(WindowState==WindowState.Normal){RestoreHistory();if(snapshot!=null)ApplySnapshot(snapshot);RefreshData();}};
+            Loaded+=async delegate{if(!preview&&!closed){paletteTimer.Start();await RefreshPalette();}};
+            paletteTimer.Tick+=async delegate{await RefreshPalette();};
             preferenceTimer.Tick+=delegate{preferenceTimer.Stop();Persist();};
             activityStatusClock.Tick+=delegate{UpdateActivityStatus();};IsVisibleChanged+=delegate{UpdateActivityClock();};StateChanged+=delegate{UpdateActivityClock();};
-            Closing+=delegate{closed=true;timer.Stop();activityStatusClock.Stop();ReleaseMilestoneReader();if(activity!=null)activity.Dispose();if(remote!=null)remote.Dispose();if(ball!=null)ball.Dispose();quota.Dispose();Persist();if(historyWindow!=null)historyWindow.Close();if(coverageWindow!=null)coverageWindow.Close();};
+            Closing+=delegate{closed=true;timer.Stop();paletteTimer.Stop();paletteCancellation.Cancel();activityStatusClock.Stop();ReleaseMilestoneReader();if(activity!=null)activity.Dispose();if(remote!=null)remote.Dispose();if(ball!=null)ball.Dispose();quota.Dispose();Persist();if(historyWindow!=null)historyWindow.Close();if(coverageWindow!=null)coverageWindow.Close();};
             BuildCards();UpdateButtons();UpdateSource();Reflow();
+        }
+        private async Task RefreshPalette()
+        {
+            if(closed)return;
+            try{await ModelPaletteCatalog.RefreshAsync(paletteCancellation.Token,false);}catch(OperationCanceledException){}
         }
         private void BuildCards()
         {
@@ -580,7 +589,7 @@ namespace CodexUserData
             if(modelSharePanel!=null)modelSharePanel.Apply(s,MilestoneScope(),Scope());
             if(milestonePanel!=null)milestonePanel.Refresh();
             if(milestoneCurvePanel!=null)milestoneCurvePanel.Refresh();
-            snapshot=s;prefs.KnownModels=prefs.KnownModels.Concat(s.KnownModels).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();ModelColors.EnsureModels(prefs.KnownModels.Concat(s.Models.Select(model=>model.Model)));quota.Accept(prefs.Remote.Enabled&&combinedSnapshot!=null?combinedSnapshot.Quotas:s.Quotas);quota.AcceptUsage(prefs.Remote.Enabled?combinedSnapshot:s,prefs.Remote.Enabled?"Codex · 合计":Scope());UpdateBall();if(!preview&&(!IsVisible||WindowState==WindowState.Minimized))return;heroLabel.Text=PeriodName()+" · "+LabelFor(heroKey);heroValue.Text=Format(heroKey,s,false);heroValue.ToolTip=Format(heroKey,s,true);
+            snapshot=s;prefs.KnownModels=prefs.KnownModels.Concat(s.KnownModels).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();quota.Accept(prefs.Remote.Enabled&&combinedSnapshot!=null?combinedSnapshot.Quotas:s.Quotas);quota.AcceptUsage(prefs.Remote.Enabled?combinedSnapshot:s,prefs.Remote.Enabled?"Codex · 合计":Scope());UpdateBall();if(!preview&&(!IsVisible||WindowState==WindowState.Minimized))return;heroLabel.Text=PeriodName()+" · "+LabelFor(heroKey);heroValue.Text=Format(heroKey,s,false);heroValue.ToolTip=Format(heroKey,s,true);
             heroExact.Text=heroKey=="tokens"&&!s.DataUnavailable?"("+TokenText.Exact(s.TotalTokens)+")":"";heroExact.Visibility=heroKey=="tokens"&&!prefs.Collapsed&&!s.DataUnavailable?Visibility.Visible:Visibility.Collapsed;
             heroNote.Text=s.DataUnavailable?"当前来源尚未读取成功":"API 估算 "+ModelColors.Money(s.EquivalentUsd,s.UnpricedTokens,s.TotalTokens)+" · USD";
             heroNote.ToolTip=ApiPrices.Basis+"\n估算基准，不代表订阅实际扣费。";

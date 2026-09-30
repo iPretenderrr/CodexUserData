@@ -8,6 +8,7 @@ using System.Windows.Automation.Peers;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
+using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
 
@@ -649,9 +650,13 @@ namespace CodexUserData
         internal static readonly int[] Periods={1,7,14,30,60,90,180};
         private readonly Border heatCard,trendCard,cacheCard;
         private readonly UsageChart heat,trend,cacheTrend;
+        private readonly ModelShareChart trendAlternative=new ModelShareChart();
         private readonly Grid heatHeader,trendHeader;
+        private readonly Grid trendRangeHeader;
         private readonly WrapPanel heatModes,trendActions;
-        private readonly UsageDetails heatDetail=new UsageDetails("Heatmap","热度图 · 选中明细"),trendDetail=new UsageDetails("Trend","曲线图 · 时段明细");
+        private readonly WrapPanel trendViewActions,trendAggregationChoices;
+        private readonly Dictionary<string,Button> trendViewChoices=new Dictionary<string,Button>();
+        private readonly UsageDetails heatDetail=new UsageDetails("Heatmap","热度图 · 选中明细"),trendDetail=new UsageDetails("Trend","用量趋势 · 选中明细");
         private readonly ChartDetailSelection heatSelection,trendSelection;
         private readonly TextBlock sourceLabel,sum,average,value,timing,summaryLabel,averageLabel,valueLabel,heatTitle,heatHint,trendTitle,comparisonText,cacheHint;
         private readonly UniformGrid summary;
@@ -674,6 +679,10 @@ namespace CodexUserData
         private int days=30,cacheDays=30;
         private bool rangeInitialized;
         private bool cost;
+        private string trendView="curve",treeSelectedModel,trendTiming="",trendCoverage="";
+        private DailyUsage[] trendRaw=new DailyUsage[0],trendBuckets=new DailyUsage[0];
+        private DailyUsage trendTotal;
+        private bool trendHours,alternativePinned;
         internal bool ShowCoverage=true;
         internal event Action<int> RangeChanged;
         internal event Action<int> CacheRangeChanged;
@@ -699,19 +708,21 @@ namespace CodexUserData
             trendHeader=ChartHeader();trendBody.Children.Add(trendHeader);
             trendActions=new WrapPanel{HorizontalAlignment=HorizontalAlignment.Right};Grid.SetColumn(trendActions,1);trendHeader.Children.Add(trendActions);
             var clearSelection=Theme.Button("清除选择","清除曲线时段选择",66);clearSelection.FontSize=11;clearSelection.Height=27;clearSelection.Margin=new Thickness(0,0,6,0);clearSelection.ToolTip="清除固定时段（Esc）";trendActions.Children.Add(clearSelection);
-            trendActions.Children.Add(Theme.AggregationSelector(trendAggregations,"曲线图",delegate(string key){SetAggregation(key);if(AggregationChanged!=null)AggregationChanged(key);}));
-            clearSelection.Click+=delegate{trendSelection.Clear();};trendTitle=Theme.Text("Token 用量趋势",13,Theme.Ink);trendTitle.TextWrapping=TextWrapping.Wrap;trendHeader.Children.Add(trendTitle);AutomationProperties.SetAutomationId(trendTitle,"TrendMetricTitle");
+            trendAggregationChoices=Theme.AggregationSelector(trendAggregations,"曲线图",delegate(string key){SetAggregation(key);if(AggregationChanged!=null)AggregationChanged(key);});trendActions.Children.Add(trendAggregationChoices);
+            clearSelection.Click+=delegate{ClearTrendSelection();};trendTitle=Theme.Text("Token 用量趋势",13,Theme.Ink);trendTitle.TextWrapping=TextWrapping.Wrap;trendHeader.Children.Add(trendTitle);AutomationProperties.SetAutomationId(trendTitle,"TrendMetricTitle");
             // Wrap period buttons as the window shrinks; a horizontal StackPanel would clip the last options.
-            var buttons=new WrapPanel{Margin=new Thickness(-2,9,0,8)};trendBody.Children.Add(buttons);
+            trendRangeHeader=ChartHeader();trendRangeHeader.Margin=new Thickness(0,9,0,8);trendBody.Children.Add(trendRangeHeader);
+            var buttons=new WrapPanel{Margin=new Thickness(-2,0,0,0)};trendRangeHeader.Children.Add(buttons);
             foreach(int n in Periods){int v=n;var button=Theme.Button(n==1?"当天":n+"D",n==1?"当天趋势":n+" 天趋势",n==1?44:39);button.Height=27;button.FontSize=11;button.Margin=new Thickness(2,2,2,2);button.Click+=delegate{SetRange(v);if(RangeChanged!=null)RangeChanged(v);};ranges[n]=button;buttons.Children.Add(button);}
             customRangeButton=Theme.Button("自定义","选择开始和结束日期时间",64);customRangeButton.Height=27;customRangeButton.FontSize=11;customRangeButton.Margin=new Thickness(2,2,2,2);customRangeButton.Click+=delegate{OpenCustomRange(false);};buttons.Children.Add(customRangeButton);
+            trendViewActions=Theme.ChartViewSelector(trendViewChoices,"Trend",SetTrendView);Grid.SetColumn(trendViewActions,1);trendRangeHeader.Children.Add(trendViewActions);
             summary=new UniformGrid{Columns=3,Margin=new Thickness(0,3,0,2)};trendBody.Children.Add(summary);
             sum=Summary(summary,"区间用量",out summaryLabel);average=Summary(summary,"日均",out averageLabel);value=Summary(summary,"API 估算 · USD",out valueLabel);
             AutomationProperties.SetAutomationId(sum,"TrendMetricTotal");AutomationProperties.SetAutomationId(average,"TrendMetricAverage");AutomationProperties.SetAutomationId(value,"TrendSecondaryTotal");
             timing=Theme.Text("色块厚度表示模型用量 · 悬停图例高亮",10,Theme.Muted);timing.TextWrapping=TextWrapping.Wrap;timing.Margin=new Thickness(0,5,0,0);trendBody.Children.Add(timing);
             var comparisonTitle=Theme.Text("完整周期对比 · 不含今日",11,Theme.Ink);comparisonTitle.Margin=new Thickness(0,10,0,4);comparisonTitle.TextWrapping=TextWrapping.Wrap;trendBody.Children.Add(comparisonTitle);
             comparisonText=Theme.Text("等待当前来源的数据",10,Theme.Muted);comparisonText.TextWrapping=TextWrapping.Wrap;comparisonText.LineHeight=16;trendBody.Children.Add(comparisonText);AutomationProperties.SetAutomationId(comparisonText,"TrendComparison");
-            trendBody.Children.Add(legend);trend=new UsageChart(false);trendBody.Children.Add(trend);AutomationProperties.SetAutomationId(trend,"TrendChart");AutomationProperties.SetAutomationId(heat,"HeatmapChart");
+            trendBody.Children.Add(legend);trend=new UsageChart(false);var trendPlot=new Grid();trendPlot.Children.Add(trend);trendAlternative.Visibility=Visibility.Collapsed;trendPlot.Children.Add(trendAlternative);trendBody.Children.Add(trendPlot);AutomationProperties.SetAutomationId(trend,"TrendChart");AutomationProperties.SetAutomationId(trendAlternative,"TrendAlternativeChart");AutomationProperties.SetAutomationId(heat,"HeatmapChart");
             trendBody.Children.Add(DetailViewport(trendDetail));
             var cacheBody=new StackPanel();cacheCard=Card(cacheBody);cacheCard.Margin=new Thickness(0,9,0,0);Children.Add(cacheCard);
             var cacheTitle=Theme.Text("缓存命中率趋势",13,Theme.Ink);cacheTitle.TextWrapping=TextWrapping.Wrap;cacheBody.Children.Add(cacheTitle);
@@ -725,8 +736,11 @@ namespace CodexUserData
             toggleCoverage.Click+=delegate{coverageText.Visibility=coverageText.Visibility==Visibility.Visible?Visibility.Collapsed:Visibility.Visible;};coverageBody.Children.Add(toggleCoverage);coverageBody.Children.Add(coverageText);
             coverage=new Border{Child=coverageBody,Margin=new Thickness(2,10,0,0),Visibility=Visibility.Collapsed};Children.Add(coverage);
             heatSelection=new ChartDetailSelection(heat,heatDetail);trendSelection=new ChartDetailSelection(trend,trendDetail,false,false);
+            trendAlternative.Pick+=PickTrendAlternative;
+            trendAlternative.SizeChanged+=delegate{if(trendView=="bars"&&alternativePinned)RenderAlternativeDetail();};
+            PreviewKeyDown+=delegate(object sender,KeyEventArgs e){if(e.Key==Key.Escape&&trendView!="curve"&&trendAlternative.IsKeyboardFocusWithin){ClearTrendSelection();e.Handled=true;}};
             PreviewMouseWheel+=delegate{heatSelection.PauseForScroll();trendSelection.PauseForScroll();cacheTrend.HoverPausedUntil=DateTime.UtcNow.AddMilliseconds(350);};
-            SizeChanged+=delegate{foreach(var chip in legendItems.Values)Theme.FitChip(chip,Math.Max(40,ActualWidth-24));ReflowChartHeaders();heat.Height=heat.HeatHeight(Math.Max(180,ActualWidth-24));trend.Height=ActualWidth<420?280:ActualWidth<760?330:380;cacheTrend.Height=ActualWidth<420?220:ActualWidth<760?250:280;summary.Columns=ActualWidth<360?2:3;};SetRange(30);SetCacheRange(30);SetHeatAggregation("daily");SetAggregation("daily");SetMetric(false);
+            SizeChanged+=delegate{foreach(var chip in legendItems.Values)Theme.FitChip(chip,Math.Max(40,ActualWidth-24));ReflowChartHeaders();heat.Height=heat.HeatHeight(Math.Max(180,ActualWidth-24));trend.Height=trendAlternative.Height=ActualWidth<420?280:ActualWidth<760?330:380;cacheTrend.Height=ActualWidth<420?220:ActualWidth<760?250:280;summary.Columns=ActualWidth<360?2:3;};SetRange(30);SetCacheRange(30);SetHeatAggregation("daily");SetAggregation("daily");SetMetric(false);UpdateTrendView();
         }
         private static Grid ChartHeader()
         {
@@ -735,6 +749,57 @@ namespace CodexUserData
         private void ReflowChartHeaders()
         {
             PlaceHeaderActions(heatModes,ActualWidth<390);PlaceHeaderActions(trendActions,ActualWidth<520);
+            bool wrap=ActualWidth<800;PlaceHeaderActions(trendViewActions,wrap);Grid.SetColumnSpan(trendRangeHeader.Children[0],wrap?2:1);trendViewActions.Margin=wrap?new Thickness(0,3,0,0):new Thickness(12,0,0,0);
+        }
+        internal void SetTrendView(string mode)
+        {
+            if(!trendViewChoices.ContainsKey(mode)||trendView==mode)return;
+            ClearTrendSelection();trendView=mode;UpdateTrendTitle();UpdateTrendView();
+        }
+        private void UpdateTrendView()
+        {
+            bool curve=trendView=="curve";trend.Visibility=curve?Visibility.Visible:Visibility.Collapsed;trendAlternative.Visibility=curve?Visibility.Collapsed:Visibility.Visible;trendAggregationChoices.Visibility=trendView=="treemap"?Visibility.Collapsed:Visibility.Visible;
+            timing.Text=trendView=="treemap"?(customLoading?"正在读取…":"面积表示所选区间的模型"+(cost?"估算费用 · USD":" Tokens 总量")):trendTiming;
+            // Data coverage belongs to the selected range, not the presentation.
+            // In particular, today's tree must still disclose missing hourly usage.
+            if(trendCoverage.Length>0)timing.Text+="\n"+trendCoverage;
+            foreach(var pair in trendViewChoices){bool active=pair.Key==trendView;pair.Value.Background=active?Theme.Hover:Brushes.Transparent;pair.Value.Foreground=active?Theme.Accent:Theme.Muted;AutomationProperties.SetItemStatus(pair.Value,active?"已选中":"未选中");}
+            // Presentation changes consume the prepared interval; they never
+            // trigger range requests, read logs, or reaggregate the whole history.
+            if(!curve){trendAlternative.SetUsageData(trendBuckets,trendRaw,trendView,trendAggregation=="cumulative",trendHours,cost);RenderAlternativeDetail();}
+            Highlight(pinnedModel);
+        }
+        private void ClearTrendSelection()
+        {
+            trendSelection.Clear();ClearAlternativeSelection();
+        }
+        private void ClearAlternativeSelection()
+        {
+            treeSelectedModel=null;alternativePinned=false;trendAlternative.ClearPointer();if(trendView!="curve")trendDetail.Clear("未选择 · 点击图表查看明细");
+        }
+        private void PickTrendAlternative(DailyUsage bucket,string model)
+        {
+            if(trendView=="treemap")treeSelectedModel=model;else alternativePinned=bucket!=null;RenderAlternativeDetail();
+        }
+        private void RenderAlternativeDetail()
+        {
+            DailyUsage selected=null;
+            if(trendView=="bars"&&alternativePinned){selected=trendAlternative.SelectionForLayout();if(selected==null)alternativePinned=false;}
+            else if(trendView=="treemap"&&treeSelectedModel!=null)
+            {
+                // Build the full-detail aggregate only after an explicit tile
+                // selection. Normal curve refreshes never pay for this extra pass.
+                if(trendTotal==null)trendTotal=ModelShareChart.Compress(trendRaw,1,false).FirstOrDefault();
+                if(trendTotal!=null)
+                {
+                    var rows=trendTotal.Models.Where(m=>String.Equals(String.IsNullOrWhiteSpace(m.Model)?"unknown":m.Model,treeSelectedModel,StringComparison.OrdinalIgnoreCase)).ToList();
+                    long unclassified=String.Equals(treeSelectedModel,"unknown",StringComparison.OrdinalIgnoreCase)?Math.Max(0,trendTotal.Tokens-trendTotal.Models.Sum(m=>m.Tokens)):0;
+                    if(cost?rows.Sum(m=>m.EquivalentUsd)>0:rows.Sum(m=>m.Tokens)+unclassified>0)selected=new DailyUsage{Date=trendTotal.Date,DisplayLabel="区间合计 · "+treeSelectedModel,Models=rows,Tokens=rows.Sum(m=>m.Tokens)+unclassified,Input=rows.Sum(m=>m.Input),Output=rows.Sum(m=>m.Output),CacheRead=rows.Sum(m=>m.CacheRead),CacheWrite=rows.Sum(m=>m.CacheWrite),Requests=rows.Sum(m=>m.Requests)};
+                    else treeSelectedModel=null;
+                }
+                else treeSelectedModel=null;
+            }
+            if(selected==null)trendDetail.Clear(trendRaw.Length==0?"等待当前来源的数据":"未选择 · 点击图表查看明细");else trendDetail.Apply(selected,true,snapshot==null?"用量记录":snapshot.CountLabel);
         }
         private static void PlaceHeaderActions(FrameworkElement actions,bool stacked)
         {
@@ -754,7 +819,7 @@ namespace CodexUserData
         }
         internal void SetRange(int count)
         {
-            int next=Periods.Contains(count)?count:30;if(rangeInitialized&&days==next&&customRange==null)return;rangeInitialized=true;if(days!=next||customRange!=null)trendSelection.Reset();
+            int next=Periods.Contains(count)?count:30;if(rangeInitialized&&days==next&&customRange==null)return;rangeInitialized=true;if(days!=next||customRange!=null){trendSelection.Reset();ClearAlternativeSelection();}
             days=next;customRange=null;customSnapshot=null;customScope=null;customLoading=false;customRangeButton.Content="自定义";UpdateRangeButtons();
             // The selected preset changes the visible window even when the source snapshot
             // is unchanged, so force the lightweight view pass to update totals and details.
@@ -781,7 +846,7 @@ namespace CodexUserData
         {
             string next=value=="weekly"||value=="cumulative"?value:"daily";bool changed=trendAggregation!=next;trendAggregation=next;
             foreach(var pair in trendAggregations){bool selected=pair.Key==trendAggregation;pair.Value.Foreground=selected?Theme.Accent:Theme.Muted;pair.Value.Background=selected?Theme.Hover:Brushes.Transparent;AutomationProperties.SetItemStatus(pair.Value,selected?"已选中":"未选中");}
-            UpdateTrendTitle();if(changed){trendSelection.Reset();UpdateTrend();}
+            UpdateTrendTitle();if(changed){trendSelection.Reset();ClearAlternativeSelection();UpdateTrend();}
         }
         internal void SetHeatAggregation(string value)
         {
@@ -790,9 +855,10 @@ namespace CodexUserData
             UpdateHeatTitle();if(changed){heatSelection.Reset();ApplyHeat();}
         }
         internal void SetModel(string model)
-        {modelKey=modelChoices.ContainsKey(model??"")?model??"":"";viewSignature=null;ApplyView(customRange!=null&&customSnapshot!=null?customSnapshot:original,sourceLabel.Tag as string);}
+        {modelKey=modelChoices.ContainsKey(model??"")?model??"":"";ClearAlternativeSelection();viewSignature=null;ApplyView(customRange!=null&&customSnapshot!=null?customSnapshot:original,sourceLabel.Tag as string);}
         internal void SetMetric(bool showCost)
         {
+            if(cost!=showCost&&trendView!="curve")ClearAlternativeSelection();
             cost=showCost;tokensMetric.Background=cost?Brushes.Transparent:Theme.Hover;tokensMetric.Foreground=cost?Theme.Muted:Theme.Accent;costMetric.Background=cost?Theme.Hover:Brushes.Transparent;costMetric.Foreground=cost?Theme.Accent:Theme.Muted;
             AutomationProperties.SetItemStatus(tokensMetric,cost?"未选中":"已选中");AutomationProperties.SetItemStatus(costMetric,cost?"已选中":"未选中");
             UpdateHeatTitle();UpdateTrendTitle();ApplyHeat();UpdateTrend();
@@ -803,7 +869,7 @@ namespace CodexUserData
             string mode=heatAggregation=="weekly"?"每列一周（周日开始），填充高度表示周用量":heatAggregation=="cumulative"?"每列一周，填充高度表示窗口内累计用量":"每格表示当天总量";
             heatHint.Text="固定近 180 天 · "+mode+(cost?" · 估算费用并非账单，缺价格按 0":" · 细条表示模型占比");
         }
-        private void UpdateTrendTitle(){string mode=trendAggregation=="weekly"?"每周":trendAggregation=="cumulative"?"累计":"每日";trendTitle.Text=(cost?"API 估算费用趋势 · USD":"Token 用量趋势")+" · "+mode;}
+        private void UpdateTrendTitle(){string mode=trendView=="treemap"?"区间合计":trendAggregation=="weekly"?"每周":trendAggregation=="cumulative"?"累计":"每日";trendTitle.Text=(cost?"API 估算费用趋势 · USD":"Token 用量趋势")+" · "+mode;}
         internal void Configure(bool showHeat,bool showTrend,int count,string aggregationMode="daily",string heatAggregationMode="daily",int cacheCount=30)
         {
             heatCard.Visibility=showHeat?Visibility.Visible:Visibility.Collapsed;trendCard.Visibility=showTrend?Visibility.Visible:Visibility.Collapsed;cacheCard.Visibility=showTrend?Visibility.Visible:Visibility.Collapsed;Visibility=showHeat||showTrend?Visibility.Visible:Visibility.Collapsed;SetRange(count);SetCacheRange(cacheCount);SetHeatAggregation(heatAggregationMode);SetAggregation(aggregationMode);
@@ -831,7 +897,7 @@ namespace CodexUserData
         }
         internal void BeginCustomRange(DateTime from,DateTime to,string scope)
         {
-            customRange=UsageRangeSpec.Create(from,to);customScope=scope;customSnapshot=null;customLoading=true;snapshot=null;viewSignature=null;trendSelection.Reset();sourceLabel.Tag=scope;customRangeButton.Content="读取中…";UpdateRangeButtons();sourceLabel.Text=scope+" · 曲线 "+customRange.Label+" · 读取中";comparisonText.Text="正在读取自定义时间范围…";trendDetail.Clear("正在读取自定义时间范围…");UpdateTrend();
+            customRange=UsageRangeSpec.Create(from,to);customScope=scope;customSnapshot=null;customLoading=true;snapshot=null;viewSignature=null;trendSelection.Reset();ClearAlternativeSelection();sourceLabel.Tag=scope;customRangeButton.Content="读取中…";UpdateRangeButtons();sourceLabel.Text=scope+" · 趋势 "+customRange.Label+" · 读取中";comparisonText.Text="正在读取自定义时间范围…";trendDetail.Clear("正在读取自定义时间范围…");UpdateTrend();
         }
         internal void ApplyCustomRange(UsageSnapshot data,string scope,DateTime from,DateTime to)
         {
@@ -864,7 +930,6 @@ namespace CodexUserData
         private void ApplyView(UsageSnapshot data,string scope)
         {
             var names=data==null?new string[0]:data.Daily.SelectMany(d=>d.Models).Select(m=>m.Model).Distinct().OrderBy(m=>m).ToArray();
-            ModelColors.EnsureModels(names);
             if(modelKey!=""&&!names.Contains(modelKey))modelKey="";
             modelChoices.Clear();modelChoices.Add("","全部模型");foreach(string name in names)modelChoices[name]=name;modelFilter.Select(modelKey);
             string dailySignature=data==null?"":UsageChart.Signature(data.Daily);string heatSignature=original==null?"":Object.ReferenceEquals(data,original)?dailySignature:UsageChart.Signature(original.Daily);
@@ -875,7 +940,7 @@ namespace CodexUserData
             if(snapshot!=null&&snapshot.Daily.Length>0)snapshot.HourlyUnallocatedTokens=Math.Max(0,snapshot.Daily.Last().Tokens-snapshot.Hourly.Sum(h=>h.Tokens));
             sourceLabel.Tag=scope;sourceLabel.Text=scope+(modelKey==""?"":" · "+modelKey)+" · "+(customRange!=null&&String.Equals(customScope,scope,StringComparison.Ordinal)?"曲线 "+customRange.Label:"近 180 天");
             coverageText.Text=data==null?"":data.Warning;coverage.Visibility=ShowCoverage&&!String.IsNullOrEmpty(coverageText.Text)?Visibility.Visible:Visibility.Collapsed;
-            if(reset){if(customRange==null)heatSelection.Reset();trendSelection.Reset();}
+            if(reset){if(customRange==null)heatSelection.Reset();trendSelection.Reset();ClearAlternativeSelection();}
             ApplyHeat();UpdateTrend();UpdateCacheTrend();
         }
         private void UpdateTrend()
@@ -885,19 +950,22 @@ namespace CodexUserData
             DailyUsage[] raw=snapshot==null?new DailyUsage[0]:custom?customTimeline:hourly?snapshot.Hourly:snapshot.Daily;
             DailyUsage[] visible=custom?raw:hourly?raw.Take(snapshot==null?0:snapshot.HourlyThrough).ToArray():raw.Skip(Math.Max(0,raw.Length-days)).ToArray();
             DailyUsage[] chartData=trendAggregation=="daily"?raw:UsageTrendSeries.Build(visible,trendAggregation);bool chartHourly=trendAggregation=="daily"&&hourly;int window=trendAggregation=="daily"?(custom?raw.Length:days):chartData.Length;
+            trendRaw=visible;trendBuckets=trendAggregation=="daily"?visible:chartData;trendHours=trendAggregation!="weekly"&&(hourly||custom&&customStep<86400);
+            trendTotal=null;
             trend.SetData(chartData,window,chartHourly,chartHourly&&snapshot!=null?snapshot.HourlyThrough:chartData.Length,cost);
             long total=visible.Sum(d=>d.Tokens);decimal amount=visible.Sum(d=>ChartValue.Of(d,cost));sum.Text=cost?ChartValue.Money(amount):TokenText.Compact(total);sum.ToolTip=sum.Text+(cost?" USD · API 估算":" Tokens");
             summaryLabel.Text=(custom?"自定义区间":days==1?"今日已记录":"近 "+days+" 天")+(cost?" · USD":" · Tokens");averageLabel.Text=trendAggregation=="weekly"?"周均":custom&&customStep<86400?"时段均值":custom?"按日均值":days==1?"已记录小时均值":"已展示日期均值";
             int divisor=Math.Max(1,trendAggregation=="weekly"?chartData.Length:visible.Length);average.Text=cost?ChartValue.Money(amount/divisor):TokenText.Compact(total/divisor);average.ToolTip=average.Text+(cost?" USD":" Tokens")+"；含未结束时段";
             var models=visible.SelectMany(d=>d.Models).ToArray();string price=ChartValue.Money(models.Sum(m=>m.EquivalentUsd));valueLabel.Text=cost?"区间 Tokens":"API 估算 · USD";value.Text=cost?TokenText.Compact(total):price;value.ToolTip=value.Text;
             bool includesToday=visible.Any(d=>d.Date==DateTime.Today.ToString("yyyy-MM-dd",CultureInfo.InvariantCulture));
-            timing.Text=customLoading?"正在读取 · 边界精确到秒":trendAggregation=="weekly"?"按周汇总 · 每周从周日开始":trendAggregation=="cumulative"?"按当前区间逐点累计":custom?"边界精确到秒 · "+UsageTimeline.Caption(customStep):hourly?"按小时统计 · 当前小时未结束":includesToday?"曲线含今日未结束数据":"曲线按已提供日期绘制";timing.Text+=(cost?" · 费用是估算，非账单；缺价格按 0":" · 色块表示模型用量")+" · 悬停图例高亮";
-            if(hourly&&snapshot!=null&&snapshot.HourlyUnallocatedTokens>0)timing.Text+="\n另有 "+TokenText.Compact(snapshot.HourlyUnallocatedTokens)+" Tokens 只有日汇总，未分摊到小时";
+            trendTiming=customLoading?"正在读取 · 边界精确到秒":trendAggregation=="weekly"?"按周汇总 · 每周从周日开始":trendAggregation=="cumulative"?"按当前区间逐点累计":custom?"边界精确到秒 · "+UsageTimeline.Caption(customStep):hourly?"按小时统计 · 当前小时未结束":includesToday?"含今日未结束数据":"按已提供日期绘制";trendTiming+=(cost?" · 费用是估算，非账单；缺价格按 0":" · 色块表示模型用量")+" · 悬停图例高亮";
+            trendCoverage=hourly&&snapshot!=null&&snapshot.HourlyUnallocatedTokens>0?"另有 "+TokenText.Compact(snapshot.HourlyUnallocatedTokens)+" Tokens 只有日汇总，未分摊到小时":"";
             string customDisplay=trendAggregation=="weekly"?"曲线按周分组（周日开始）":trendAggregation=="cumulative"?"曲线按时间累计":"曲线"+UsageTimeline.Caption(customStep);
             comparisonText.Text=snapshot==null?(customLoading?"正在读取自定义时间范围…":"等待当前来源的数据"):custom?"自定义区间："+customRange.Label+"\n边界按秒过滤，"+customDisplay+"。": "按当前已读记录；对比不含今日。\n"+ChartComparison.Calculate(snapshot.Daily,days,DateTime.Today,cost,snapshot.CoverageWarnings>0).Message;
             int detailStart=trendAggregation=="daily"&&!custom&&!hourly?Math.Max(0,chartData.Length-days):0;int detailEnd=chartHourly&&snapshot!=null?snapshot.HourlyThrough:chartData.Length;
             trendSelection.SetData(chartData,detailStart,detailEnd,snapshot==null?"用量记录":snapshot.CountLabel);
             UpdateLegend(models);
+            UpdateTrendView();
         }
         private void UpdateCacheTrend()
         {
@@ -933,6 +1001,6 @@ namespace CodexUserData
             if(cache){BeginCacheCustomRange(selectedFrom,selectedTo,scope);if(CacheCustomRangeRequested!=null)CacheCustomRangeRequested(selectedFrom,selectedTo);else if(original!=null)ApplyCacheCustomRange(original,scope,selectedFrom,selectedTo);}
             else{BeginCustomRange(selectedFrom,selectedTo,scope);if(CustomRangeRequested!=null)CustomRangeRequested(selectedFrom,selectedTo);else if(original!=null)ApplyCustomRange(original,scope,selectedFrom,selectedTo);}
         }
-        private void Highlight(string model){trend.Highlight(model);foreach(var pair in legendItems){pair.Value.Opacity=model==null||pair.Key==model?1:.45;Theme.SelectChip(pair.Value,pair.Key==pinnedModel);}}
+        private void Highlight(string model){trend.Highlight(model);trendAlternative.Highlight(model);foreach(var pair in legendItems){pair.Value.Opacity=model==null||pair.Key==model?1:.45;Theme.SelectChip(pair.Value,pair.Key==pinnedModel);}}
     }
 }

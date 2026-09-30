@@ -366,6 +366,16 @@ internal static class ReleaseProbe
    Call("WidgetWindow",widget,"ApplySnapshot",data);widget.Show();Call("WidgetWindow",widget,"OpenHistory");var history=InternalField<Window>("WidgetWindow",widget,"historyWindow");var page=(FrameworkElement)InternalField<object>("WidgetWindow",widget,"modelSharePanel","ModelSharePanel");
    Check(page.Visibility==Visibility.Collapsed,"protected model share is independent and initially hidden");page.Visibility=Visibility.Visible;Pump(80);history.UpdateLayout();
    var chart=(FrameworkElement)InternalField<object>("ModelSharePanel",page,"chart","UsageChart");Check((bool)Call("UsageChart",chart,"get_IsShare")&&(int)Call("UsageChart",chart,"get_GeometryBuilds")>0,"protected percentage curve renders its cached geometry");
+   Call("ModelSharePanel",page,"SetView","bars");Pump(40);history.UpdateLayout();var alternate=(FrameworkElement)InternalField<object>("ModelSharePanel",page,"alternative","ModelShareChart");
+   Check(alternate.IsVisible&&!chart.IsVisible&&(int)Call("ModelShareChart",alternate,"get_GeometryBuilds")>0,"protected stacked bars render after view switching");
+   var cells=(Array)Call("ModelShareChart",alternate,"get_LayoutCells");Check(cells.Length==2,"protected stacked bars keep both fixture models");
+   Call("ModelShareChart",alternate,"Choose",0,false);Check(InternalField<Border>("ModelSharePanel",page,"detail").Visibility==Visibility.Collapsed,"protected bar hover does not open lower details");
+   Call("ModelShareChart",alternate,"Choose",0,true);Check(InternalField<Border>("ModelSharePanel",page,"detail").Visibility==Visibility.Visible,"protected bar click opens details");
+   Call("ModelSharePanel",page,"SetAggregation","cumulative");Call("ModelSharePanel",page,"SetView","treemap");Pump(40);history.UpdateLayout();cells=(Array)Call("ModelShareChart",alternate,"get_LayoutCells");Check(cells.Length==2&&InternalField<WrapPanel>("ModelSharePanel",page,"aggregationChoices").Visibility==Visibility.Collapsed,"protected treemap renders with interval totals and hides temporal aggregation");
+   Call("ModelShareChart",alternate,"Choose",0,true);string tileModel=InternalField<string>("ModelShareChart/ShareCell",cells.GetValue(0),"Model");
+   var rankButton=InternalField<WrapPanel>("ModelSharePanel",page,"ranking").Children.OfType<Button>().First(b=>(string)b.Tag!=tileModel);rankButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+   Check(InternalField<string>("ModelShareChart",alternate,"selectedModel")==((string)rankButton.Tag),"protected ranking selection moves the treemap selection to the chosen model");
+   Call("ModelSharePanel",page,"SetView","curve");Check(chart.IsVisible&&!alternate.IsVisible,"protected curve view restores without recreating the page");
    Check(!history.AllowsTransparency&&System.Windows.Shell.WindowChrome.GetWindowChrome(history)!=null&&ResizeEdges(history),"protected history uses a native frame with all eight resize edges");
    Call("WindowInteraction",null,"ToggleMaximize",history);Check(history.WindowState==WindowState.Maximized&&((FrameworkElement)history.Content).Opacity==1,"protected history maximizes without a fade midpoint");Pump(60);Check(FillsWorkArea(history),"protected visible maximize respects the current monitor taskbar work area");
    var shell=(Border)history.Content;Check(shell.CornerRadius==new CornerRadius(0)&&shell.RenderTransform.Value.IsIdentity,"protected maximize has square corners and no second content transform");
@@ -373,6 +383,29 @@ internal static class ReleaseProbe
    history.Close();Check(InternalField<bool>("ModelSharePanel",page,"disposed"),"protected model share page disposes on close");
   }
   finally{widget.Close();}
+  var usageData=json.Deserialize("{\"Daily\":[{\"Date\":\"2026-09-20\",\"Tokens\":100,\"Input\":100,\"Models\":[{\"Model\":\"gpt-6-sol\",\"Tokens\":100,\"Input\":100,\"EquivalentUsd\":0.0000001}]},{\"Date\":\"2026-09-21\",\"Tokens\":200,\"Input\":200,\"Models\":[{\"Model\":\"gpt-6-sol\",\"Tokens\":200,\"Input\":200,\"EquivalentUsd\":0.0000002}]}]}",TypeFor("UsageSnapshot"));
+  var usage=(FrameworkElement)New("HistoryPanel");var usageWindow=new Window{Width=960,Height=740,ShowActivated=false,ShowInTaskbar=false,Content=new ScrollViewer{Content=usage}};
+  try
+  {
+   Call("HistoryPanel",usage,"Apply",usageData,"Synthetic usage views");Call("HistoryPanel",usage,"SetTrendView","bars");usageWindow.Show();Pump(40);usageWindow.UpdateLayout();
+   var alternate=(FrameworkElement)InternalField<object>("HistoryPanel",usage,"trendAlternative","ModelShareChart");var cells=(Array)Call("ModelShareChart",alternate,"get_LayoutCells");
+   Check(cells.Length==2&&alternate.IsVisible,"protected Token trend exposes both absolute usage columns");
+   var boundsA=InternalField<Rect>("ModelShareChart/ShareCell",cells.GetValue(0),"Bounds");var boundsB=InternalField<Rect>("ModelShareChart/ShareCell",cells.GetValue(1),"Bounds");Check(Math.Abs(boundsB.Height/boundsA.Height-2)<.001,"protected usage column height represents actual totals rather than normalized percentages");
+   Call("HistoryPanel",usage,"SetMetric",true);Call("HistoryPanel",usage,"SetTrendView","treemap");Pump(30);cells=(Array)Call("ModelShareChart",alternate,"get_LayoutCells");
+   Check(cells.Length==1&&InternalField<decimal>("ModelShareChart/ShareCell",cells.GetValue(0),"Value")==.0000003m,"protected cost treemap retains decimal interval costs below one cent");
+   Call("ModelShareChart",alternate,"Choose",0,true);var detail=InternalField<object>("HistoryPanel",usage,"trendDetail","UsageDetails");Check(((string)Call("UsageDetails",detail,"get_Heading")).Contains("区间合计"),"protected cost tile opens interval detail only on selection");
+   Call("HistoryPanel",usage,"SetTrendView","curve");Check(!alternate.IsVisible&&((FrameworkElement)InternalField<object>("HistoryPanel",usage,"trend","UsageChart")).IsVisible,"protected usage view returns to the existing curve");
+   string today=DateTime.Today.ToString("yyyy-MM-dd",System.Globalization.CultureInfo.InvariantCulture);
+   var partial=json.Deserialize("{\"Daily\":[{\"Date\":\""+today+"\",\"Tokens\":1000}],\"HourlyThrough\":2,\"Hourly\":[{\"Date\":\""+today+" 00:00\",\"Tokens\":60},{\"Date\":\""+today+" 01:00\",\"Tokens\":40}]}",TypeFor("UsageSnapshot"));
+   Call("HistoryPanel",usage,"SetMetric",false);Call("HistoryPanel",usage,"Apply",partial,"Synthetic coverage");Call("HistoryPanel",usage,"SetRange",1);Call("HistoryPanel",usage,"SetTrendView","treemap");Pump(30);
+   Check(InternalField<TextBlock>("HistoryPanel",usage,"timing").Text.Contains("900 Tokens 只有日汇总"),"protected treemap retains the missing hourly usage warning");
+   Call("HistoryPanel",usage,"SetAggregation","cumulative");Call("HistoryPanel",usage,"SetTrendView","bars");
+   Check(((string)Call("ModelShareChart",alternate,"AxisLabel",today+" 01:00")).Contains("01:00"),"protected cumulative bars retain subday axis labels");
+   var unknown=json.Deserialize("{\"Daily\":[{\"Date\":\""+today+"\",\"Tokens\":150,\"Input\":100,\"Models\":[{\"Model\":\"UNKNOWN\",\"Tokens\":100,\"Input\":100}]}]}",TypeFor("UsageSnapshot"));
+   Call("HistoryPanel",usage,"Apply",unknown,"Synthetic unknown");Call("HistoryPanel",usage,"SetRange",7);Call("HistoryPanel",usage,"SetTrendView","treemap");Pump(30);Call("ModelShareChart",alternate,"Choose",0,true);usageWindow.UpdateLayout();
+   Check(((TextBlock)FindAutomation((DependencyObject)detail,"TrendSelectedDayTokens")).Text=="150","protected uppercase UNKNOWN detail includes residual tokens");
+  }
+  finally{usageWindow.Close();}
   File.WriteAllText(Path.Combine(dir,"verification.json"),"{\"passed\":true,\"scope\":\"model-share\",\"checks\":"+checks+"}");Console.WriteLine("MODEL SHARE RELEASE CHECKS: "+checks);
  }
  static void MilestoneOnly(string dir)
@@ -411,6 +444,39 @@ internal static class ReleaseProbe
   finally{widget.Close();}
   File.WriteAllText(Path.Combine(dir,"verification.json"),"{\"passed\":true,\"scope\":\"milestone\",\"checks\":"+checks+"}");Console.WriteLine("MILESTONE RELEASE CHECKS: "+checks);
  }
+ static void ColorsOnly(string dir)
+ {
+  Check(assembly.GetType("CodexUserData.ModelColors")==null,"model color implementation remains obfuscated");
+  Check(assembly.GetManifestResourceNames().Contains("CodexUserData.ModelPalette.json"),"protected release embeds its stable model palette resource");
+  string home=(string)AppDomain.CurrentDomain.GetData("CodexUserData.TestDataFolder");Directory.CreateDirectory(home);string path=Path.Combine(home,"model-colors.json");
+  File.WriteAllText(path,"{\"schema\":1,\"assignments\":{\"gpt-6.1-sol\":5,\"fixture-legacy\":12}}");byte[] old=File.ReadAllBytes(path);
+  string bundled=(string)Call("ModelPaletteCatalog",null,"BundledJson");var snapshot=Call("ModelPaletteCatalog",null,"Parse",bundled);
+  var json=new JavaScriptSerializer();var document=json.Deserialize<Dictionary<string,object>>(bundled);var families=(Dictionary<string,object>)document["families"];
+  string roundtrip=(string)Call("ModelPaletteSnapshot",snapshot,"ToJson");var parsed=Call("ModelPaletteCatalog",null,"Parse",roundtrip);long revision=(long)Call("ModelPaletteSnapshot",snapshot,"get_Revision");
+  Check(revision==(long)Call("ModelPaletteSnapshot",parsed,"get_Revision")&&roundtrip.Contains("\"rounds\"")&&roundtrip.Contains("\"models\""),"public palette JSON schema survives obfuscation and roundtrip");
+  string[] keys={"astra","sol","terra","luna","gpt5"};
+  foreach(bool light in new[]{false,true})for(int f=0;f<keys.Length;f++)
+  {
+   var family=(Dictionary<string,object>)families[keys[f]];var names=((IEnumerable)family["models"]).Cast<string>().ToArray();int count=(int)Call("ModelPaletteSnapshot",snapshot,"RoundCount",f)*10;
+   var colors=Enumerable.Range(0,count).Select(i=>(Color)Call("ModelPaletteSnapshot",snapshot,"At",f,i,light)).ToArray();var bg=(Color)ColorConverter.ConvertFromString(light?"#E7EFF7":"#2B3846");
+   Check(colors.Distinct().Count()==count&&colors.All(c=>(bool)Call("ModelColorMath",null,"InFamily",c,f)&&(double)Call("ModelColorMath",null,"Contrast",c,bg)>=4.5),"protected "+keys[f]+" all rounds have unique readable family colors ("+(light?"light":"dark")+")");
+   double minimum=Double.MaxValue;for(int i=0;i<count;i++)for(int j=Math.Max(0,i-9);j<i;j++)minimum=Math.Min(minimum,(double)Call("ModelColorMath",null,"Distance",colors[i],colors[j]));
+   Check(minimum+1e-9>=.05,"protected "+keys[f]+" every ten-model window including boundaries meets perceptual spacing");
+   Check(names.Select((name,index)=>(Color)ColorConverter.ConvertFromString((string)Call("ModelColors",null,"ColorHex",name,light))==colors[index]).All(x=>x),"protected public model numbering matches fixed slots");
+  }
+  Check((string)Call("ModelIdentity",null,"Canonical","provider/GPT-6-SOL")=="gpt-6.0-sol"&&(string)Call("ModelColors",null,"ColorHex","provider/GPT-6-SOL",false)==(string)Call("ModelColors",null,"ColorHex","gpt-6.0.0-sol",false),"protected version and provider aliases use one model number");
+  string[] solNames=((IEnumerable)((Dictionary<string,object>)families["sol"])["models"]).Cast<string>().ToArray();Check(solNames.Take(3).SequenceEqual(new[]{"gpt-6.0-sol","gpt-6.1-sol","gpt-5.6-sol"}),"protected Sol numbering is independent of major-version order");
+  new Application{ShutdownMode=ShutdownMode.OnExplicitShutdown};var brush=(SolidColorBrush)Call("ModelColors",null,"For","gpt-6.1-sol");var prefs=New("Preferences");
+  foreach(string mode in new[]{"dark","light"}){Set(prefs,"ThemeMode",mode);Call("Theme",null,"Apply",prefs);Check(Object.ReferenceEquals(brush,Call("ModelColors",null,"For","provider/GPT-6.1-SOL"))&&brush.Color==(Color)ColorConverter.ConvertFromString((string)Call("ModelColors",null,"ColorHex","gpt-6.1-sol",mode=="light")),"protected shared brush follows "+mode+" theme without replacement");}
+  string added="gpt-99.1-astra";var addedBrush=(SolidColorBrush)Call("ModelColors",null,"For",added);var astra=(Dictionary<string,object>)families["astra"];var namesBefore=((IEnumerable)astra["models"]).Cast<object>();astra["models"]=namesBefore.Concat(new object[]{added}).ToArray();document["revision"]=revision+1;
+  var extension=Call("ModelPaletteCatalog",null,"Parse",json.Serialize(document));Color oldFallback=addedBrush.Color;int oldTheme=(int)Call("Theme",null,"get_Revision");
+  Check((bool)Call("ModelPaletteCatalog",null,"Install",extension)&&Object.ReferenceEquals(addedBrush,Call("ModelColors",null,"For",added))&&addedBrush.Color!=oldFallback&&(int)Call("Theme",null,"get_Revision")>oldTheme,"protected append-only configuration updates existing brush and drawing revision");
+  Check(!(bool)Call("ModelPaletteCatalog",null,"Install",extension),"protected identical configuration avoids redundant install");
+  bool rejected=false;try{Call("ModelPaletteCatalog",null,"Install",snapshot);}catch(TargetInvocationException ex){rejected=ex.InnerException is InvalidDataException;}Check(rejected,"protected palette refuses revision rollback");
+  string[] unknown={"fixture-future-a","fixture-future-b"};var before=unknown.Select(n=>(string)Call("ModelColors",null,"ColorHex",n,false)).ToArray();foreach(string name in unknown.Reverse())Call("ModelColors",null,"For",name);
+  Check(before.SequenceEqual(unknown.Select(n=>(string)Call("ModelColors",null,"ColorHex",n,false)))&&File.ReadAllBytes(path).SequenceEqual(old),"protected unknown colors ignore discovery order and never rewrite old registry");
+  File.WriteAllText(Path.Combine(dir,"verification.json"),"{\"passed\":true,\"scope\":\"model-colors\",\"checks\":"+checks+"}");Console.WriteLine("MODEL COLOR RELEASE CHECKS: "+checks);
+ }
  [STAThread] static int Main(string[] args)
  {
   try{
@@ -418,6 +484,7 @@ internal static class ReleaseProbe
    assembly=Assembly.LoadFrom(Path.GetFullPath(args[0]));map=File.ReadAllText(args[1]);string dir=args[2];Directory.CreateDirectory(dir);
    if(args.Contains("--floating-only")){FloatingEffectsOnly(dir);return 0;}
    if(args.Contains("--period-only")){PeriodOnly(dir);return 0;}
+   if(args.Contains("--color-only")){ColorsOnly(dir);return 0;}
    if(args.Contains("--model-share-only")){ModelShareOnly(dir);return 0;}if(args.Contains("--milestone-only")){MilestoneOnly(dir);return 0;}
    Check(assembly.GetType("CodexUserData.WidgetWindow")==null&&Regex.Matches(map,@"^\[CodexUserData\].+ -> \[CodexUserData\]",RegexOptions.Multiline).Count>20,"implementation types are renamed");
    var json=new JavaScriptSerializer();var prefs=New("Preferences");Set(prefs,"MinimizeToTray",true);Set(prefs,"PriceOverrides",new Dictionary<string,decimal[]>{{"fixture-model",new[]{1m,.1m,0m,2m}}});
@@ -442,8 +509,7 @@ internal static class ReleaseProbe
    var sol=(decimal[])Call("ApiPrices",null,"Default","gpt-6-sol");Check(sol.SequenceEqual(new[]{2m,.2m,2.5m,10m}),"protected built-in catalog contains the current GPT-6 Sol baseline");
    string catalogJson=json.Serialize(new{schema=1,revision=2026092301L,checkedOn="2026-09-23",basis="standard-short",source="https://developers.openai.com/api/docs/pricing",models=new Dictionary<string,decimal[]>{{"gpt-release-fixture",new[]{1m,.1m,.2m,2m}}}});
    Check(Call("PriceCatalog",null,"Parse",catalogJson)!=null,"protected price catalog keeps its public JSON schema");
-   Call("ModelColorRegistry",null,"Initialize",true);Call("ModelColors",null,"EnsureModels",(object)new[]{"gpt-future-alpha","gpt-future-beta"});
-   string futureA=(string)Call("ModelColors",null,"ColorHex","gpt-future-alpha",false),futureB=(string)Call("ModelColors",null,"ColorHex","gpt-future-beta",false);Check(futureA!=futureB&&futureA==(string)Call("ModelColors",null,"ColorHex","GPT-FUTURE-ALPHA",false)&&File.Exists(Path.Combine((string)AppDomain.CurrentDomain.GetData("CodexUserData.TestDataFolder"),"model-colors.json")),"protected future-model colors stay distinct, deterministic and persistent");
+   Check((string)Call("ModelColors",null,"ColorHex","gpt-future-alpha",false)==(string)Call("ModelColors",null,"ColorHex","GPT-FUTURE-ALPHA",false)&&!File.Exists(Path.Combine((string)AppDomain.CurrentDomain.GetData("CodexUserData.TestDataFolder"),"model-colors.json")),"future model colors are deterministic without a local color registry");
    string shape=Path.Combine(dir,"shape");Directory.CreateDirectory(shape);File.WriteAllText(Path.Combine(shape,"index.html"),"<!doctype html><b>fixture</b>");File.WriteAllText(Path.Combine(shape,"shape.json"),"{\"apiVersion\":1,\"name\":\"fixture\",\"entry\":\"index.html\",\"width\":240,\"height\":80}");var manifest=Call("ShapeManifest",null,"Read",Path.Combine(shape,"shape.json"));Check((int)Get(manifest,"apiVersion")==1&&(double)Get(manifest,"width")==240,"protected HTML manifest preserves its public JSON schema");
    Check((bool)Call("CustomShapeView",null,"Allowed","https://shape.codexuserdata.local/index.html")&&!(bool)Call("CustomShapeView",null,"Allowed","file:///C:/outside"),"protected HTML origin checks remain active");
    string legacy=Path.Combine(dir,"legacy-data"),portable=Path.Combine(dir,"portable-data");Directory.CreateDirectory(legacy);File.WriteAllText(Path.Combine(legacy,"widget-settings.json"),"{\"Width\":350}");Call("PortableStore",null,"Initialize",portable,legacy);File.WriteAllText(Path.Combine(portable,"widget-settings.json"),"keep-new");Call("PortableStore",null,"Initialize",portable,legacy);Check(File.ReadAllText(Path.Combine(portable,"widget-settings.json"))=="keep-new"&&File.ReadAllText(Path.Combine(legacy,"widget-settings.json"))=="{\"Width\":350}","protected migration preserves existing portable data and legacy originals");

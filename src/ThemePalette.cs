@@ -86,7 +86,13 @@ namespace CodexUserData
             var heat=IsLight?new[]{"#F0F3F8","#DBE8FB","#A7CAF5","#6C9EE8","#477BD4"}:new[]{"#2B3142","#35496B","#4B70A4","#7098CC","#A7C8EE"};for(int i=0;i<5;i++)Set(HeatLevels[i],heat[i]);
             if(custom){var c=Surface.Color;c.A=(byte)Math.Round(p.ThemeCardOpacity*2.55);Surface.Color=c;c=Background.Color;c.A=(byte)Math.Round(Math.Min(100,p.ThemeCardOpacity+8)*2.55);Background.Color=c;Paint(WindowBackground,Gradient(p,false));Paint(Frame,Gradient(p,true));}
             else{var g=new LinearGradientBrush(ColorOf(IsLight?"#FFFFFF":"#20262E"),ColorOf(IsLight?"#F3F6F9":"#11161B"),65);g.Freeze();Paint(WindowBackground,g);Paint(Frame,B(IsLight?"#D4DCE5":"#3C4652"));}
-            ModelColors.RefreshTheme();Revision++;
+            ModelColors.RefreshTheme();InvalidateColors();
+        }
+        // Frozen chart drawings also carry model colors. Reuse the theme
+        // revision to invalidate these caches without rescanning usage logs.
+        internal static void InvalidateColors()
+        {
+            Revision++;
             for(int i=themedViews.Count-1;i>=0;i--){var v=themedViews[i].Target as FrameworkElement;if(v==null)themedViews.RemoveAt(i);else v.InvalidateVisual();}
         }
     }

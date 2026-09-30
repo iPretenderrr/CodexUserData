@@ -19,8 +19,14 @@ namespace CodexUserData
         private readonly Func<DateTime,DateTime,CancellationToken,Task<UsageSnapshot>> readRange;
         private readonly Func<string> currentScope;
         private readonly UsageChart chart=new UsageChart(false);
+        private readonly ModelShareChart alternative=new ModelShareChart();
         private readonly Dictionary<int,Button> ranges=new Dictionary<int,Button>();
         private readonly Dictionary<string,Button> modes=new Dictionary<string,Button>();
+        private readonly Dictionary<string,Button> views=new Dictionary<string,Button>();
+        private readonly Grid rangeHeader=new Grid();
+        private readonly WrapPanel viewActions;
+        private readonly WrapPanel ranking=new WrapPanel{Margin=new Thickness(0,12,0,0),Visibility=Visibility.Collapsed};
+        private readonly WrapPanel aggregationChoices;
         private readonly StackPanel headerActions=new StackPanel{Orientation=Orientation.Horizontal,HorizontalAlignment=HorizontalAlignment.Right};
         private readonly TextBlock title=Theme.Text("模型占比 · 每日",13,Theme.Ink);
         private readonly DockPanel state=new DockPanel{Margin=new Thickness(0,3,0,2)};
@@ -38,6 +44,10 @@ namespace CodexUserData
         private int rangeDays=30,generation;
         private bool loading,pending,pumpQueued,disposed;
         private string failure,snapshotFailure,aggregation="daily";
+        private string view="curve";
+        private DailyUsage[] viewBuckets=new DailyUsage[0];
+        private Dictionary<string,long> viewTotals=new Dictionary<string,long>(StringComparer.OrdinalIgnoreCase);
+        private bool viewHourly,rankingDirty=true;
 
         internal ModelSharePanel(Func<DateTime,DateTime,CancellationToken,Task<UsageSnapshot>> loader,Func<string> scope)
         {
@@ -47,19 +57,22 @@ namespace CodexUserData
             var header=new Grid();header.ColumnDefinitions.Add(new ColumnDefinition());header.ColumnDefinitions.Add(new ColumnDefinition{Width=GridLength.Auto});header.RowDefinitions.Add(new RowDefinition{Height=GridLength.Auto});header.RowDefinitions.Add(new RowDefinition{Height=GridLength.Auto});
             title.TextWrapping=TextWrapping.Wrap;title.VerticalAlignment=VerticalAlignment.Center;header.Children.Add(title);
             Grid.SetColumn(headerActions,1);header.Children.Add(headerActions);Children.Add(header);
-            var clear=Theme.Button("清除选择","清除所选时段（Esc）",66);clear.Height=27;clear.FontSize=11;clear.Margin=new Thickness(0,0,6,0);clear.Click+=delegate{ClearSelection();};headerActions.Children.Add(clear);
-            headerActions.Children.Add(Theme.AggregationSelector(modes,"模型占比",SetAggregation));
-            var choices=new WrapPanel{Margin=new Thickness(-2,9,0,8)};Children.Add(choices);
+            var clear=Theme.Button("清除选择","清除所选时段和模型（Esc）",66);clear.Height=27;clear.FontSize=11;clear.Margin=new Thickness(0,0,6,0);clear.Click+=delegate{ClearAll();};headerActions.Children.Add(clear);
+            aggregationChoices=Theme.AggregationSelector(modes,"模型占比",SetAggregation);headerActions.Children.Add(aggregationChoices);
+            rangeHeader.Margin=new Thickness(0,9,0,8);rangeHeader.ColumnDefinitions.Add(new ColumnDefinition());rangeHeader.ColumnDefinitions.Add(new ColumnDefinition{Width=GridLength.Auto});rangeHeader.RowDefinitions.Add(new RowDefinition{Height=GridLength.Auto});rangeHeader.RowDefinitions.Add(new RowDefinition{Height=GridLength.Auto});Children.Add(rangeHeader);
+            var choices=new WrapPanel{Margin=new Thickness(-2,0,0,0)};rangeHeader.Children.Add(choices);
             foreach(int days in new[]{1,7,14,30,60,90,180})
             {
                 int choice=days;var button=Theme.Button(days==1?"当天":days+"D",days==1?"当天按小时显示":"近 "+days+" 天按日显示",42);button.Height=27;button.FontSize=11;button.Margin=new Thickness(0,0,3,4);
                 button.Click+=delegate{SelectRange(choice);};ranges.Add(days,button);choices.Children.Add(button);
             }
             customButton=Theme.Button("自定义","选择日期和时间范围",64);customButton.Height=27;customButton.FontSize=11;customButton.Margin=new Thickness(0,0,3,4);customButton.Click+=delegate{OpenRange();};choices.Children.Add(customButton);
+            viewActions=Theme.ChartViewSelector(views,"ModelShare",SetView);
+            Grid.SetColumn(viewActions,1);rangeHeader.Children.Add(viewActions);
             source.TextWrapping=TextWrapping.Wrap;Children.Add(source);
             retry=Theme.Button("重试","重新读取当前自定义范围",44);retry.Height=24;retry.Visibility=Visibility.Collapsed;retry.Click+=delegate{Refresh();};DockPanel.SetDock(retry,Dock.Right);state.Children.Add(retry);status.TextWrapping=TextWrapping.Wrap;state.Children.Add(status);Children.Add(state);
-            chart.Height=350;Children.Add(chart);Children.Add(legend);warning.TextWrapping=TextWrapping.Wrap;Children.Add(warning);detail.Child=detailRows;Children.Add(detail);
-            chart.Pick+=Pick;PreviewKeyDown+=OnKeyDown;Loaded+=OnLoaded;Unloaded+=OnUnloaded;IsVisibleChanged+=OnVisibleChanged;
+            chart.Height=alternative.Height=350;var plot=new Grid();plot.Children.Add(chart);plot.Children.Add(alternative);alternative.Visibility=Visibility.Collapsed;Children.Add(plot);Children.Add(legend);Children.Add(ranking);warning.TextWrapping=TextWrapping.Wrap;Children.Add(warning);detail.Child=detailRows;Children.Add(detail);
+            chart.Pick+=Pick;alternative.Pick+=PickAlternative;alternative.SizeChanged+=AlternativeSizeChanged;PreviewKeyDown+=OnKeyDown;Loaded+=OnLoaded;Unloaded+=OnUnloaded;IsVisibleChanged+=OnVisibleChanged;
             SizeChanged+=OnSizeChanged;UpdateButtons();
         }
         private bool Active{get{return !disposed&&IsLoaded&&IsVisible&&(owner==null||owner.WindowState!=WindowState.Minimized);}}
@@ -82,11 +95,30 @@ namespace CodexUserData
         {
             if(disposed||!modes.ContainsKey(mode)||aggregation==mode)return;aggregation=mode;viewSignature=null;ClearSelection();UpdateButtons();if(Active)Render();
         }
+        internal void SetView(string mode)
+        {
+            if(disposed||!views.ContainsKey(mode)||view==mode)return;
+            view=mode;ClearSelection();UpdateButtons();UpdateView();
+        }
+        private void UpdateView()
+        {
+            bool curve=view=="curve";chart.Visibility=curve?Visibility.Visible:Visibility.Collapsed;alternative.Visibility=curve?Visibility.Collapsed:Visibility.Visible;
+            legend.Visibility=curve?Visibility.Visible:Visibility.Collapsed;ranking.Visibility=curve?Visibility.Collapsed:Visibility.Visible;
+            aggregationChoices.Visibility=view=="treemap"?Visibility.Collapsed:Visibility.Visible;
+            // All views consume the same in-memory range. Switching presentation
+            // never starts a disk read or changes the current date range.
+            if(!curve&&Active){alternative.SetData(viewBuckets,viewTotals,view,aggregation=="cumulative",viewHourly);EnsureRanking();}
+            Highlight(highlighted);
+        }
+        private void Highlight(string model){chart.Highlight(model);alternative.Highlight(model);}
+        private void SelectModel(string model)
+        {highlighted=String.Equals(highlighted,model,StringComparison.OrdinalIgnoreCase)?null:model;Highlight(highlighted);if(view=="treemap")alternative.SelectTile(highlighted);UpdateLegendSelection();}
         private void ResetSource(string scope)
         {
-            generation++;if(cancellation!=null)cancellation.Cancel();knownScope=scope;snapshot=customSnapshot=null;pending=false;failure=snapshotFailure=null;viewSignature=null;highlighted=null;chart.Highlight(null);ClearSelection();
+            generation++;if(cancellation!=null)cancellation.Cancel();knownScope=scope;snapshot=customSnapshot=null;pending=false;failure=snapshotFailure=null;viewSignature=null;highlighted=null;Highlight(null);ClearSelection();
             // Clear old-source values immediately, even when the page is hidden.
             chart.SetData(null,rangeDays,false,0,false,"daily",false,true);legend.Children.Clear();source.Text="";status.Text="等待当前来源的数据";warning.Text="";retry.Visibility=Visibility.Collapsed;
+            viewBuckets=new DailyUsage[0];viewTotals.Clear();ranking.Children.Clear();rankingDirty=true;alternative.SetData(viewBuckets,viewTotals,view, false,false);
         }
         internal void SelectRange(int days)
         {
@@ -107,10 +139,11 @@ namespace CodexUserData
         }
         private void UpdateButtons()
         {
-            title.Text="模型占比 · "+(aggregation=="weekly"?"每周":aggregation=="cumulative"?"累计":"每日");
+            title.Text="模型占比 · "+(view=="treemap"?"区间合计":aggregation=="weekly"?"每周":aggregation=="cumulative"?"累计":"每日");
             foreach(var pair in ranges){bool active=customRange==null&&rangeDays==pair.Key;pair.Value.Background=active?Theme.Hover:Brushes.Transparent;pair.Value.Foreground=active?Theme.Accent:Theme.Muted;}
             customButton.Background=customRange!=null?Theme.Hover:Brushes.Transparent;customButton.Foreground=customRange!=null?Theme.Accent:Theme.Muted;
             foreach(var pair in modes){bool active=pair.Key==aggregation;pair.Value.Background=active?Theme.Hover:Brushes.Transparent;pair.Value.Foreground=active?Theme.Accent:Theme.Muted;System.Windows.Automation.AutomationProperties.SetItemStatus(pair.Value,active?"已选中":"未选中");}
+            foreach(var pair in views){bool active=pair.Key==view;pair.Value.Background=active?Theme.Hover:Brushes.Transparent;pair.Value.Foreground=active?Theme.Accent:Theme.Muted;System.Windows.Automation.AutomationProperties.SetItemStatus(pair.Value,active?"已选中":"未选中");}
         }
         internal void Refresh()
         {
@@ -155,22 +188,59 @@ namespace CodexUserData
             chart.SetData(plotted,aggregation=="daily"&&customRange==null?rangeDays:plotted.Length,plotHourly,plotThrough,false,"daily",false,true);
             var totals=new Dictionary<string,long>(StringComparer.OrdinalIgnoreCase);
             foreach(var day in visible)foreach(var item in ModelShareValues.Tokens(day)){long previous;totals.TryGetValue(item.Key,out previous);totals[item.Key]=checked(previous+item.Value);}
-            long total=totals.Values.Sum();ModelColors.EnsureModels(totals.Keys);legend.Children.Clear();
-            if(highlighted!=null&&!totals.ContainsKey(highlighted))highlighted=null;chart.Highlight(highlighted);
+            long total=totals.Values.Sum();legend.Children.Clear();
+            viewBuckets=aggregation=="daily"?visible:plotted;viewTotals=totals;viewHourly=plotHourly;rankingDirty=true;
+            if(highlighted!=null&&!totals.ContainsKey(highlighted))highlighted=null;Highlight(highlighted);
             foreach(var pair in totals.OrderByDescending(p=>p.Value))
             {
                 string model=pair.Key;double percent=ModelShareValues.Percent(pair.Value,total);string share=percent>0&&percent<.1?"<0.1%":percent.ToString("0.0",CultureInfo.InvariantCulture)+"%";
                 var button=Theme.LegendChip(model,ModelColors.For(model),share,model+" · 区间占比 "+share+"\n点击高亮，再次点击取消");button.Tag=model;SizeLegend(button);
-                button.MouseEnter+=delegate{chart.Highlight(model);};button.MouseLeave+=delegate{chart.Highlight(highlighted);};button.Click+=delegate{highlighted=String.Equals(highlighted,model,StringComparison.OrdinalIgnoreCase)?null:model;chart.Highlight(highlighted);UpdateLegendSelection();};legend.Children.Add(button);
+                button.MouseEnter+=delegate{Highlight(model);};button.MouseLeave+=delegate{Highlight(highlighted);};button.Click+=delegate{SelectModel(model);};legend.Children.Add(button);
             }
             UpdateLegendSelection();
             if(total==0)legend.Children.Add(Theme.Text(data==null?(customRange==null&&snapshot!=null&&snapshot.DataUnavailable?"当前数据不可用":"等待数据"):"该范围没有已记录用量",11,Theme.Muted));
+            UpdateView();
+            if(view!="curve")
+            {
+                if(view=="treemap"&&highlighted!=null)RenderModelDetail(highlighted);
+                else if(view=="bars"&&alternative.SelectedBucket!=null)RenderDetail(alternative.SelectedBucket);
+                else{detail.Visibility=Visibility.Collapsed;detailRows.Children.Clear();}
+                return;
+            }
             int selected=selectedDate==null?-1:Array.FindIndex(plotted,d=>d.Date==selectedDate);int first=plotHourly||customRange!=null||aggregation!="daily"?0:Math.Max(0,plotted.Length-rangeDays);
             if(selected<first||selected>=plotThrough){ClearSelection();return;}chart.Selected=selected;RenderDetail(plotted[selected]);chart.InvalidateVisual();
         }
         private void UpdateLegendSelection()
         {
             foreach(Button button in legend.Children.OfType<Button>())Theme.SelectChip(button,String.Equals(button.Tag as string,highlighted,StringComparison.OrdinalIgnoreCase));
+            foreach(Button button in ranking.Children.OfType<Button>()){bool selected=String.Equals(button.Tag as string,highlighted,StringComparison.OrdinalIgnoreCase);button.Background=selected?Theme.Hover:Brushes.Transparent;button.BorderBrush=selected?Theme.Accent:Brushes.Transparent;System.Windows.Automation.AutomationProperties.SetItemStatus(button,selected?"已选中":"未选中");}
+        }
+        private void EnsureRanking()
+        {
+            if(!rankingDirty)return;rankingDirty=false;ranking.Children.Clear();long total=viewTotals.Values.Sum();int rank=0;
+            foreach(var entry in viewTotals.OrderByDescending(p=>p.Value).ThenBy(p=>p.Key,StringComparer.OrdinalIgnoreCase))
+            {
+                string model=entry.Key;var button=Theme.Button("",model+" · "+TokenText.Full(entry.Value)+" Tokens",0);button.Tag=model;button.Height=58;button.BorderThickness=new Thickness(1);button.Padding=new Thickness(8,5,8,5);button.HorizontalContentAlignment=HorizontalAlignment.Stretch;button.Margin=new Thickness(0,0,0,4);
+                var row=new Grid();row.ColumnDefinitions.Add(new ColumnDefinition{Width=new GridLength(24)});row.ColumnDefinitions.Add(new ColumnDefinition{Width=new GridLength(17)});row.ColumnDefinitions.Add(new ColumnDefinition());row.ColumnDefinitions.Add(new ColumnDefinition{Width=GridLength.Auto});row.Children.Add(Theme.Text((++rank).ToString(CultureInfo.InvariantCulture)+".",11,Theme.Muted));
+                var dot=new System.Windows.Shapes.Ellipse{Width=8,Height=8,Fill=ModelColors.FillFor(model),HorizontalAlignment=HorizontalAlignment.Left,VerticalAlignment=VerticalAlignment.Center};Grid.SetColumn(dot,1);row.Children.Add(dot);
+                var name=Theme.Text(model,12,Theme.Ink);name.TextTrimming=TextTrimming.CharacterEllipsis;name.Margin=new Thickness(0,0,10,0);Grid.SetColumn(name,2);row.Children.Add(name);
+                var amounts=new StackPanel{HorizontalAlignment=HorizontalAlignment.Right,VerticalAlignment=VerticalAlignment.Center};var tokens=Theme.Text(TokenText.Compact(entry.Value),12,Theme.Ink);tokens.HorizontalAlignment=HorizontalAlignment.Right;amounts.Children.Add(tokens);var percent=Theme.Text(ModelShareValues.Percent(entry.Value,total).ToString("0.0",CultureInfo.InvariantCulture)+"%",11,Theme.Muted);percent.HorizontalAlignment=HorizontalAlignment.Right;percent.Margin=new Thickness(0,3,0,0);amounts.Children.Add(percent);Grid.SetColumn(amounts,3);row.Children.Add(amounts);button.Content=row;
+                button.MouseEnter+=delegate{Highlight(model);};button.MouseLeave+=delegate{Highlight(highlighted);};button.Click+=delegate{SelectModel(model);if(view=="treemap"){if(highlighted==null)ClearSelection();else RenderModelDetail(highlighted);}};ranking.Children.Add(button);
+            }
+            if(total==0)ranking.Children.Add(Theme.Text(snapshot==null||snapshot.DataUnavailable?"等待可用数据":"该范围没有已记录用量",11,Theme.Muted));
+            SizeRanking();UpdateLegendSelection();
+        }
+        private void SizeRanking()
+        {int columns=ActualWidth>=680?2:1;foreach(Button button in ranking.Children.OfType<Button>())button.Width=Math.Max(1,Math.Floor(ActualWidth/columns));}
+        private void PickAlternative(DailyUsage bucket,string model)
+        {
+            if(view=="treemap"){SelectModel(model);if(highlighted==null)ClearSelection();else RenderModelDetail(highlighted);}
+            else if(bucket!=null){selectedDate=bucket.Date;RenderDetail(bucket);}
+        }
+        private void RenderModelDetail(string model)
+        {
+            long value;if(!viewTotals.TryGetValue(model,out value)){ClearSelection();return;}
+            detailRows.Children.Clear();var text=Theme.Text(model+" · "+TokenText.Full(value)+" Tokens · "+ModelShareValues.Percent(value,viewTotals.Values.Sum()).ToString("0.0",CultureInfo.InvariantCulture)+"%",12,Theme.Ink);text.TextWrapping=TextWrapping.Wrap;detailRows.Children.Add(text);detail.Visibility=Visibility.Visible;
         }
         private void UpdateStatus()
         {
@@ -195,25 +265,35 @@ namespace CodexUserData
             }
             detail.Visibility=Visibility.Visible;
         }
-        internal void ClearSelection(){selectedDate=null;chart.ClearPointer();detail.Visibility=Visibility.Collapsed;detailRows.Children.Clear();}
-        private void OnKeyDown(object sender,KeyEventArgs e){if(e.Key==Key.Escape){ClearSelection();e.Handled=true;}}
+        internal void ClearSelection(){selectedDate=null;chart.ClearPointer();alternative.ClearPointer();detail.Visibility=Visibility.Collapsed;detailRows.Children.Clear();}
+        private void ClearAll(){highlighted=null;Highlight(null);UpdateLegendSelection();ClearSelection();}
+        private void OnKeyDown(object sender,KeyEventArgs e){if(e.Key==Key.Escape){ClearAll();e.Handled=true;}}
         private void SizeLegend(Button button)
         {Theme.FitChip(button,ActualWidth);}
         private void OnSizeChanged(object sender,SizeChangedEventArgs e)
         {
             bool stacked=ActualWidth<520;Grid.SetRow(headerActions,stacked?1:0);Grid.SetColumn(headerActions,stacked?0:1);Grid.SetColumnSpan(headerActions,stacked?2:1);headerActions.Margin=stacked?new Thickness(0,5,0,0):new Thickness(0);
-            chart.Height=ActualWidth<420?270:350;foreach(Button button in legend.Children.OfType<Button>())SizeLegend(button);
+            bool wrapViews=ActualWidth<760;Grid.SetRow(viewActions,wrapViews?1:0);Grid.SetColumn(viewActions,wrapViews?0:1);Grid.SetColumnSpan(viewActions,wrapViews?2:1);Grid.SetColumnSpan(rangeHeader.Children[0],wrapViews?2:1);viewActions.Margin=wrapViews?new Thickness(0,3,0,0):new Thickness(12,0,0,0);
+            chart.Height=alternative.Height=ActualWidth<420?270:350;foreach(Button button in legend.Children.OfType<Button>())SizeLegend(button);SizeRanking();
+        }
+        private void AlternativeSizeChanged(object sender,SizeChangedEventArgs e)
+        {
+            // A narrow viewport can merge a previously selected daily column.
+            // Remove its old detail if that exact displayed interval no longer exists.
+            if(view!="bars"||selectedDate==null)return;
+            if(alternative.SelectionForLayout()==null){selectedDate=null;detail.Visibility=Visibility.Collapsed;detailRows.Children.Clear();}
         }
         private void OnLoaded(object sender,RoutedEventArgs e){if(disposed)return;DetachOwner();owner=Window.GetWindow(this);ownerMinimized=owner!=null&&owner.WindowState==WindowState.Minimized;if(owner!=null)owner.StateChanged+=OwnerStateChanged;Refresh();}
         private void OnUnloaded(object sender,RoutedEventArgs e){Suspend();DetachOwner();}
         private void OnVisibleChanged(object sender,DependencyPropertyChangedEventArgs e){if(IsVisible)Refresh();else Suspend();}
         private void OwnerStateChanged(object sender,EventArgs e){bool minimized=owner!=null&&owner.WindowState==WindowState.Minimized;if(minimized==ownerMinimized)return;ownerMinimized=minimized;if(minimized)Suspend();else if(Active)Refresh();}
-        private void Suspend(){generation++;pending=false;if(cancellation!=null)cancellation.Cancel();chart.ClearPointer();viewSignature=null;}
+        private void Suspend(){generation++;pending=false;if(cancellation!=null)cancellation.Cancel();chart.ClearPointer();alternative.ClearHover();viewSignature=null;}
         private void DetachOwner(){if(owner!=null)owner.StateChanged-=OwnerStateChanged;owner=null;}
         public void Dispose()
         {
-            if(disposed)return;disposed=true;Suspend();DetachOwner();Loaded-=OnLoaded;Unloaded-=OnUnloaded;IsVisibleChanged-=OnVisibleChanged;SizeChanged-=OnSizeChanged;PreviewKeyDown-=OnKeyDown;chart.Pick-=Pick;
+            if(disposed)return;disposed=true;Suspend();DetachOwner();Loaded-=OnLoaded;Unloaded-=OnUnloaded;IsVisibleChanged-=OnVisibleChanged;SizeChanged-=OnSizeChanged;PreviewKeyDown-=OnKeyDown;chart.Pick-=Pick;alternative.Pick-=PickAlternative;alternative.SizeChanged-=AlternativeSizeChanged;
             snapshot=customSnapshot=null;ClearSelection();legend.Children.Clear();chart.SetData(null,0,false,0,false,"daily",false,true);
+            viewBuckets=new DailyUsage[0];viewTotals.Clear();ranking.Children.Clear();alternative.SetData(viewBuckets,viewTotals,view,false,false);
         }
     }
 }
