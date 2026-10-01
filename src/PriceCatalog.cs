@@ -22,9 +22,8 @@ namespace CodexUserData
         public Dictionary<string,decimal[]> models {get;set;}
     }
 
-    // The client never scrapes OpenAI's pricing page. A small, schema-checked catalog in
-    // this repository is reviewed against the official page and cached as the last known
-    // good value. Network failure therefore cannot block startup or erase working prices.
+    // Repository-maintained fallback for models absent from the official text-token table.
+    // Official prices and user overrides have separate, higher-priority lookups.
     internal static class PriceCatalog
     {
         internal const string Endpoint="https://raw.githubusercontent.com/iPretenderrr/CodexUserData/main/model-prices.json";
@@ -51,6 +50,7 @@ namespace CodexUserData
             try
             {
                 if(File.Exists(CachePath)&&DateTime.UtcNow-File.GetLastWriteTimeUtc(CachePath)<RefreshInterval)return false;
+                ServicePointManager.SecurityProtocol=SecurityProtocolType.Tls12;
                 var request=(HttpWebRequest)WebRequest.Create(Endpoint);request.Method="GET";
                 request.UserAgent="CodexUserData/"+typeof(PriceCatalog).Assembly.GetName().Version.ToString(3);
                 request.Accept="application/json";request.AllowAutoRedirect=false;
@@ -64,8 +64,8 @@ namespace CodexUserData
                         if(response.StatusCode!=HttpStatusCode.OK)throw new InvalidDataException("价格清单响应无效。");
                         if(response.ContentLength>MaxResponseBytes)throw new InvalidDataException("价格清单响应过大。");
                         string json;using(var stream=response.GetResponseStream())json=await ReadResponseAsync(stream,deadline.Token).ConfigureAwait(false);
-                        var document=Parse(json);bool changed=ApiPrices.ConfigureCatalog(document.models,document.revision,document.checkedOn);
-                        Save(json);return changed;
+                        var document=Parse(json);
+                        return ApiPrices.ConfigureCatalog(document.models,document.revision,document.checkedOn,()=>Save(json));
                     }
                 }
             }

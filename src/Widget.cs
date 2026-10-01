@@ -22,6 +22,7 @@ namespace CodexUserData
     {
         private Preferences prefs;
         private readonly bool preview;
+        private readonly OfficialPriceSync priceSync;
         private bool busy,closed,ready,changingLayout;
         private double expandedRestoreHeight;
         private FloatingBall ball;
@@ -98,6 +99,13 @@ namespace CodexUserData
         internal WidgetWindow(Preferences preferences,bool isPreview)
         {
             prefs=preferences;prefs.Validate();Theme.Apply(prefs);preview=isPreview;expandedRestoreHeight=Math.Max(480,prefs.Height);Title=Program.WindowTitle;Theme.InstallStyles(this);
+            if(!preview)
+            {
+                priceSync=new OfficialPriceSync();
+                priceSync.Changed+=delegate{if(!Dispatcher.HasShutdownStarted)Dispatcher.BeginInvoke(new Action(RefreshModelPrices));};
+                Loaded+=delegate{priceSync.ObserveModels(prefs.KnownModels);};
+                Closing+=delegate{priceSync.Dispose();};
+            }
             Width=prefs.Width;Height=prefs.Collapsed?305:prefs.Height;MinWidth=260;MinHeight=280;MaxWidth=1100;MaxHeight=1000;
             WindowStyle=WindowStyle.None;ResizeMode=ResizeMode.CanResize;AllowsTransparency=true;Background=Brushes.Transparent;Opacity=prefs.Opacity;
             Topmost=prefs.Pinned;ShowInTaskbar=true;FontFamily=new FontFamily("Segoe UI, Microsoft YaHei UI");UseLayoutRounding=true;SnapsToDevicePixels=true;
@@ -244,7 +252,7 @@ namespace CodexUserData
         {
             if(closed)return;
             if(settingsWindow!=null){settingsWindow.Activate();return;}
-            Persist();double original=Opacity;var settings=new SettingsWindow(prefs,v=>Opacity=v,()=>Diagnostics.Create(prefs,snapshot,activityReport,quota.MainBucket)){Owner=this};
+            Persist();double original=Opacity;var settings=new SettingsWindow(prefs,v=>Opacity=v,()=>Diagnostics.Create(prefs,snapshot,activityReport,quota.MainBucket),priceSync){Owner=this};
             settingsWindow=settings;bool? accepted;
             try{accepted=settings.ShowDialog();}finally{settingsWindow=null;}
             if(closed)return;
@@ -586,6 +594,7 @@ namespace CodexUserData
         }
         internal void ApplySnapshot(UsageSnapshot s)
         {
+            if(priceSync!=null)priceSync.ObserveModels(s.KnownModels.Concat(s.Models.Select(m=>m.Model)));
             if(modelSharePanel!=null)modelSharePanel.Apply(s,MilestoneScope(),Scope());
             if(milestonePanel!=null)milestonePanel.Refresh();
             if(milestoneCurvePanel!=null)milestoneCurvePanel.Refresh();

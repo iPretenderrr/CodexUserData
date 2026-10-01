@@ -20,19 +20,28 @@ namespace CodexUserData
         }
         private readonly Dictionary<string,Row> rows=new Dictionary<string,Row>(StringComparer.OrdinalIgnoreCase);
         private readonly Preferences draft;
+        private readonly OfficialPriceSync priceSync;
+        private bool updatingDefaults;
         private readonly StackPanel list=new StackPanel();
         private readonly TextBlock status=Theme.Text("正在补齐两个来源的全部历史模型…",11,Theme.Muted),error=Theme.Text("",11,Theme.Warning);
         private readonly TextBox search=Theme.Input("");
         private volatile bool closed;
         internal Dictionary<string,decimal[]> Result;
         internal string[] KnownModels;
-        internal PriceEditor(Preferences preferences)
+        internal PriceEditor(Preferences preferences,OfficialPriceSync sync=null)
         {
-            draft=preferences.Clone();Title="模型价格";Width=650;Height=730;MinWidth=360;MinHeight=440;MaxHeight=SystemParameters.WorkArea.Height;ShowInTaskbar=false;WindowStartupLocation=WindowStartupLocation.CenterOwner;
+            draft=preferences.Clone();priceSync=sync;Title="模型价格";Width=650;Height=730;MinWidth=360;MinHeight=440;MaxHeight=SystemParameters.WorkArea.Height;ShowInTaskbar=false;WindowStartupLocation=WindowStartupLocation.CenterOwner;
             FontFamily=new System.Windows.Media.FontFamily("Segoe UI, Microsoft YaHei UI");
             var root=new DockPanel{Margin=new Thickness(18,0,18,16)};SetBody(root,"模型价格","API EQUIVALENT · USD",true);
             var intro=new StackPanel();DockPanel.SetDock(intro,Dock.Top);root.Children.Add(intro);
-            var note=Theme.Text("每百万 Tokens 的美元价格。在线基准每天最多检查一次，失败时沿用缓存；自定义价格始终优先。\n留空或没有价格按 0 估算，不代表实际免费；仅影响等效估算。",11,Theme.Muted);note.TextWrapping=TextWrapping.Wrap;note.Margin=new Thickness(0,0,0,10);intro.Children.Add(note);
+            var note=Theme.Text("每百万 Tokens 的美元价格 · Standard 短上下文。发现模型后自动核对官方表，已确认价格每天复查；自定义价格优先。\n未列出或更新失败时保留已有价格；缺项按 0 估算，不代表实际免费。",11,Theme.Muted);note.TextWrapping=TextWrapping.Wrap;note.Margin=new Thickness(0,0,0,10);intro.Children.Add(note);
+            var refresh=Theme.Button("更新官方价格","立即核对模型官方价格",112);refresh.HorizontalAlignment=HorizontalAlignment.Right;refresh.IsEnabled=priceSync!=null;intro.Children.Add(refresh);
+            refresh.Click+=async delegate
+            {
+                refresh.IsEnabled=false;status.Text="正在核对官方价格…";
+                try{string message=await priceSync.RefreshAsync(rows.Keys.ToArray(),true);if(!closed){RefreshDefaults();status.Text=message;}}
+                finally{if(!closed)refresh.IsEnabled=true;}
+            };
             intro.Children.Add(Theme.Text("查找模型",10,Theme.Muted));search.Margin=new Thickness(0,5,0,0);search.ToolTip="搜索模型名称";AutomationProperties.SetName(search,"搜索模型价格");intro.Children.Add(search);search.TextChanged+=delegate{Filter();};
             status.TextWrapping=TextWrapping.Wrap;status.Margin=new Thickness(0,8,0,10);intro.Children.Add(status);
             var footer=new StackPanel{Margin=new Thickness(0,10,0,0)};DockPanel.SetDock(footer,Dock.Bottom);root.Children.Add(footer);
@@ -43,7 +52,15 @@ namespace CodexUserData
             var scroll=new ScrollViewer{Content=list,VerticalScrollBarVisibility=ScrollBarVisibility.Auto,HorizontalScrollBarVisibility=ScrollBarVisibility.Disabled};root.Children.Add(scroll);
             PreviewKeyDown+=delegate(object sender,System.Windows.Input.KeyEventArgs args){if(args.Key==System.Windows.Input.Key.Escape){args.Handled=true;WindowInteraction.CompleteDialog(this,false);}};
             AddModels(draft.KnownModels.Concat(draft.PriceOverrides.Keys).Concat(ApiPrices.DefaultModels));
-            SizeChanged+=delegate{Reflow();};Loaded+=delegate{LoadModels();};Closed+=delegate{closed=true;};
+            if(priceSync!=null)priceSync.Checked+=PricesChanged;
+            SizeChanged+=delegate{Reflow();};Loaded+=delegate{LoadModels();};Closed+=delegate{closed=true;if(priceSync!=null)priceSync.Checked-=PricesChanged;};
+        }
+        private void PricesChanged(){if(!Dispatcher.HasShutdownStarted)Dispatcher.BeginInvoke(new Action(()=>{if(!closed)RefreshDefaults();}));}
+        private void RefreshDefaults()
+        {
+            updatingDefaults=true;
+            try{foreach(var row in rows.Values){if(!row.Custom){var rate=ApiPrices.Default(row.Model);for(int i=0;i<4;i++)row.Inputs[i].Text=RateText(rate[i]);UpdateState(row);}if(priceSync!=null)row.State.ToolTip=priceSync.Status(row.Model);}}
+            finally{updatingDefaults=false;}
         }
         private async void LoadModels()
         {
@@ -64,7 +81,7 @@ namespace CodexUserData
                 catch(OperationCanceledException){}catch(Exception){failures.Add("本地 Codex 模型读取失败");}
                 return Tuple.Create(names.ToArray(),String.Join("；",failures));
             });
-            if(closed)return;AddModels(result.Item1);status.Text=rows.Count+" 个模型 · 已合并历史记录、内置价格和自定义价格"+(result.Item2.Length>0?"\n"+result.Item2:" ");
+            if(closed)return;AddModels(result.Item1);if(priceSync!=null)priceSync.ObserveModels(rows.Keys.ToArray());RefreshDefaults();status.Text=rows.Count+" 个模型"+(result.Item2.Length>0?"\n"+result.Item2:" ");
         }
         private void AddModels(IEnumerable<string> names)
         {
@@ -85,7 +102,7 @@ namespace CodexUserData
                 {
                     var cell=new StackPanel{Margin=new Thickness(3,0,3,5)};fields.Children.Add(cell);cell.Children.Add(Theme.Text(labels[i],10,Theme.Muted));
                     var input=Theme.Input(RateText(rate[i]));input.Padding=new Thickness(5);input.Margin=new Thickness(0,5,0,0);input.ToolTip=labels[i]+" · USD / 1M Tokens · 留空按 0 估算";AutomationProperties.SetName(input,model+" "+labels[i]+"价格");row.Inputs[i]=input;cell.Children.Add(input);
-                    input.TextChanged+=delegate{row.Custom=true;UpdateState(row);};
+                    input.TextChanged+=delegate{if(updatingDefaults)return;row.Custom=true;UpdateState(row);};
                 }
                 reset.Click+=delegate{var defaults=ApiPrices.Default(model);for(int i=0;i<4;i++)row.Inputs[i].Text=RateText(defaults[i]);row.Custom=false;UpdateState(row);};
             }
@@ -97,7 +114,7 @@ namespace CodexUserData
         {return DescribeRate(null,custom,rates);}
         internal static string DescribeRate(string model,bool custom,decimal[] rates)
         {
-            if(rates.All(v=>v<=0))return custom?"自定义 · 按 0":"按 0 估算";
+            if(rates.All(v=>v<0))return custom?"自定义 · 按 0":"按 0 估算";
             string source=custom?"自定义":ApiPrices.DefaultSource(model);if(String.IsNullOrEmpty(source))source="内置";
             return source+(rates.Any(v=>v<0)?" · 缺项按 0":"");
         }

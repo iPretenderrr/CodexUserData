@@ -30,19 +30,20 @@ namespace CodexUserData
     }
     internal sealed class PriceState
     {
-        internal readonly Dictionary<string,decimal[]> Overrides,Catalog;
+        internal readonly Dictionary<string,decimal[]> Overrides,Catalog,Official;
         internal readonly long CatalogRevision;
         internal readonly string CatalogCheckedOn;
-        internal PriceState(Dictionary<string,decimal[]> overrides,Dictionary<string,decimal[]> catalog,long revision,string checkedOn)
-        {Overrides=overrides;Catalog=catalog;CatalogRevision=revision;CatalogCheckedOn=checkedOn??"";}
+        internal PriceState(Dictionary<string,decimal[]> overrides,Dictionary<string,decimal[]> catalog,long revision,string checkedOn,Dictionary<string,decimal[]> official=null)
+        {Overrides=overrides;Catalog=catalog;CatalogRevision=revision;CatalogCheckedOn=checkedOn??"";Official=official??new Dictionary<string,decimal[]>(StringComparer.OrdinalIgnoreCase);}
     }
     internal static class ApiPrices
     {
-        internal const string CheckedOn="2026-09-23";
-        internal static string Basis {get{var value=current;return "模型 API 等效值 · USD / 每百万 Tokens · Standard 短上下文 · "+(value.CatalogRevision>0?"在线基准核对 "+value.CatalogCheckedOn:"内置基准核对 "+CheckedOn)+"；自定义价格优先";}}
+        internal const string CheckedOn="2026-09-30";
+        internal static string Basis {get{var value=current;return "模型 API 等效值 · USD / 每百万 Tokens · Standard 短上下文 · "+(value.Official.Count>0?"官方价格自动核对":value.CatalogRevision>0?"在线基准核对 "+value.CatalogCheckedOn:"内置基准核对 "+CheckedOn)+"；自定义价格优先";}}
         // USD / 1M tokens: fresh input, cached input, cache writes, output.
         // One explicit baseline makes historical totals comparable; not a reconstruction of invoices.
         private static readonly Dictionary<string,decimal[]> rates=new Dictionary<string,decimal[]>(StringComparer.OrdinalIgnoreCase) {
+            {"gpt-6.1-sol",new[]{2m,.1m,2.5m,10m}},
             {"gpt-6-astra",new[]{10m,1m,12.5m,50m}}, {"gpt-6-sol",new[]{2m,.2m,2.5m,10m}},
             {"gpt-6-luna",new[]{.1m,.01m,.125m,.5m}}, {"gpt-5.6-sol",new[]{4m,.4m,5m,20m}},
             {"gpt-5.6",new[]{4m,.4m,5m,20m}}, {"gpt-5.6-terra",new[]{2m,.2m,2.5m,12m}},
@@ -65,10 +66,10 @@ namespace CodexUserData
             var clean=Clean(values);lock(gate)
             {
                 var old=current;if(Same(old.Overrides,clean))return;
-                current=new PriceState(clean,old.Catalog,old.CatalogRevision,old.CatalogCheckedOn);
+                current=new PriceState(clean,old.Catalog,old.CatalogRevision,old.CatalogCheckedOn,old.Official);
             }
         }
-        internal static bool ConfigureCatalog(Dictionary<string,decimal[]> values,long revision,string checkedOn)
+        internal static bool ConfigureCatalog(Dictionary<string,decimal[]> values,long revision,string checkedOn,Action persist=null)
         {
             var clean=Clean(values);if(clean.Count==0||revision<=0)throw new InvalidDataException("价格清单为空。");
             lock(gate)
@@ -77,26 +78,35 @@ namespace CodexUserData
                 if(revision==old.CatalogRevision)
                 {
                     if(!Same(old.Catalog,clean)||!String.Equals(old.CatalogCheckedOn,checkedOn,StringComparison.Ordinal))throw new InvalidDataException("相同版本的价格清单内容发生变化。");
-                    return false;
+                    if(persist!=null)persist();return false;
                 }
-                current=new PriceState(old.Overrides,clean,revision,checkedOn);return true;
+                if(persist!=null)persist();
+                current=new PriceState(old.Overrides,clean,revision,checkedOn,old.Official);return true;
+            }
+        }
+        internal static bool ConfigureOfficial(Dictionary<string,decimal[]> values)
+        {
+            var clean=Clean(values);lock(gate)
+            {
+                var old=current;if(Same(old.Official,clean))return false;
+                current=new PriceState(old.Overrides,old.Catalog,old.CatalogRevision,old.CatalogCheckedOn,clean);return true;
             }
         }
         private static bool Same(Dictionary<string,decimal[]> left,Dictionary<string,decimal[]> right)
         {return left.Count==right.Count&&right.All(p=>left.ContainsKey(p.Key)&&left[p.Key].SequenceEqual(p.Value));}
-        internal static IEnumerable<string> DefaultModels {get{return rates.Keys.Concat(current.Catalog.Keys).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();}}
+        internal static IEnumerable<string> DefaultModels {get{var state=current;return rates.Keys.Concat(state.Catalog.Keys).Concat(state.Official.Keys).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();}}
         internal static decimal[] Default(string model)
         {
             decimal[] value;var state=current;
-            return model!=null&&(state.Catalog.TryGetValue(model,out value)||rates.TryGetValue(model,out value))?(decimal[])value.Clone():new[]{-1m,-1m,-1m,-1m};
+            return model!=null&&(state.Official.TryGetValue(model,out value)||state.Catalog.TryGetValue(model,out value)||rates.TryGetValue(model,out value))?(decimal[])value.Clone():new[]{-1m,-1m,-1m,-1m};
         }
-        internal static string DefaultSource(string model){return model!=null&&current.Catalog.ContainsKey(model)?"在线基准":model!=null&&rates.ContainsKey(model)?"内置":"";}
+        internal static string DefaultSource(string model){var state=current;return model!=null&&state.Official.ContainsKey(model)?"官方价格":model!=null&&state.Catalog.ContainsKey(model)?"在线基准":model!=null&&rates.ContainsKey(model)?"内置":"";}
         internal static decimal Estimate(string model,long input,long output,long cached,long write,out long unknown)
         {return Estimate(current,model,input,output,cached,write,out unknown);}
         internal static decimal Estimate(PriceState state,string model,long input,long output,long cached,long write,out long unknown)
         {
             decimal[] rate;state=state??current;unknown=0;
-            if(model==null||(!state.Overrides.TryGetValue(model,out rate)&&!state.Catalog.TryGetValue(model,out rate)&&!rates.TryGetValue(model,out rate))){return 0;}
+            if(model==null||(!state.Overrides.TryGetValue(model,out rate)&&!state.Official.TryGetValue(model,out rate)&&!state.Catalog.TryGetValue(model,out rate)&&!rates.TryGetValue(model,out rate))){return 0;}
             // Missing components contribute zero to this estimate; this does not assert free billing.
             return (input*Math.Max(0,rate[0])+cached*Math.Max(0,rate[1])+write*Math.Max(0,rate[2])+output*Math.Max(0,rate[3]))/1000000m;
         }
@@ -182,6 +192,24 @@ namespace CodexUserData
         internal long[] PeriodSessions,PeriodInferred;
         internal string CommonWarning;
         internal UsageSnapshot Copy(){return (UsageSnapshot)MemberwiseClone();}
+        private PriceState repricedWith;
+        // Custom ranges outlive a price refresh. Copy numeric rows rather than mutating
+        // the reader's shared memo, and use one price snapshot for every bucket.
+        internal UsageSnapshot Reprice(PriceState prices)
+        {
+            if(Object.ReferenceEquals(repricedWith,prices))return this;
+            var result=Copy();result.repricedWith=prices;result.Models=RepriceModels(Models,prices);
+            result.EquivalentUsd=result.Models.Sum(m=>m.EquivalentUsd);result.UnpricedTokens=0;
+            result.Daily=RepriceDays(Daily,prices);result.Hourly=RepriceDays(Hourly,prices);result.Timeline=RepriceDays(Timeline,prices);return result;
+        }
+        private static List<ModelUsage> RepriceModels(List<ModelUsage> models,PriceState prices)
+        {
+            return models.Select(m=>{long unknown;return new ModelUsage{Model=m.Model,Effort=m.Effort,Tokens=m.Tokens,Input=m.Input,Output=m.Output,CacheRead=m.CacheRead,CacheWrite=m.CacheWrite,Requests=m.Requests,EquivalentUsd=ApiPrices.Estimate(prices,m.Model,m.Input,m.Output,m.CacheRead,m.CacheWrite,out unknown),UnpricedTokens=unknown};}).ToList();
+        }
+        private static DailyUsage[] RepriceDays(DailyUsage[] days,PriceState prices)
+        {
+            return days.Select(d=>new DailyUsage{Date=d.Date,DisplayLabel=d.DisplayLabel,Tokens=d.Tokens,Input=d.Input,Output=d.Output,CacheRead=d.CacheRead,CacheWrite=d.CacheWrite,Reasoning=d.Reasoning,Requests=d.Requests,CostUsd=d.CostUsd,Models=RepriceModels(d.Models,prices)}).ToArray();
+        }
         internal bool DataUnavailable;
         public string[] KnownModels {get;set;}
         public List<ModelUsage> Models {get;set;}

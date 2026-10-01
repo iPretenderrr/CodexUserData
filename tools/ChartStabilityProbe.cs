@@ -75,6 +75,10 @@ namespace CodexUserData
             }
             finally{pickerWindow.Close();}
 
+            var previousPrices=ApiPrices.Snapshot();var fixturePrices=ApiPrices.Clean(previousPrices.Overrides);
+            // Keep the panel fixture consistent with its raw counters and one price
+            // state. Tiny hourly fees still exercise the scientific-notation axis.
+            fixturePrices["fixture-alpha"]=fixturePrices["fixture-beta"]=new[]{.0004m,.0004m,0m,0m};ApiPrices.Configure(fixturePrices);data=data.Reprice(ApiPrices.Snapshot());
             var panel=new HistoryPanel{Margin=new Thickness(12)};panel.Configure(true,true,7,"daily","daily",14);panel.Apply(data,"Generated chart fixture");
             var window=new Window{Width=880,Height=780,Content=new ScrollViewer{Content=panel,VerticalScrollBarVisibility=ScrollBarVisibility.Auto},ShowActivated=false,ShowInTaskbar=false};
             try
@@ -109,9 +113,9 @@ namespace CodexUserData
                 StabilityProbe.Check(trend.IsCost&&heat.IsCost&&cacheTrend.IsRate&&!cacheTrend.IsCost&&trend.Selected==-1&&detail.Heading.Contains("未选择"),"clicking the cost metric leaves the independent cache hit rate curve unchanged");
                 panel.SetModel("fixture-alpha");await Task.Delay(25);
                 var filtered=StabilityProbe.Field<UsageSnapshot>(panel,"snapshot");comparison=ChartComparison.Calculate(filtered.Daily,7,today,true,false);
-                StabilityProbe.Check(comparison.Current==14&&comparison.Previous==7&&Math.Abs(comparison.ChangePercent.Value-100)<.001&&filtered.Daily.Last().Tokens==900000,"model filtering applies to API estimates, token totals and complete-period changes together");
+                StabilityProbe.Check(comparison.Current==.0000056m&&comparison.Previous==.0000028m&&Math.Abs(comparison.ChangePercent.Value-100)<.001&&filtered.Daily.Last().Tokens==900000,"model filtering applies to API estimates, token totals and complete-period changes together");
                 var total=(TextBlock)GuideStabilityProbe.Find(panel,"TrendMetricTotal");var title=(TextBlock)GuideStabilityProbe.Find(panel,"TrendMetricTitle");var compare=(TextBlock)GuideStabilityProbe.Find(panel,"TrendComparison");
-                StabilityProbe.Check(total.Text=="$102.00"&&title.Text.Contains("USD")&&compare.Text.Contains("不含今日")&&compare.Text.Contains("按当前已读记录"),"visible current range and comparison clearly identify different time windows and USD estimates");
+                StabilityProbe.Check(total.Text==ChartValue.Money(.0003648m)&&title.Text.Contains("USD")&&compare.Text.Contains("不含今日")&&compare.Text.Contains("按当前已读记录"),"visible current range and comparison clearly identify different time windows and USD estimates");
                 int selected=data.Daily.Length-2;trend.Choose(selected,false);
                 StabilityProbe.Check(trend.Selected==-1&&detail.Heading.Contains("未选择"),"moving over a trend point does not rebuild or select the detail panel");
                 trend.Choose(selected,true);string heading=detail.Heading;heat.Choose(data.Daily.Length-3,true);panel.SetMetric(false);
@@ -128,7 +132,7 @@ namespace CodexUserData
                 data.CoverageWarnings=1;panel.Apply(data,"Generated chart fixture");panel.SetRange(7);
                 StabilityProbe.Check(compare.Text.Contains("未计入")&&!compare.Text.Contains("增加"),"a newly incomplete snapshot replaces a previously available comparison with an explanation");
             }
-            finally{window.Close();}
+            finally{window.Close();ApiPrices.Configure(previousPrices.Overrides);}
         }
     }
 }

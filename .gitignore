@@ -66,6 +66,8 @@
 !/src/SettingsWindow.cs
 !/src/ReleaseUpdate.cs
 !/src/PriceCatalog.cs
+!/src/OfficialPrices.cs
+!/tools/OfficialPriceStabilityProbe.cs
 !/src/ModelPaletteCatalog.cs
 !/src/ModelColors.cs
 !/model-palette.json

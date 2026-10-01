@@ -127,8 +127,10 @@ namespace CodexUserData
     internal static class UsageTrendSeries
     {
         internal static DailyUsage[] Build(DailyUsage[] source,string mode)
+        {return Build(source,mode,ApiPrices.Snapshot());}
+        internal static DailyUsage[] Build(DailyUsage[] source,string mode,PriceState prices)
         {
-            source=source??new DailyUsage[0];PriceState prices=ApiPrices.Snapshot();
+            source=source??new DailyUsage[0];
             if(mode=="weekly")return Weekly(source,prices);
             if(mode=="cumulative")return Cumulative(source,prices);
             return source;
@@ -168,8 +170,10 @@ namespace CodexUserData
     internal static class UsageHeatmapSeries
     {
         internal static DailyUsage[] Build(DailyUsage[] source,string mode)
+        {return Build(source,mode,ApiPrices.Snapshot());}
+        internal static DailyUsage[] Build(DailyUsage[] source,string mode,PriceState prices)
         {
-            source=source??new DailyUsage[0];PriceState prices=ApiPrices.Snapshot();
+            source=source??new DailyUsage[0];
             if(mode=="weekly")return Weekly(source,prices);
             if(mode=="cumulative")return Cumulative(source,prices);
             return source;
@@ -676,6 +680,7 @@ namespace CodexUserData
         private string customScope,cacheCustomScope;
         private bool customLoading,cacheCustomLoading;
         private string modelKey="",viewSignature,pinnedModel,heatAggregation="daily",trendAggregation="daily";
+        private PriceState viewPrices;
         private int days=30,cacheDays=30;
         private bool rangeInitialized;
         private bool cost;
@@ -861,7 +866,7 @@ namespace CodexUserData
             if(cost!=showCost&&trendView!="curve")ClearAlternativeSelection();
             cost=showCost;tokensMetric.Background=cost?Brushes.Transparent:Theme.Hover;tokensMetric.Foreground=cost?Theme.Muted:Theme.Accent;costMetric.Background=cost?Theme.Hover:Brushes.Transparent;costMetric.Foreground=cost?Theme.Accent:Theme.Muted;
             AutomationProperties.SetItemStatus(tokensMetric,cost?"未选中":"已选中");AutomationProperties.SetItemStatus(costMetric,cost?"已选中":"未选中");
-            UpdateHeatTitle();UpdateTrendTitle();ApplyHeat();UpdateTrend();
+            UpdateHeatTitle();UpdateTrendTitle();PriceState prices=ApiPrices.Snapshot();ApplyHeatAt(prices);UpdateTrendAt(prices);
         }
         private void UpdateHeatTitle()
         {
@@ -881,10 +886,13 @@ namespace CodexUserData
             foreach(var d in data){var day=new DailyUsage{Date=d.Date,DisplayLabel=d.DisplayLabel};foreach(var m in d.Models.Where(m=>m.Model==model)){day.Add(m.Input,m.Output,m.CacheRead,m.CacheWrite,m.Requests,0,0);day.Models.Add(m);}filtered.Add(day);}return filtered.ToArray();
         }
         private void ApplyHeat()
+        {ApplyHeatAt(ApiPrices.Snapshot());}
+        private void ApplyHeatAt(PriceState prices)
         {
             // Custom dates belong to the trend only. The heatmap always follows the
             // normal snapshot so its 180-day calendar and pinned detail stay stable.
-            DailyUsage[] heatDays=Filter(original==null?null:original.Daily,modelKey);DailyUsage[] chartData=UsageHeatmapSeries.Build(heatDays,heatAggregation);heat.SetData(chartData,180,false,24,cost,heatAggregation);AutomationProperties.SetName(heat,(cost?"API 估算费用热度图":"Token 用量热度图")+" · "+ModeLabel(heatAggregation));heatSelection.SetData(heat.Days,0,heat.Days.Length,original==null?"用量记录":original.CountLabel);
+            if(original!=null)original=original.Reprice(prices);
+            DailyUsage[] heatDays=Filter(original==null?null:original.Daily,modelKey);DailyUsage[] chartData=UsageHeatmapSeries.Build(heatDays,heatAggregation,prices);heat.SetData(chartData,180,false,24,cost,heatAggregation);AutomationProperties.SetName(heat,(cost?"API 估算费用热度图":"Token 用量热度图")+" · "+ModeLabel(heatAggregation));heatSelection.SetData(heat.Days,0,heat.Days.Length,original==null?"用量记录":original.CountLabel);
         }
         private static string ModeLabel(string mode){return mode=="weekly"?"每周":mode=="cumulative"?"累计":"每日";}
         internal void Apply(UsageSnapshot data,string scope)
@@ -893,6 +901,7 @@ namespace CodexUserData
             // A refresh with no snapshot means the selected source is being rebuilt.
             // Clear a previous custom result here so it cannot survive a source/app switch.
             if(changed||data==null){customRange=null;customSnapshot=null;customScope=null;customLoading=false;customRangeButton.Content="自定义";cacheCustomRange=null;cacheCustomSnapshot=null;cacheCustomScope=null;cacheCustomLoading=false;cacheCustomRangeButton.Content="自定义";UpdateRangeButtons();UpdateCacheRangeButtons();}
+            if(customSnapshot!=null)customSnapshot=customSnapshot.Reprice(ApiPrices.Snapshot());
             ApplyView(customRange!=null&&customSnapshot!=null&&String.Equals(customScope,scope,StringComparison.Ordinal)?customSnapshot:data,scope);
         }
         internal void BeginCustomRange(DateTime from,DateTime to,string scope)
@@ -901,7 +910,7 @@ namespace CodexUserData
         }
         internal void ApplyCustomRange(UsageSnapshot data,string scope,DateTime from,DateTime to)
         {
-            customRange=UsageRangeSpec.Create(from,to);customScope=scope;customSnapshot=data;customLoading=false;customRangeButton.Content="自定义";UpdateRangeButtons();ApplyView(data,scope);
+            customRange=UsageRangeSpec.Create(from,to);customScope=scope;customSnapshot=data==null?null:data.Reprice(ApiPrices.Snapshot());customLoading=false;customRangeButton.Content="自定义";UpdateRangeButtons();ApplyView(customSnapshot,scope);
         }
         internal bool MatchesCustomRange(DateTime from,DateTime to,string scope)
         {
@@ -929,27 +938,34 @@ namespace CodexUserData
         }
         private void ApplyView(UsageSnapshot data,string scope)
         {
+            PriceState prices=ApiPrices.Snapshot();
             var names=data==null?new string[0]:data.Daily.SelectMany(d=>d.Models).Select(m=>m.Model).Distinct().OrderBy(m=>m).ToArray();
             if(modelKey!=""&&!names.Contains(modelKey))modelKey="";
             modelChoices.Clear();modelChoices.Add("","全部模型");foreach(string name in names)modelChoices[name]=name;modelFilter.Select(modelKey);
             string dailySignature=data==null?"":UsageChart.Signature(data.Daily);string heatSignature=original==null?"":Object.ReferenceEquals(data,original)?dailySignature:UsageChart.Signature(original.Daily);
             string next=scope+"/"+modelKey+"/"+(customRange==null?"preset":customRange.Key)+"/heat/"+heatSignature+"/"+(data==null?"none":data.Warning+"/"+data.CoverageWarnings+"/"+data.HourlyThrough+"/"+data.TimelineStepSeconds+"/"+dailySignature+"/"+UsageChart.Signature(data.Hourly)+"/"+UsageChart.Signature(data.Timeline));
-            if(next==viewSignature)return;viewSignature=next;
+            if(next==viewSignature&&Object.ReferenceEquals(viewPrices,prices))return;viewSignature=next;viewPrices=prices;
             bool reset=snapshot==null||data==null||scope!=(sourceLabel.Tag as string)||(data.Daily.Length>0&&snapshot.Daily.Length>0&&data.Daily[0].Date!=snapshot.Daily[0].Date);
             snapshot=data==null?null:new UsageSnapshot{Daily=Filter(data.Daily,modelKey),Hourly=Filter(data.Hourly,modelKey),Timeline=Filter(data.Timeline,modelKey),TimelineStepSeconds=data.TimelineStepSeconds,HourlyThrough=data.HourlyThrough,Warning=data.Warning,CoverageWarnings=data.CoverageWarnings,CountLabel=data.CountLabel};
             if(snapshot!=null&&snapshot.Daily.Length>0)snapshot.HourlyUnallocatedTokens=Math.Max(0,snapshot.Daily.Last().Tokens-snapshot.Hourly.Sum(h=>h.Tokens));
             sourceLabel.Tag=scope;sourceLabel.Text=scope+(modelKey==""?"":" · "+modelKey)+" · "+(customRange!=null&&String.Equals(customScope,scope,StringComparison.Ordinal)?"曲线 "+customRange.Label:"近 180 天");
             coverageText.Text=data==null?"":data.Warning;coverage.Visibility=ShowCoverage&&!String.IsNullOrEmpty(coverageText.Text)?Visibility.Visible:Visibility.Collapsed;
             if(reset){if(customRange==null)heatSelection.Reset();trendSelection.Reset();ClearAlternativeSelection();}
-            ApplyHeat();UpdateTrend();UpdateCacheTrend();
+            ApplyHeatAt(prices);UpdateTrendAt(prices);UpdateCacheTrend();
         }
         private void UpdateTrend()
+        {UpdateTrendAt(ApiPrices.Snapshot());}
+        private void UpdateTrendAt(PriceState prices)
         {
+            // A price update can arrive while the application's async refresh is still
+            // running. Reprice these bounded buckets once and share this snapshot with
+            // grouping, summaries and details; never mix current prices with old amounts.
+            if(snapshot!=null)snapshot=snapshot.Reprice(prices);
             bool custom=customRange!=null;bool hourly=!custom&&days==1;long customStep=snapshot!=null&&snapshot.TimelineStepSeconds>0?snapshot.TimelineStepSeconds:86400;
             DailyUsage[] customTimeline=snapshot==null?new DailyUsage[0]:snapshot.Timeline.Length>0?snapshot.Timeline:snapshot.Daily;
             DailyUsage[] raw=snapshot==null?new DailyUsage[0]:custom?customTimeline:hourly?snapshot.Hourly:snapshot.Daily;
             DailyUsage[] visible=custom?raw:hourly?raw.Take(snapshot==null?0:snapshot.HourlyThrough).ToArray():raw.Skip(Math.Max(0,raw.Length-days)).ToArray();
-            DailyUsage[] chartData=trendAggregation=="daily"?raw:UsageTrendSeries.Build(visible,trendAggregation);bool chartHourly=trendAggregation=="daily"&&hourly;int window=trendAggregation=="daily"?(custom?raw.Length:days):chartData.Length;
+            DailyUsage[] chartData=trendAggregation=="daily"?raw:UsageTrendSeries.Build(visible,trendAggregation,prices);bool chartHourly=trendAggregation=="daily"&&hourly;int window=trendAggregation=="daily"?(custom?raw.Length:days):chartData.Length;
             trendRaw=visible;trendBuckets=trendAggregation=="daily"?visible:chartData;trendHours=trendAggregation!="weekly"&&(hourly||custom&&customStep<86400);
             trendTotal=null;
             trend.SetData(chartData,window,chartHourly,chartHourly&&snapshot!=null?snapshot.HourlyThrough:chartData.Length,cost);

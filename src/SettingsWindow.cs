@@ -28,7 +28,7 @@ namespace CodexUserData
         private CancellationTokenSource updateCheck;
         internal SettingsWindow(Preferences current,Action<double> preview)
             :this(current,preview,null){}
-        internal SettingsWindow(Preferences current,Action<double> preview,Func<string> diagnosticsPreview)
+        internal SettingsWindow(Preferences current,Action<double> preview,Func<string> diagnosticsPreview,OfficialPriceSync priceSync=null)
         {
             draft=current.Clone();Title="CodexUserData 设置";ShowInTaskbar=false;Width=Math.Min(760,SystemParameters.WorkArea.Width-32);Height=Math.Min(720,SystemParameters.WorkArea.Height-32);MinWidth=Math.Min(560,Width);MinHeight=Math.Min(460,Height);Theme.InstallStyles(this);
             MaxHeight=SystemParameters.WorkArea.Height;WindowStartupLocation=WindowStartupLocation.CenterOwner;
@@ -113,7 +113,7 @@ namespace CodexUserData
             Note(display,"推理 Tokens 已含在输出中，缺失指标显示“—”。",Theme.Muted);
             var models=new CheckBox{Content="显示模型、思考强度与 API 等效价值明细",IsChecked=draft.ShowModels,Foreground=Theme.Ink,Margin=new Thickness(0,15,0,8)};display.Children.Add(models);models.Checked+=delegate{draft.ShowModels=true;};models.Unchecked+=delegate{draft.ShowModels=false;};
             var prices=Theme.Button("模型价格  →","编辑所有模型价格",180);prices.HorizontalAlignment=HorizontalAlignment.Stretch;prices.Background=Theme.Surface;prices.Foreground=Theme.Accent;prices.Margin=new Thickness(0,8,0,0);prices.Height=38;display.Children.Add(prices);
-            prices.Click+=delegate{var editor=new PriceEditor(draft){Owner=this};if(editor.ShowDialog()==true){draft.PriceOverrides=editor.Result;draft.KnownModels=editor.KnownModels;}};
+            prices.Click+=delegate{var editor=new PriceEditor(draft,priceSync){Owner=this};if(editor.ShowDialog()==true){draft.PriceOverrides=editor.Result;draft.KnownModels=editor.KnownModels;}};
             Note(display,"保存模型价格后，全部历史用量会按新价格重新估算。",Theme.Muted);
             Label(display,"主页图表");
             var heatmap=new CheckBox{Content="每日用量热度图",IsChecked=draft.ShowHeatmap,Foreground=Theme.Ink,Margin=new Thickness(0,5,0,8)};display.Children.Add(heatmap);heatmap.Checked+=delegate{draft.ShowHeatmap=true;};heatmap.Unchecked+=delegate{draft.ShowHeatmap=false;};

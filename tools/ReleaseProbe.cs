@@ -477,11 +477,53 @@ internal static class ReleaseProbe
   Check(before.SequenceEqual(unknown.Select(n=>(string)Call("ModelColors",null,"ColorHex",n,false)))&&File.ReadAllBytes(path).SequenceEqual(old),"protected unknown colors ignore discovery order and never rewrite old registry");
   File.WriteAllText(Path.Combine(dir,"verification.json"),"{\"passed\":true,\"scope\":\"model-colors\",\"checks\":"+checks+"}");Console.WriteLine("MODEL COLOR RELEASE CHECKS: "+checks);
  }
+ static void PricesOnly(string dir)
+ {
+  Check(assembly.GetType("CodexUserData.OfficialPriceSync")==null,"official price implementation remains obfuscated");
+  Check(((decimal[])Call("ApiPrices",null,"Default","gpt-6.1-sol")).SequenceEqual(new[]{2m,.1m,2.5m,10m}),"protected built-in GPT-6.1 Sol price is correct");
+  var json=new JavaScriptSerializer();Func<object,object> atom=v=>new object[]{0,v};
+  object rows=new object[]{1,new object[]{new object[]{1,new object[]{atom("gpt-release-price"),atom(2m),atom(.1m),atom(2.5m),atom(10m)}}}};
+  string props=System.Net.WebUtility.HtmlEncode(json.Serialize(new Dictionary<string,object>{{"tier",atom("standard")},{"rows",rows}}));
+  string[] headers={"","Short context","Long context","Model","Input","Cached input","Cache writes","Output","Input","Cached input","Cache writes","Output"};
+  string html="<link rel=\"canonical\" href=\"https://developers.openai.com/api/docs/pricing\"><h2 id=\"text-tokens\">Text</h2>Prices per 1M tokens.<astro-island component-export=\"TextTokenPricingTables\" props=\""+props+"\"><thead><tr>"+String.Join("",headers.Select(h=>"<th>"+h+"</th>"))+"</tr></thead><tbody><tr><td>gpt-release-price</td><td>$2</td><td>$0.10</td><td>$2.50</td><td>$10</td><td>$4</td><td>$0.2</td><td>$5</td><td>$15</td></tr></tbody></astro-island>";
+  var parsed=(Dictionary<string,decimal[]>)Call("OfficialPricePage",null,"Parse",html);
+  Check(parsed["gpt-release-price"].SequenceEqual(new[]{2m,.1m,2.5m,10m}),"protected parser binds Standard short-context rates");
+  string fixture=Environment.GetEnvironmentVariable("CODEXUSERDATA_PRICE_FIXTURE");
+  if(!String.IsNullOrEmpty(fixture)){var real=(Dictionary<string,decimal[]>)Call("OfficialPricePage",null,"Parse",File.ReadAllText(fixture));Check(real["gpt-6.1-sol"][1]==.1m&&real.Count>3,"protected parser reads real official HTML and hidden rows");}
+  string file=Path.Combine(dir,"official-prices-fixture.json");
+  var fetch=new Func<System.Threading.CancellationToken,System.Threading.Tasks.Task<string>>(token=>System.Threading.Tasks.Task.FromResult(html));
+  var sync=New("OfficialPriceSync",file,fetch,null,new Func<DateTime>(()=>DateTime.UtcNow),false);
+  try
+  {
+   var job=(System.Threading.Tasks.Task<string>)Call("OfficialPriceSync",sync,"RefreshAsync",new[]{"gpt-release-price"},true);job.GetAwaiter().GetResult();
+   string cache=File.ReadAllText(file);var restored=Call("OfficialPriceSync",null,"ParseCache",cache);
+   Check(cache.Contains("\"checkedUtc\"")&&cache.Contains("\"models\"")&&cache.Contains("\"basis\":\"standard-short\"")&&Get(restored,"checks")!=null,"protected cache retains its public JSON schema");
+   Check((string)Call("ApiPrices",null,"DefaultSource","gpt-release-price")=="官方价格","protected worker publishes persisted official prices");
+   var version=Call("ApiPrices",null,"Snapshot");((System.Threading.Tasks.Task<string>)Call("OfficialPriceSync",sync,"RefreshAsync",new[]{"gpt-release-price"},true)).GetAwaiter().GetResult();
+   Check(Object.ReferenceEquals(version,Call("ApiPrices",null,"Snapshot")),"unchanged protected refresh keeps numeric cache identity");
+   var prefs=New("Preferences");Set(prefs,"KnownModels",new[]{"gpt-release-price"});var editor=(Window)New("PriceEditor",prefs,sync);
+   Check(editor.Title=="模型价格","protected price editor accepts the shared sync service");editor.Close();
+   var model=New("ModelUsage");Set(model,"Model","gpt-release-price");Call("ModelUsage",model,"Add",1000000L,0L,0L,0L,1L);
+   Check((decimal)Get(model,"EquivalentUsd")==2m,"protected usage aggregation uses official prices");
+   var day=New("DailyUsage");Set(day,"Date",DateTime.Today.AddDays(-1).ToString("yyyy-MM-dd",System.Globalization.CultureInfo.InvariantCulture));Set(day,"Input",1000000L);Set(day,"Tokens",1000000L);Set(day,"Requests",1L);((IList)Get(day,"Models")).Add(model);
+   var days=Array.CreateInstance(TypeFor("DailyUsage"),1);days.SetValue(day,0);
+   Call("ApiPrices",null,"ConfigureOfficial",new Dictionary<string,decimal[]>{{"gpt-release-price",new[]{5m,.1m,2.5m,10m}}});
+   var grouped=(Array)Call("UsageTrendSeries",null,"Build",days,"weekly",version);var current=(Array)Call("UsageTrendSeries",null,"Build",days,"weekly",Call("ApiPrices",null,"Snapshot"));
+   Check((decimal)Get(((IList)Get(grouped.GetValue(0),"Models"))[0],"EquivalentUsd")==2m&&(decimal)Get(((IList)Get(current.GetValue(0),"Models"))[0],"EquivalentUsd")==5m,"protected grouping respects its captured price snapshot");
+   var oversized=new Dictionary<string,decimal[]>();for(int i=0;i<513;i++)oversized["gpt-cache-"+i.ToString("D4")]=new[]{2m,0m,0m,10m};
+   string legacy=json.Serialize(new{schema=1,source="https://developers.openai.com/api/docs/pricing",basis="standard-short",fetchedUtc=DateTime.UtcNow,models=oversized,checks=new Dictionary<string,object>()});
+   var recovered=Call("OfficialPriceSync",null,"ParseCache",legacy);
+   Check(((IDictionary)Get(recovered,"models")).Count==512,"protected parser recovers and bounds valid oversized legacy caches");
+  }
+  finally{((IDisposable)sync).Dispose();}
+  File.WriteAllText(Path.Combine(dir,"verification.json"),"{\"passed\":true,\"scope\":\"prices\",\"checks\":"+checks+"}");Console.WriteLine("PRICE RELEASE CHECKS: "+checks);
+ }
  [STAThread] static int Main(string[] args)
  {
   try{
    AppDomain.CurrentDomain.SetData("CodexUserData.TestDataFolder",Path.Combine(Path.GetFullPath(args[2]),"fixture-user"));
    assembly=Assembly.LoadFrom(Path.GetFullPath(args[0]));map=File.ReadAllText(args[1]);string dir=args[2];Directory.CreateDirectory(dir);
+   if(args.Contains("--price-only")){PricesOnly(dir);return 0;}
    if(args.Contains("--floating-only")){FloatingEffectsOnly(dir);return 0;}
    if(args.Contains("--period-only")){PeriodOnly(dir);return 0;}
    if(args.Contains("--color-only")){ColorsOnly(dir);return 0;}

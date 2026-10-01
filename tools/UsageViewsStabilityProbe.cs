@@ -101,7 +101,7 @@ namespace CodexUserData
 
         private static async Task PanelChecks()
         {
-            var snapshot=Fixture();var panel=new HistoryPanel();panel.Configure(false,true,30);panel.Apply(snapshot,"模拟数据 · 仅用于图表验证");
+            var snapshot=Fixture().Reprice(ApiPrices.Snapshot());var panel=new HistoryPanel();panel.Configure(false,true,30);panel.Apply(snapshot,"模拟数据 · 仅用于图表验证");
             int reads=0;panel.RangeChanged+=delegate{reads++;};panel.CacheRangeChanged+=delegate{reads++;};panel.CustomRangeRequested+=delegate{reads++;};panel.CacheCustomRangeRequested+=delegate{reads++;};
             var scroll=new ScrollViewer{VerticalScrollBarVisibility=ScrollBarVisibility.Auto,HorizontalScrollBarVisibility=ScrollBarVisibility.Disabled,Content=panel};
             var window=new Window{Width=1060,Height=900,ShowActivated=false,ShowInTaskbar=false,Background=Theme.Background,Content=new Border{Background=Theme.Background,Padding=new Thickness(18),Child=scroll}};
@@ -129,7 +129,7 @@ namespace CodexUserData
                 Check(StabilityProbe.Field<TextBlock>(panel,"sum").Text==ChartValue.Money(expected)&&StabilityProbe.Field<TextBlock>(panel,"trendTitle").Text.Contains("USD"),"USD summary and absolute bars use the same equivalent estimate");
                 panel.SetTrendView("treemap");await Layout(window);Check(alternative.LayoutCells.Length==1&&alternative.LayoutCells[0].Value==expected,"model-filtered cost treemap preserves the selected range estimate");
                 panel.SetModel("");panel.SetRange(1);panel.SetTrendView("bars");await Layout(window);
-                Check(StabilityProbe.Field<DailyUsage[]>(panel,"trendRaw").Length==2&&alternative.LayoutCells.Sum(c=>c.Value)==.0000003m,"today bars exclude future hours and preserve tiny hourly USD values");
+                Check(StabilityProbe.Field<DailyUsage[]>(panel,"trendRaw").Length==2&&alternative.LayoutCells.Sum(c=>c.Value)==Amount(snapshot.Hourly.Take(2).ToArray()),"today bars exclude future hours and preserve current hourly USD estimates");
                 panel.SetMetric(false);panel.SetRange(180);await Layout(window);alternative.Choose(0,true);
                 Check(alternative.SelectedBucket!=null&&detail.ModelRows>0,"wide long-range amount bars support an individual selected day");
                 window.Width=370;await Layout(window);var ignored=alternative.LayoutCells;
