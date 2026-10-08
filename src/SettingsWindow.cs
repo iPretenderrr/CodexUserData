@@ -145,7 +145,20 @@ namespace CodexUserData
             Label(data,"远程服务器");remoteSettings=new RemoteSettings(draft.Remote);data.Children.Add(remoteSettings);
             AddPage("data",data);
 
-            var behavior=Page("启动与行为","最小化方式和自动启动规则");
+            var behavior=Page("启动与行为","开屏动画、最小化方式和自动启动规则");
+            Label(behavior,"开屏动画");
+            var splashEnabled=new CheckBox{Content="启动时播放开屏动画",IsChecked=draft.StartupAnimationEnabled,Foreground=Theme.Ink,Margin=new Thickness(0,4,0,9)};
+            System.Windows.Automation.AutomationProperties.SetAutomationId(splashEnabled,"StartupAnimationEnabled");behavior.Children.Add(splashEnabled);
+            var splashStyle=new ChoiceButton(new Dictionary<string,string>{{"cinema","电影片头"},{"layers","分层光场"},{"matrix","点阵重构"},{"prism","折光星笺"}},"选择下次启动的开屏动画");
+            splashStyle.Select(draft.StartupAnimationStyle);splashStyle.IsEnabled=draft.StartupAnimationEnabled;
+            System.Windows.Automation.AutomationProperties.SetAutomationId(splashStyle,"StartupAnimationStyle");
+            splashStyle.Changed+=v=>draft.StartupAnimationStyle=v;behavior.Children.Add(splashStyle);
+            var splashSound=new CheckBox{Content="品牌文字出现时播放启动提示音",IsChecked=draft.StartupSoundEnabled,IsEnabled=draft.StartupAnimationEnabled,Foreground=Theme.Ink,Margin=new Thickness(0,12,0,4)};
+            System.Windows.Automation.AutomationProperties.SetAutomationId(splashSound,"StartupSoundEnabled");behavior.Children.Add(splashSound);
+            splashSound.Checked+=delegate{draft.StartupSoundEnabled=true;};splashSound.Unchecked+=delegate{draft.StartupSoundEnabled=false;};
+            splashEnabled.Checked+=delegate{draft.StartupAnimationEnabled=true;splashStyle.IsEnabled=splashSound.IsEnabled=true;};
+            splashEnabled.Unchecked+=delegate{draft.StartupAnimationEnabled=false;splashStyle.IsEnabled=splashSound.IsEnabled=false;};
+            Note(behavior,"默认使用电影片头，保存后下次启动生效。播放时可点击“跳过”或按 Esc 进入软件。",Theme.Muted);
             Label(behavior,"最小化方式");
             var minimizeMode=new ChoiceButton(new Dictionary<string,string>{{"taskbar","最小化到任务栏"},{"tray","最小化到托盘"}},"最小化方式");
             minimizeMode.Select(draft.MinimizeToTray?"tray":"taskbar");minimizeMode.Changed+=v=>draft.MinimizeToTray=v=="tray";behavior.Children.Add(minimizeMode);

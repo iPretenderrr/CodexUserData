@@ -39,7 +39,7 @@ $compilerArgs = @(
   ('/r:' + (Join-Path $PSScriptRoot '..\vendor\webview2\lib\net462\Microsoft.Web.WebView2.Wpf.dll')),
   (Join-Path $PSScriptRoot 'RemoteCodex.cs'), (Join-Path $PSScriptRoot 'RemoteMonitor.cs'), (Join-Path $PSScriptRoot 'RemoteSettings.cs'),
   (Join-Path $PSScriptRoot 'CustomShape.cs'), (Join-Path $PSScriptRoot 'PortableServices.cs'),
-  (Join-Path $PSScriptRoot 'Program.cs'), (Join-Path $PSScriptRoot 'Theme.cs'),
+  (Join-Path $PSScriptRoot 'Program.cs'), (Join-Path $PSScriptRoot 'StartupSplash.cs'), (Join-Path $PSScriptRoot 'StartupChime.cs'), (Join-Path $PSScriptRoot 'StartupUsagePreload.cs'), (Join-Path $PSScriptRoot 'Theme.cs'),
   (Join-Path $PSScriptRoot 'QuotaOrb.cs'),
   (Join-Path $PSScriptRoot 'CodexActivity.cs'), (Join-Path $PSScriptRoot 'ActivityJsonLine.cs'), (Join-Path $PSScriptRoot 'OrbAppearance.cs'),
   (Join-Path $PSScriptRoot 'ThemePalette.cs'), (Join-Path $PSScriptRoot 'ThemeEditor.cs'),
@@ -55,6 +55,13 @@ $compilerArgs = @(
 $compilerArgs+=@($remoteDlls | ForEach-Object {'/r:'+$_.FullName})
 $compilerArgs+=('/r:'+(Join-Path $frameworkPath 'System.Security.dll'))
 $compilerArgs+=('/resource:'+(Join-Path $PSScriptRoot '..\model-palette.json')+',CodexUserData.ModelPalette.json')
+# Only these reviewed, offline assets enter the executable; preview tooling and
+# browser profiles are not copied. pack.ps1 uses this same build path.
+foreach($name in @('index.html','cinema.webm','layers.webm','matrix.webm','prism.webm','chime.wav')){
+ $asset=Join-Path $PSScriptRoot ('..\assets\startup\'+$name)
+ if(-not(Test-Path -LiteralPath $asset)){throw ('Startup asset missing: '+$name)}
+ $compilerArgs+=('/resource:'+$asset+',CodexUserData.Startup.'+$name)
+}
 & $compilerPath @compilerArgs
 if ($LASTEXITCODE -ne 0) { throw 'Widget compilation failed.' }
 $destination=Split-Path $OutputPath -Parent

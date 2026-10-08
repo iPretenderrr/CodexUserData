@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; media-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; frame-src 'none'; child-src 'none'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Codex</title>
+  <style>
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #000; }
+    video { display: block; width: 100%; height: 100%; object-fit: cover; background: #000; }
+  </style>
+</head>
+<body>
+  <video id="startup-video" muted playsinline preload="auto" disablepictureinpicture disableremoteplayback tabindex="-1"></video>
+  <script>
+    'use strict';
+    (() => {
+      const video = document.getElementById('startup-video');
+      const bridge = window.chrome && window.chrome.webview;
+      const styles = ['cinema', 'layers', 'matrix', 'prism'];
+      const requestedStyle = new URLSearchParams(window.location.search).get('style');
+      const style = styles.includes(requestedStyle) ? requestedStyle : 'cinema';
+      // These are the reviewed edit=2 title-stage onsets, in media seconds:
+      // Cue the first visible letter shapes, not the earlier particle buildup.
+      // These points were checked against the shipped, decoded WebM frames.
+      const brandAt = { cinema: 7.75, layers: 5.0, matrix: 6.6, prism: 7.85 }[style];
+      let ready = false;
+      let playRequested = false;
+      let playAttempted = false;
+      let started = false;
+      let brandSent = false;
+      let terminal = false;
+      let preparingFrame = false;
+      let frameCallback;
+      let frameTimer;
+      let presentationFrame;
+      let brandTimer;
+
+      function post(type) {
+        if (bridge) bridge.postMessage({ type });
+      }
+
+      function clearFrameWait() {
+        window.clearTimeout(frameTimer);
+        window.cancelAnimationFrame(presentationFrame);
+        if (frameCallback !== undefined && video.cancelVideoFrameCallback) {
+          video.cancelVideoFrameCallback(frameCallback);
+          frameCallback = undefined;
+        }
+      }
+
+      function finish(type) {
+        if (terminal) return;
+        terminal = true;
+        clearFrameWait();
+        window.clearTimeout(brandTimer);
+        video.pause();
+        post(type);
+      }
+
+      function playOnce() {
+        if (!ready || !playRequested || playAttempted || terminal) return;
+        playAttempted = true;
+        // The host reveals its window before sending play; preloading stays paused.
+        try {
+          const playback = video.play();
+          if (playback && playback.catch) playback.catch(() => finish('error'));
+        } catch (_) {
+          finish('error');
+        }
+      }
+
+      function checkBrand() {
+        if (terminal || brandSent || !started || video.paused || video.currentTime < brandAt) return;
+        brandSent = true;
+        window.clearTimeout(brandTimer);
+        video.removeEventListener('timeupdate', checkBrand);
+        video.removeEventListener('seeked', armBrandCheck);
+        video.removeEventListener('ratechange', armBrandCheck);
+        post('brand');
+      }
+
+      function armBrandCheck() {
+        window.clearTimeout(brandTimer);
+        if (terminal || brandSent || !started || video.paused || video.playbackRate <= 0) return;
+        checkBrand();
+        if (brandSent) return;
+        // One media-time prediction narrows the usual timeupdate delay. Stalls
+        // cancel it; every wake rechecks currentTime instead of trusting a clock.
+        brandTimer = window.setTimeout(() => {
+          checkBrand();
+          if (!brandSent) armBrandCheck();
+        }, Math.max(25, (brandAt - video.currentTime) * 1000 / video.playbackRate));
+      }
+
+      function markReady() {
+        if (ready || terminal || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
+        ready = true;
+        clearFrameWait();
+        post('ready');
+        playOnce();
+      }
+
+      function prepareFirstFrame() {
+        if (preparingFrame || ready || terminal || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
+        preparingFrame = true;
+        // loadeddata guarantees a decoded current frame. A paused video may never
+        // invoke rVFC, so compositor ticks and a bounded fallback also release ready.
+        if (video.requestVideoFrameCallback) {
+          frameCallback = video.requestVideoFrameCallback(markReady);
+        }
+        presentationFrame = window.requestAnimationFrame(() => {
+          presentationFrame = window.requestAnimationFrame(markReady);
+        });
+        // WebView can throttle animation callbacks while its WPF control is hidden.
+        frameTimer = window.setTimeout(markReady, 120);
+      }
+
+      video.addEventListener('loadeddata', prepareFirstFrame);
+      video.addEventListener('canplay', prepareFirstFrame);
+      video.addEventListener('playing', () => {
+        if (terminal) return;
+        if (!started) {
+          started = true;
+          post('started');
+        }
+        armBrandCheck();
+      });
+      // Event-driven checks follow stalls/seeks with no continuous frame loop.
+      video.addEventListener('timeupdate', checkBrand);
+      video.addEventListener('seeked', armBrandCheck);
+      video.addEventListener('ratechange', armBrandCheck);
+      video.addEventListener('waiting', () => window.clearTimeout(brandTimer));
+      video.addEventListener('pause', () => window.clearTimeout(brandTimer));
+      video.addEventListener('ended', () => finish('ended'));
+      video.addEventListener('error', () => finish('error'));
+      video.addEventListener('dblclick', () => finish('skip'));
+      document.addEventListener('keydown', event => {
+        if (event.key !== 'Escape') return;
+        event.preventDefault();
+        finish('skip');
+      });
+      if (bridge) {
+        bridge.addEventListener('message', event => {
+          if (!event.data || event.data.type !== 'play' || terminal) return;
+          playRequested = true;
+          playOnce();
+        });
+      }
+
+      // Only this whitelisted clip is requested. Native decoding avoids a canvas
+      // redraw loop and keeps startup work bounded on slower devices.
+      video.muted = true;
+      video.src = style + '.webm';
+      video.load();
+    })();
+  </script>
+</body>
+</html>

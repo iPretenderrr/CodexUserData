@@ -10,8 +10,8 @@ using System.Windows;
 
 [assembly: System.Reflection.AssemblyTitle("CodexUserData")]
 [assembly: System.Reflection.AssemblyProduct("CodexUserData")]
-[assembly: System.Reflection.AssemblyVersion("1.9.14.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.9.14.0")]
+[assembly: System.Reflection.AssemblyVersion("1.9.16.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.9.16.0")]
 
 namespace CodexUserData
 {
@@ -47,6 +47,8 @@ namespace CodexUserData
         public string[] OrbShortColors {get;set;} public string[] OrbLongColors {get;set;}
         public double OrbShortAngle {get;set;} public double OrbLongAngle {get;set;}
         public bool StartWithWindows {get;set;} public bool StartWithCodex {get;set;}
+        public bool StartupAnimationEnabled {get;set;} public string StartupAnimationStyle {get;set;}
+        public bool StartupSoundEnabled {get;set;}
         public double BallOpacity {get;set;} public bool OrbFollowTheme {get;set;}
         public bool IslandFollowTheme {get;set;} public string[] IslandColors {get;set;} public string IslandMaterial {get;set;}
         public string CustomShape {get;set;}
@@ -67,6 +69,7 @@ namespace CodexUserData
         {
             string user=Environment.GetEnvironmentVariable("USERPROFILE") ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
             BallLeft=Double.NaN;BallTop=Double.NaN;BallDock="";BallEffectIntensity=1;
+            StartupAnimationEnabled=true;StartupAnimationStyle="cinema";StartupSoundEnabled=true;
             BallMonitor="";BallPlacements=new Dictionary<string,BallPlacement>(StringComparer.OrdinalIgnoreCase);CustomShapeSizes=new Dictionary<string,double[]>(StringComparer.OrdinalIgnoreCase);
             BallOpacity=1;OrbFollowTheme=true;IslandFollowTheme=true;IslandMaterial="glass";IslandColors=new[]{"#3976FF","#35C8E2","#87F3BE","#C68BFF","#FF83C4"};CompletionFlash=true;BallStyle="orb";OrbQuotaWindow="auto";OrbAnimation="auto";OrbSize=84;AnimationSpeed=1;
             OrbShortColors=new[]{"#316BF1","#5F97FF","#89CDEC"};OrbLongColors=new[]{"#7965EA","#AB8DF0","#E2B0ED"};OrbShortAngle=OrbLongAngle=45;
@@ -85,6 +88,7 @@ namespace CodexUserData
         internal void Validate()
         {
             Theme.Normalize(this);BallOpacity=Clamp(BallOpacity,.2,1,1);BallEffectIntensity=EffectStrength;
+            StartupAnimationStyle=StartupSplash.NormalizeStyle(StartupAnimationStyle);
             NormalizePlacement();
             OrbPalette.Normalize(this);
             IslandColors=OrbPalette.Clean(IslandColors,new[]{"#3976FF","#35C8E2","#87F3BE","#C68BFF","#FF83C4"});
@@ -214,9 +218,23 @@ namespace CodexUserData
                     w.ApplySnapshot(UsageDatabase.Read(p.Database,p.Range,p.App,DateTime.Now));w.SavePreview(args[1]);return 0;
                 }
                     if(p.StartWithWindows||p.StartWithCodex)try{StartupRegistration.Configure(p,Path.Combine(Folder,"CodexUserData.exe"));if(p.StartWithCodex)CodexLaunchWatcher.Ensure();}catch(Exception){MessageBox.Show("无法更新 Windows 自启动项。软件仍可使用，请在设置中重新保存自启动选项。",WindowTitle,MessageBoxButton.OK,MessageBoxImage.Information);}
-                    var app=new Application {ShutdownMode=ShutdownMode.OnMainWindowClose};var main=new WidgetWindow(p,false);
-                    main.Loaded+=delegate{if(p.LiveQuota&&!File.Exists(p.QuotaCli)&&!p.CliNoticeShown){p.CliNoticeShown=true;Save(p);MessageBox.Show("未找到 Codex CLI 可执行文件。请在设置中点击自动检测，或手动选择 codex.exe。本地用量统计仍可读取日志；在线额度需要可用且已登录的 CLI。",WindowTitle,MessageBoxButton.OK,MessageBoxImage.Information);}};
-                    app.Run(main);
+                    // The transient splash must never own application lifetime. Construct
+                    // the widget only on handoff, so its Loaded services and notices do not
+                    // appear over the film or open a saved floating shape prematurely.
+                    var app=new Application {ShutdownMode=ShutdownMode.OnExplicitShutdown};
+                    var preload=p.Source=="local"||p.Remote.Enabled?new StartupUsagePreload(p.CodexHome,Path.Combine(DataFolder,"local-codex-cache.json.gz")):null;
+                    app.Exit+=delegate{if(preload!=null)preload.Cancel();};
+                    app.Startup+=delegate
+                    {
+                        StartupSplash.Launch(p,delegate
+                        {
+                            var main=new WidgetWindow(p,false,preload);app.MainWindow=main;
+                            app.ShutdownMode=ShutdownMode.OnMainWindowClose;
+                            main.Loaded+=delegate{if(p.LiveQuota&&!File.Exists(p.QuotaCli)&&!p.CliNoticeShown){p.CliNoticeShown=true;Save(p);MessageBox.Show("未找到 Codex CLI 可执行文件。请在设置中点击自动检测，或手动选择 codex.exe。本地用量统计仍可读取日志；在线额度需要可用且已登录的 CLI。",WindowTitle,MessageBoxButton.OK,MessageBoxImage.Information);}};
+                            main.Show();
+                        });
+                    };
+                    try{app.Run();}finally{if(preload!=null)preload.Cancel();}
                 return 0;
             }
             catch(Exception error)

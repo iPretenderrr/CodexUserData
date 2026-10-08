@@ -56,6 +56,16 @@
 !/src/PortableServices.cs
 !/src/PriceEditor.cs
 !/src/Program.cs
+!/src/StartupSplash.cs
+!/assets/
+!/assets/startup/
+!/assets/startup/index.html
+!/assets/startup/cinema.webm
+!/assets/startup/layers.webm
+!/assets/startup/matrix.webm
+!/assets/startup/prism.webm
+!/tools/StartupStabilityProbe.cs
+!/tools/verify-startup.ps1
 !/src/QuotaOrb.cs
 !/src/QuotaReader.cs
 !/src/QuotaHistory.cs
@@ -112,3 +122,8 @@
 !/tools/ModelShareViewsStabilityProbe.cs
 !/tools/UsageViewsStabilityProbe.cs
 !/tools/ModelColorStabilityProbe.cs
+!/src/StartupUsagePreload.cs
+!/src/StartupChime.cs
+!/assets/startup/chime.wav
+!/tools/generate-startup-chime.mjs
+!/tools/check-startup-brand.mjs

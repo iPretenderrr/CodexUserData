@@ -53,6 +53,9 @@ namespace CodexUserData
         // LocalCodexUsage owns a mutable numeric ledger. Custom-range reads and the
         // periodic scanner share this short gate so a selection never sees a half-updated list.
         private readonly object usageGate=new object();
+        private readonly StartupUsagePreload startupUsage;
+        private bool startupScanAvailable;
+        private bool startupRefreshWaiting,startupRefreshScan;
         private string localRoot;
         private readonly DispatcherTimer timer=new DispatcherTimer();
         private readonly DispatcherTimer paletteTimer=new DispatcherTimer{Interval=TimeSpan.FromHours(24)};
@@ -96,8 +99,11 @@ namespace CodexUserData
         private readonly Border hero;
         private string heroKey="tokens";
 
-        internal WidgetWindow(Preferences preferences,bool isPreview)
+        internal WidgetWindow(Preferences preferences,bool isPreview):this(preferences,isPreview,null){}
+        internal WidgetWindow(Preferences preferences,bool isPreview,StartupUsagePreload preload)
         {
+            startupUsage=preload;
+            Closed+=delegate{if(startupUsage!=null)startupUsage.Cancel();};
             prefs=preferences;prefs.Validate();Theme.Apply(prefs);preview=isPreview;expandedRestoreHeight=Math.Max(480,prefs.Height);Title=Program.WindowTitle;Theme.InstallStyles(this);
             if(!preview)
             {
@@ -276,8 +282,9 @@ namespace CodexUserData
             if(coverageReadFailed&&snapshot==null)return Task.FromException<MilestoneSnapshot>(new IOException("当前来源尚未读取成功，请查看首页统计说明。"));
             string identity=MilestoneScope(),label=Scope(),selected=prefs.Source,home=prefs.CodexHome,db=prefs.Database,application=prefs.App,view=prefs.UsageView;
             var remoteReader=remote;bool enabled=prefs.Remote.Enabled;string lastFailure=coverageReadFailed?"最近一次用量刷新失败，保留已读取的记录。":coverageIncomplete?"当前用量有未计入的记录，请查看首页统计说明。":"";
-            return Task.Run(()=>
+            return Task.Run(async ()=>
             {
+                if(selected=="local")await AwaitStartupUsage();
                 // The panel coalesces requests. This gate also isolates a late read
                 // from a freshly reopened history window and its reader disposal.
                 lock(milestoneGate)
@@ -295,6 +302,7 @@ namespace CodexUserData
                         lock(usageGate)
                         {
                             cancel.ThrowIfCancellationRequested();
+                            AdoptStartupUsage(home);
                             if(local==null||localRoot!=home)
                             {
                                 var reader=new LocalCodexUsage(home,Path.Combine(Program.DataFolder,"local-codex-cache.json.gz"));reader.Update(null,()=>cancel.IsCancellationRequested);
@@ -355,13 +363,15 @@ namespace CodexUserData
             Func<bool> stopped=()=>closed||cancel.IsCancellationRequested||(superseded!=null&&superseded());
             // Share the established source query with every custom chart. Capture
             // source settings before the worker starts, and publish only complete reads.
-            return Task.Run(()=>
+            return Task.Run(async ()=>
             {
+                if(selected=="local")await AwaitStartupUsage();
                 if(stopped())throw new OperationCanceledException();ApiPrices.Configure(prices);UsageSnapshot result;
                 if(selected!="local")result=UsageDatabase.Read(db,key,application,DateTime.Now);
                 else lock(usageGate)
                 {
                     if(stopped())throw new OperationCanceledException();
+                    AdoptStartupUsage(home);
                     if(local==null||localRoot!=home){var reader=new LocalCodexUsage(home,Path.Combine(Program.DataFolder,"local-codex-cache.json.gz"));reader.Update(null,stopped);if(stopped())throw new OperationCanceledException();local=reader;localRoot=home;}
                     if(!remoteEnabled||view=="local")result=local.Snapshot(key,DateTime.Now);
                     else
@@ -528,22 +538,51 @@ namespace CodexUserData
             var styled=new StyledWindow{UseNativeFrame=true,Title="用量与额度趋势",Width=880,Height=850,MinWidth=340,MinHeight=420,Background=Theme.Background,Foreground=Theme.Ink,FontFamily=FontFamily,Owner=this,WindowStartupLocation=WindowStartupLocation.CenterOwner,ShowInTaskbar=false};
             styled.SetBody(layout,"用量与额度趋势","USAGE INSIGHTS",true);historyWindow=styled;historyWindow.Loaded+=delegate{if(historyWindow!=null)ClampWindow(historyWindow);};historyWindow.Closed+=delegate{if(modelSharePanel!=null)modelSharePanel.Dispose();modelSharePanel=null;if(milestoneCurvePanel!=null)milestoneCurvePanel.Dispose();milestoneCurvePanel=null;if(milestonePanel!=null)milestonePanel.Dispose();milestonePanel=null;ReleaseMilestoneReader();historyWindow=null;largeHistory=null;quotaHistoryPanel=null;};historyWindow.Show();
         }
+        private Task AwaitStartupUsage(){return startupUsage==null?Task.FromResult(0):startupUsage.Completion;}
+        // Only worker threads call this, with usageGate held. Charts and the
+        // first refresh share the preload instead of creating rival cache writers.
+        private void AdoptStartupUsage(string home)
+        {
+            if(startupUsage==null)return;
+            var prepared=startupUsage.Take(home);
+            if(prepared!=null){local=prepared;localRoot=home;startupScanAvailable=true;}
+        }
         private void RefreshData(){RefreshUsage(true);}
         // Price updates reuse the parsed ledger and database query path; they do not force
         // a filesystem rescan, which keeps the feature cheap on low-performance devices.
         internal void RefreshModelPrices(){if(!preview&&!closed)RefreshUsage(false);}
         private async void RefreshUsage(bool scan)
         {
-            if(preview||closed)return;if(busy){refreshPending=true;scanPending|=scan;return;}busy=true;int version=revision;string selected=prefs.Source,range=prefs.Range,application=prefs.App,db=prefs.Database,home=prefs.CodexHome,view=prefs.UsageView;var remoteReader=remote;var priceOverrides=prefs.PriceOverrides;UsageSnapshot total=null;Dictionary<string,UsageSnapshot> available=null;DateTime observed=DateTime.Now;
+            if(preview||closed)return;
+            // Waiting for startup I/O is not an active database refresh. Keep
+            // CC Switch usable if the source changes during a large local scan.
+            // Coalesce timer ticks into one continuation using the latest prefs.
+            if(startupUsage!=null&&(!startupUsage.Completion.IsCompleted||startupRefreshWaiting)&&(prefs.Source=="local"||remote!=null))
+            {
+                startupRefreshScan|=scan;if(startupRefreshWaiting)return;
+                startupRefreshWaiting=true;status.Text="正在读取本地日志…";
+                await startupUsage.Completion;
+                startupRefreshWaiting=false;bool requestedScan=startupRefreshScan;startupRefreshScan=false;
+                if(!closed&&(prefs.Source=="local"||remote!=null))RefreshUsage(requestedScan);
+                return;
+            }
+            if(busy){refreshPending=true;scanPending|=scan;return;}busy=true;int version=revision;string selected=prefs.Source,range=prefs.Range,application=prefs.App,db=prefs.Database,home=prefs.CodexHome,view=prefs.UsageView;var remoteReader=remote;var priceOverrides=prefs.PriceOverrides;UsageSnapshot total=null;Dictionary<string,UsageSnapshot> available=null;DateTime observed=DateTime.Now;
             status.Text=selected=="local"?"更新本地日志…":"读取数据库…";
             try
             {
-                UsageSnapshot result=await Task.Run(()=>
+                UsageSnapshot result=await Task.Run(async ()=>
                 {
+                    if(selected=="local"||remoteReader!=null)await AwaitStartupUsage();
+                    if(closed||version!=revision)throw new OperationCanceledException();
                     ApiPrices.Configure(priceOverrides);
                     if(remoteReader==null)lock(usageGate){unionCache.Clear();exportedReader=null;exportedRecords=null;exportedVersion=-1;}
                     if(selected!="local"&&remoteReader==null)return UsageDatabase.Read(db,range,application,DateTime.Now);
-                    lock(usageGate)if(local==null||localRoot!=home){local=new LocalCodexUsage(home,Path.Combine(Program.DataFolder,"local-codex-cache.json.gz"));localRoot=home;scan=true;}
+                    lock(usageGate)
+                    {
+                        AdoptStartupUsage(home);
+                        if(local==null||localRoot!=home){local=new LocalCodexUsage(home,Path.Combine(Program.DataFolder,"local-codex-cache.json.gz"));localRoot=home;scan=true;startupScanAvailable=false;}
+                        else if(startupScanAvailable){scan=false;startupScanAvailable=false;}
+                    }
                     string localFailure=null;
                     // Selecting a range consumes the existing ledger. Only the timer,
                     // explicit refresh or a new source requests filesystem discovery.
