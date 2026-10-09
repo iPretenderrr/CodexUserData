@@ -148,7 +148,15 @@ namespace CodexUserData
                 Check(new FileInfo(file).Length==length,"same-size rotation fixture preserves modification time");
                 Check(Read(activity,file,start.AddSeconds(1)).ActiveTasks==1,"replacement is detected before another write changes its length");
                 File.AppendAllText(file,Event(start.AddSeconds(2),"task_complete","turn-b"));
-                var state=Read(activity,file,start.AddSeconds(2));Check(state.CompletedTasks==1&&state.ActiveTasks==0,"creation identity detects same-size timestamp-preserving replacement");
+                var state=Read(activity,file,start.AddSeconds(2));
+                // FileSystemWatcher may enqueue a duplicate after Scan drains its
+                // queue. Completion correctly waits for stable monitoring; allow
+                // the notification to settle without advancing the fixture clock.
+                var settle=Stopwatch.StartNew();int completions=state.CompletedTasks;
+                while(completions==0&&state.MonitoringUnavailable&&settle.ElapsedMilliseconds<1000)
+                {Thread.Sleep(10);state=activity.Scan(start.AddSeconds(2));completions+=state.CompletedTasks;}
+                Check(completions==1&&state.ActiveTasks==0,"creation identity detects same-size timestamp-preserving replacement");
+                Check(activity.Scan(start.AddSeconds(2)).CompletedTasks==0,"queued duplicate notifications do not replay a completed replacement");
                 DateTime later=start.AddDays(2);
                 File.AppendAllText(file,"{}\n");File.SetLastWriteTimeUtc(file,later);
                 state=Read(activity,file,later);Check(state.CompletedTasks==0,"old completion retained in an updated log is not replayed after a day");

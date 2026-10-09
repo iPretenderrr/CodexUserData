@@ -39,24 +39,16 @@ namespace CodexUserData
         private bool completionWaiting;
         private readonly ChoiceButton usageView;
         private readonly TextBlock remoteStatus;
-        private LocalCodexUsage local;
-        private LocalCodexUsage exportedReader;
-        private int exportedVersion=-1;
-        private List<LogCursor> exportedRecords;
+        private readonly LocalUsageSession usage;
         private readonly UsageUnionCache unionCache=new UsageUnionCache();
-        // Custom chart workers share usageGate, but never mutate the refresh cache.
+        // Custom chart workers share the local session, but never mutate the refresh cache.
         private readonly UsageUnionCache chartUnionCache=new UsageUnionCache();
         private bool refreshPending,scanPending;
         private Dictionary<string,UsageSnapshot> readyRanges;
         private DateTime rangesObserved;
         private int customRangeRevision,cacheCustomRangeRevision;
-        // LocalCodexUsage owns a mutable numeric ledger. Custom-range reads and the
-        // periodic scanner share this short gate so a selection never sees a half-updated list.
-        private readonly object usageGate=new object();
-        private readonly StartupUsagePreload startupUsage;
-        private bool startupScanAvailable;
         private bool startupRefreshWaiting,startupRefreshScan;
-        private string localRoot;
+        private bool preparingStartup;
         private readonly DispatcherTimer timer=new DispatcherTimer();
         private readonly DispatcherTimer paletteTimer=new DispatcherTimer{Interval=TimeSpan.FromHours(24)};
         private readonly CancellationTokenSource paletteCancellation=new CancellationTokenSource();
@@ -102,8 +94,8 @@ namespace CodexUserData
         internal WidgetWindow(Preferences preferences,bool isPreview):this(preferences,isPreview,null){}
         internal WidgetWindow(Preferences preferences,bool isPreview,StartupUsagePreload preload)
         {
-            startupUsage=preload;
-            Closed+=delegate{if(startupUsage!=null)startupUsage.Cancel();};
+            usage=new LocalUsageSession(Path.Combine(Program.DataFolder,"local-codex-cache.json.gz"),preload);
+            Closed+=delegate{usage.CancelStartup();};
             prefs=preferences;prefs.Validate();Theme.Apply(prefs);preview=isPreview;expandedRestoreHeight=Math.Max(480,prefs.Height);Title=Program.WindowTitle;Theme.InstallStyles(this);
             if(!preview)
             {
@@ -179,7 +171,7 @@ namespace CodexUserData
             var refresh=Theme.Button("","立即刷新 (F5)",32);refresh.Height=32;refresh.Padding=new Thickness(7);refresh.Content=Theme.Icon("refresh",Theme.Muted);refresh.Click+=delegate{RefreshData();};DockPanel.SetDock(refresh,Dock.Right);footRow.Children.Add(refresh);
             status=Theme.Text("准备读取数据",10,Theme.Muted);status.TextTrimming=TextTrimming.CharacterEllipsis;AutomationProperties.SetAutomationId(status,"RefreshStatus");footRow.Children.Add(status);
             SizeChanged+=delegate{Reflow();if(ready&&!preview&&!changingLayout&&WindowState==WindowState.Normal)AdaptToSize();};KeyDown+=delegate(object s,KeyEventArgs e){if(e.Key==Key.F5)RefreshData();};
-            Loaded+=delegate{ready=true;if(!preview)AdaptToSize();ClampToMonitor();Persist();if(!preview){timer.Interval=TimeSpan.FromSeconds(prefs.RefreshSeconds);timer.Start();quota.CompletionChanged+=UpdateCompletionViews;PreviewMouseMove+=delegate{quota.AcknowledgeCompletion();};quota.Start();EnsureActivity();RefreshData();if(prefs.BallMode)OpenBall();}};
+            Loaded+=delegate{ready=true;if(!preview)AdaptToSize();ClampToMonitor();Persist();if(!preview){timer.Interval=TimeSpan.FromSeconds(prefs.RefreshSeconds);timer.Start();quota.CompletionChanged+=UpdateCompletionViews;PreviewMouseMove+=delegate{quota.AcknowledgeCompletion();};quota.Start();EnsureActivity();RefreshData();if(prefs.BallMode&&!preparingStartup)OpenBall();}};
             timer.Tick+=delegate{RefreshData();};StateChanged+=delegate{if(WindowState==WindowState.Minimized&&prefs.MinimizeToTray){MinimizeWindow();return;}if(WindowState==WindowState.Normal){RestoreHistory();if(snapshot!=null)ApplySnapshot(snapshot);RefreshData();}};
             Loaded+=async delegate{if(!preview&&!closed){paletteTimer.Start();await RefreshPalette();}};
             paletteTimer.Tick+=async delegate{await RefreshPalette();};
@@ -298,25 +290,13 @@ namespace CodexUserData
                     }
                     else
                     {
-                        List<LogCursor> native=null;
-                        lock(usageGate)
+                        List<LogCursor> native=null;string localFailure=null;
+                        input=usage.Read(home,(reader,failure)=>
                         {
-                            cancel.ThrowIfCancellationRequested();
-                            AdoptStartupUsage(home);
-                            if(local==null||localRoot!=home)
-                            {
-                                var reader=new LocalCodexUsage(home,Path.Combine(Program.DataFolder,"local-codex-cache.json.gz"));reader.Update(null,()=>cancel.IsCancellationRequested);
-                                // Do not publish a new reader until its first scan succeeds;
-                                // otherwise a failed initial load could later look like zero usage.
-                                local=reader;localRoot=home;
-                            }
-                            if(!enabled||view=="local")input=local.GetMilestones(now,cancel);
-                            else
-                            {
-                                if(exportedReader!=local||exportedVersion!=local.DataVersion){exportedRecords=local.Export();exportedReader=local;exportedVersion=local.DataVersion;}
-                                native=exportedRecords;input=null;
-                            }
-                        }
+                            localFailure=failure;
+                            if(!enabled||view=="local")return reader.GetMilestones(now,cancel);
+                            native=reader==null?new List<LogCursor>():usage.Export(reader);return null;
+                        },()=>cancel.IsCancellationRequested||closed,enabled&&view!="local");
                         if(input==null)
                         {
                             if(milestoneUnionScope!=identity){milestoneUnion.Clear();milestoneUnionScope=identity;}
@@ -324,6 +304,7 @@ namespace CodexUserData
                             input=milestoneUnion.GetMilestones(native,state==null?new List<LogCursor>():state.Records,view,now,cancel);
                             if(state==null)sync="服务器尚未同步，当前历史可能不完整。";
                             else if(!state.Connected||state.Discovering||state.Records.Count==0)sync=state.Status;
+                            if(localFailure!=null)sync=String.Join("\n",new[]{localFailure,sync}.Where(s=>!String.IsNullOrWhiteSpace(s)));
                         }
                     }
                     cancel.ThrowIfCancellationRequested();var result=milestones.Get(input,identity,label,LocalCodexUsage.Unix(now),cancel);
@@ -368,22 +349,20 @@ namespace CodexUserData
                 if(selected=="local")await AwaitStartupUsage();
                 if(stopped())throw new OperationCanceledException();ApiPrices.Configure(prices);UsageSnapshot result;
                 if(selected!="local")result=UsageDatabase.Read(db,key,application,DateTime.Now);
-                else lock(usageGate)
+                else result=usage.Read(home,(reader,localFailure)=>
                 {
                     if(stopped())throw new OperationCanceledException();
-                    AdoptStartupUsage(home);
-                    if(local==null||localRoot!=home){var reader=new LocalCodexUsage(home,Path.Combine(Program.DataFolder,"local-codex-cache.json.gz"));reader.Update(null,stopped);if(stopped())throw new OperationCanceledException();local=reader;localRoot=home;}
-                    if(!remoteEnabled||view=="local")result=local.Snapshot(key,DateTime.Now);
-                    else
-                    {
-                        if(exportedReader!=local||exportedVersion!=local.DataVersion){exportedRecords=local.Export();exportedReader=local;exportedVersion=local.DataVersion;}var state=remoteReader==null?null:remoteReader.View;
-                        result=chartUnionCache.Get(exportedRecords??new List<LogCursor>(),state==null?new List<LogCursor>():state.Records,view,key,DateTime.Now,view=="remote"?"服务器 Codex":"Codex · 合计");
-                        // An unready server is not permission to relabel local usage
-                        // as remote. Keep cached data, and attach status on a copy.
-                        bool serverEmpty=state==null||!state.Records.Any(c=>c.Meta&&c.Events.Count>0);
-                        if(state==null||!state.Connected||state.Discovering||serverEmpty){result=result.Copy();result.Warning=String.Join("\n",new[]{result.Warning,state==null||String.IsNullOrWhiteSpace(state.Status)?"服务器尚未同步，远程用量暂不可用。":state.Status}.Where(s=>!String.IsNullOrWhiteSpace(s)));result.DataUnavailable=view=="remote"&&serverEmpty;}
-                    }
-                }
+                    if(!remoteEnabled||view=="local")return reader.Snapshot(key,DateTime.Now);
+                    var state=remoteReader==null?null:remoteReader.View;
+                    var native=reader==null?new List<LogCursor>():usage.Export(reader);
+                    var value=chartUnionCache.Get(native,state==null?new List<LogCursor>():state.Records,view,key,DateTime.Now,view=="remote"?"服务器 Codex":"Codex · 合计");
+                    // An unready server is not permission to relabel local usage
+                    // as remote. Keep cached data, and attach status on a copy.
+                    bool serverEmpty=state==null||!state.Records.Any(c=>c.Meta&&c.Events.Count>0);
+                    if(state==null||!state.Connected||state.Discovering||serverEmpty){value=value.Copy();value.Warning=String.Join("\n",new[]{value.Warning,state==null||String.IsNullOrWhiteSpace(state.Status)?"服务器尚未同步，远程用量暂不可用。":state.Status}.Where(s=>!String.IsNullOrWhiteSpace(s)));value.DataUnavailable=view=="remote"&&serverEmpty;}
+                    if(localFailure!=null){value=value.Copy();value.Warning=String.Join("\n",new[]{value.Warning,localFailure}.Where(s=>!String.IsNullOrWhiteSpace(s)));value.CoverageWarnings++;if(view=="combined"&&native.Count==0&&serverEmpty)value.DataUnavailable=true;}
+                    return value;
+                },stopped,remoteEnabled&&view!="local");
                 if(stopped())throw new OperationCanceledException();return result;
             },cancel);
         }
@@ -434,10 +413,38 @@ namespace CodexUserData
                 if(snapshot!=null)ApplySnapshot(snapshot);
             },delegate{RestoreHistory();Activate();Persist();if(ready!=null)ready();});
         }
+        internal async Task ShowStartupAsync()
+        {
+            preparingStartup=true;
+            // Keep the service-owning main window invisible when restoring a
+            // floating form, without changing the user's saved transparency.
+            if(prefs.BallMode)Opacity=0;
+            WindowInteraction.HoldReveal(this);Show();
+            try
+            {
+                await Dispatcher.InvokeAsync(delegate{},DispatcherPriority.ContextIdle);
+                if(closed)return;
+                if(prefs.BallMode)
+                {
+                    EnsureBall();UpdateBall();WindowInteraction.HoldReveal(ball);ball.Show();
+                    Hide();Opacity=prefs.Opacity;
+                    await Dispatcher.InvokeAsync(delegate{},DispatcherPriority.ContextIdle);
+                    await ball.WaitForPresentationAsync();
+                    // An IPC restore or a close may supersede this startup.
+                    if(!closed&&prefs.BallMode&&ball.IsVisible)WindowInteraction.ReleaseHeldReveal(ball);
+                }
+                else{Opacity=prefs.Opacity;WindowInteraction.ReleaseHeldReveal(this);}
+            }
+            finally{preparingStartup=false;}
+        }
+        private void EnsureBall()
+        {
+            if(ball==null){ball=new FloatingBall(()=>prefs,Persist,RestoreWindow,RequestClose);ball.PreviewMouseMove+=delegate{quota.AcknowledgeCompletion();};ball.SettingsRequested=()=>RestoreWindowThen(OpenSettings);ball.SetCompletionPending(quota.CompletionPending);if(Double.IsNaN(prefs.BallLeft)){ball.Left=Left+20;ball.Top=Top+20;}}
+        }
         private void OpenBall()
         {
             if(preview||closed)return;Persist();prefs.BallMode=true;
-            if(ball==null){ball=new FloatingBall(()=>prefs,Persist,RestoreWindow,RequestClose);ball.PreviewMouseMove+=delegate{quota.AcknowledgeCompletion();};ball.SettingsRequested=()=>RestoreWindowThen(OpenSettings);ball.SetCompletionPending(quota.CompletionPending);if(Double.IsNaN(prefs.BallLeft)){ball.Left=Left+20;ball.Top=Top+20;}}
+            EnsureBall();
             ball.CancelTransferMotion();if(historyWindow!=null)WindowInteraction.Close(historyWindow);if(coverageWindow!=null)WindowInteraction.Close(coverageWindow);WindowInteraction.ShowFrom(ball,this,UpdateBall,Persist);
         }
         private void UpdateBall()
@@ -538,15 +545,7 @@ namespace CodexUserData
             var styled=new StyledWindow{UseNativeFrame=true,Title="用量与额度趋势",Width=880,Height=850,MinWidth=340,MinHeight=420,Background=Theme.Background,Foreground=Theme.Ink,FontFamily=FontFamily,Owner=this,WindowStartupLocation=WindowStartupLocation.CenterOwner,ShowInTaskbar=false};
             styled.SetBody(layout,"用量与额度趋势","USAGE INSIGHTS",true);historyWindow=styled;historyWindow.Loaded+=delegate{if(historyWindow!=null)ClampWindow(historyWindow);};historyWindow.Closed+=delegate{if(modelSharePanel!=null)modelSharePanel.Dispose();modelSharePanel=null;if(milestoneCurvePanel!=null)milestoneCurvePanel.Dispose();milestoneCurvePanel=null;if(milestonePanel!=null)milestonePanel.Dispose();milestonePanel=null;ReleaseMilestoneReader();historyWindow=null;largeHistory=null;quotaHistoryPanel=null;};historyWindow.Show();
         }
-        private Task AwaitStartupUsage(){return startupUsage==null?Task.FromResult(0):startupUsage.Completion;}
-        // Only worker threads call this, with usageGate held. Charts and the
-        // first refresh share the preload instead of creating rival cache writers.
-        private void AdoptStartupUsage(string home)
-        {
-            if(startupUsage==null)return;
-            var prepared=startupUsage.Take(home);
-            if(prepared!=null){local=prepared;localRoot=home;startupScanAvailable=true;}
-        }
+        private Task AwaitStartupUsage(){return usage.StartupCompletion;}
         private void RefreshData(){RefreshUsage(true);}
         // Price updates reuse the parsed ledger and database query path; they do not force
         // a filesystem rescan, which keeps the feature cheap on low-performance devices.
@@ -557,11 +556,11 @@ namespace CodexUserData
             // Waiting for startup I/O is not an active database refresh. Keep
             // CC Switch usable if the source changes during a large local scan.
             // Coalesce timer ticks into one continuation using the latest prefs.
-            if(startupUsage!=null&&(!startupUsage.Completion.IsCompleted||startupRefreshWaiting)&&(prefs.Source=="local"||remote!=null))
+            if(usage.HasStartup&&(!usage.StartupCompletion.IsCompleted||startupRefreshWaiting)&&(prefs.Source=="local"||remote!=null))
             {
                 startupRefreshScan|=scan;if(startupRefreshWaiting)return;
                 startupRefreshWaiting=true;status.Text="正在读取本地日志…";
-                await startupUsage.Completion;
+                await usage.StartupCompletion;
                 startupRefreshWaiting=false;bool requestedScan=startupRefreshScan;startupRefreshScan=false;
                 if(!closed&&(prefs.Source=="local"||remote!=null))RefreshUsage(requestedScan);
                 return;
@@ -575,32 +574,28 @@ namespace CodexUserData
                     if(selected=="local"||remoteReader!=null)await AwaitStartupUsage();
                     if(closed||version!=revision)throw new OperationCanceledException();
                     ApiPrices.Configure(priceOverrides);
-                    if(remoteReader==null)lock(usageGate){unionCache.Clear();exportedReader=null;exportedRecords=null;exportedVersion=-1;}
+                    if(remoteReader==null){unionCache.Clear();usage.ClearExport();}
                     if(selected!="local"&&remoteReader==null)return UsageDatabase.Read(db,range,application,DateTime.Now);
-                    lock(usageGate)
-                    {
-                        AdoptStartupUsage(home);
-                        if(local==null||localRoot!=home){local=new LocalCodexUsage(home,Path.Combine(Program.DataFolder,"local-codex-cache.json.gz"));localRoot=home;scan=true;startupScanAvailable=false;}
-                        else if(startupScanAvailable){scan=false;startupScanAvailable=false;}
-                    }
                     string localFailure=null;
                     // Selecting a range consumes the existing ledger. Only the timer,
                     // explicit refresh or a new source requests filesystem discovery.
-                    try{if(scan)lock(usageGate)local.Update(message=>Dispatcher.BeginInvoke(new Action(()=>{if(!closed&&version==revision)status.Text=message;})),()=>closed);}
-                    catch(IOException){if(remoteReader==null)throw;localFailure="本机日志读取失败，保留上次数据。";}
-                    catch(UnauthorizedAccessException){if(remoteReader==null)throw;localFailure="本机日志没有读取权限，保留上次数据。";}
-                    if(remoteReader==null)lock(usageGate){observed=DateTime.Now;available=new[]{"today","week","month","all"}.ToDictionary(k=>k,k=>local.Snapshot(k,observed));return available[range];}
-                    lock(usageGate)if(exportedReader!=local||exportedVersion!=local.DataVersion){exportedRecords=local.Export();exportedReader=local;exportedVersion=local.DataVersion;}
-                    var localRecords=exportedRecords;var state=remoteReader.View;var now=DateTime.Now;
+                    var localRecords=usage.Refresh<List<LogCursor>>(home,scan,message=>Dispatcher.BeginInvoke(new Action(()=>{if(!closed&&version==revision)status.Text=message;})),()=>closed,remoteReader!=null,(reader,failure)=>
+                    {
+                        localFailure=failure;observed=DateTime.Now;
+                        if(remoteReader==null){available=new[]{"today","week","month","all"}.ToDictionary(k=>k,k=>reader.Snapshot(k,observed));return null;}
+                        return reader==null?new List<LogCursor>():usage.Export(reader);
+                    });
+                    if(remoteReader==null)return available[range];
+                    var state=remoteReader.View;var now=DateTime.Now;
                     observed=now;
                     total=unionCache.Get(localRecords,state.Records,"combined","today",now,"Codex · 合计");
-                    var records=view=="local"?localRecords:view=="remote"?state.Records:localRecords.Concat(state.Records).ToList();
+                    bool combinedEmpty=localRecords.Count==0&&state.Records.Count==0;
                     if(selected!="local")return UsageDatabase.Read(db,range,application,now);
                     available=new Dictionary<string,UsageSnapshot>();bool serverEmpty=!state.Records.Any(c=>c.Meta&&c.Events.Count>0);
                     foreach(string period in new[]{"today","week","month","all"})
                     {
                         var merged=unionCache.Get(localRecords,state.Records,view,period,now,view=="local"?"本机 Codex":view=="remote"?"服务器 Codex":"Codex · 合计");
-                        merged.DataUnavailable=view=="remote"&&serverEmpty||view=="local"&&localFailure!=null&&localRecords.Count==0||view=="combined"&&localFailure!=null&&records.Count==0;
+                        merged.DataUnavailable=view=="remote"&&serverEmpty||view=="local"&&localFailure!=null&&localRecords.Count==0||view=="combined"&&localFailure!=null&&combinedEmpty;
                         if(localFailure!=null){merged.Warning+="\n"+localFailure;merged.CoverageWarnings++;}
                         if(!state.Connected||state.Discovering||state.Records.Count==0){merged.Warning+="\n"+state.Status;merged.CoverageWarnings++;}
                         available[period]=merged;

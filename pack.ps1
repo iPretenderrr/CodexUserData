@@ -1,9 +1,11 @@
-﻿param([string]$Version='1.9.16',[switch]$FloatingOnly,[switch]$PeriodOnly,[switch]$MilestoneOnly,[switch]$ModelShareOnly,[switch]$ColorOnly,[switch]$PriceOnly,[switch]$SkipHtmlSmokeTest)
+﻿param([string]$Version='1.9.18',[switch]$FloatingOnly,[switch]$PeriodOnly,[switch]$MilestoneOnly,[switch]$ModelShareOnly,[switch]$ColorOnly,[switch]$PriceOnly,[switch]$SkipHtmlSmokeTest)
 # Keep this script UTF-8 with BOM: Windows PowerShell 5.1 must decode the Chinese allowlist paths correctly.
 $ErrorActionPreference='Stop'
 if($Version -notmatch '^\d+\.\d+\.\d+$'){throw 'Version must be major.minor.patch'}
 $root=[IO.Path]::GetFullPath($PSScriptRoot)
 & (Join-Path $root 'restore-dependencies.ps1')
+. (Join-Path $root 'build/Project.ps1')
+$project=Get-CodexProject -Root $root -ValidateSourceSet
 $framework=Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
 $package=Join-Path $root 'tools\obfuscar.2.2.50.nupkg'
 $packageHash='8790E1E36D613613311EC512129A6701C63576428692F20A95988A351FDC3187'
@@ -26,7 +28,7 @@ foreach($pair in @(@('@INPUT@',$inputDir),@('@OUTPUT@',$protected),@('@FRAMEWORK
 $configPath=Join-Path $run 'obfuscar.xml';[IO.File]::WriteAllText($configPath,$config)
 & (Join-Path $toolDir 'tools\Obfuscar.Console.exe') $configPath
 if($LASTEXITCODE -ne 0){throw 'Obfuscation failed; no ZIP was generated'}
-foreach($dll in Get-ChildItem -LiteralPath $inputDir -Filter '*.dll'){Copy-Item -LiteralPath $dll.FullName -Destination $protected -Force}
+foreach($runtime in $project.RuntimeFiles){Copy-Item -LiteralPath (Join-Path $inputDir ([IO.Path]::GetFileName($runtime))) -Destination $protected -Force}
 $binary=Join-Path $protected 'CodexUserData.exe';$map=Join-Path $protected 'Mapping.txt'
 if(-not(Test-Path -LiteralPath $binary) -or -not(Test-Path -LiteralPath $map)){throw 'Obfuscation output missing'}
 if((Get-FileHash -LiteralPath $binary).Hash -eq (Get-FileHash -LiteralPath (Join-Path $inputDir 'CodexUserData.exe')).Hash){throw 'Obfuscator did not transform the binary'}
@@ -58,8 +60,7 @@ if($LASTEXITCODE -ne 0){throw 'Protected HTML verification failed; install WebVi
 }
 # Product-only allowlist. Source, mapping files, PDBs, tools and private data cannot enter this archive.
 $files=[ordered]@{'CodexUserData.exe'=$binary;'CodexUserData.exe.config'=(Join-Path $root 'CodexUserData.exe.config');'README.md'=(Join-Path $root 'README-release.md');'THIRD-PARTY-NOTICES.txt'=(Join-Path $root 'THIRD-PARTY-NOTICES.txt')}
-foreach($name in @('Microsoft.Web.WebView2.Core.dll','Microsoft.Web.WebView2.Wpf.dll','WebView2Loader.dll')){$files[$name]=Join-Path $protected $name}
-foreach($dll in Get-ChildItem -LiteralPath (Join-Path $root 'vendor/ssh') -Filter '*.dll'){$files[$dll.Name]=Join-Path $protected $dll.Name}
+foreach($runtime in $project.RuntimeFiles){$name=[IO.Path]::GetFileName($runtime);$files[$name]=Join-Path $protected $name}
 $files['LICENSE']=Join-Path $root 'LICENSE'
 foreach($name in @('docs/HTML形态接口.md','docs/CodexUserData-使用说明书.html','docs/CodexUserData-使用说明书.pdf','examples/aurora/shape.json','examples/aurora/index.html','examples/aurora/codexuserdata.js')){$files[$name]=Join-Path $root $name}
 $dist=Join-Path $root 'dist';New-Item -ItemType Directory -Path $dist -Force | Out-Null

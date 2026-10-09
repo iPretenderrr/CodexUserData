@@ -183,6 +183,12 @@ namespace CodexUserData
         {
             if(IsClosed(window))return;var state=Visual(window);if(state.CompletingDialog)return;state.Revision++;state.Prepared=false;state.HoldingReveal=false;Reset(window,state);
         }
+        // Startup prepares the final saved form before showing any pixels. Keep
+        // the ordinary IsVisibleChanged handler from starting a second entrance.
+        internal static void HoldReveal(Window window)
+        {if(IsClosed(window))return;var state=Visual(window);state.HoldingReveal=true;PrepareReveal(window);}
+        internal static void ReleaseHeldReveal(Window window)
+        {if(IsClosed(window))return;var state=Visual(window);if(!state.HoldingReveal&&!state.Prepared)return;state.HoldingReveal=false;Reveal(window);}
         internal static void ResumeReveal(Window window)
         {
             // Repeated activation must not jump an in-progress entrance to full opacity.

@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
@@ -27,8 +28,10 @@ namespace CodexUserData
                 var app=new Application{ShutdownMode=ShutdownMode.OnExplicitShutdown};
                 if(args.Length>1&&args[1]=="--handoff-only")
                 {Handoff(app);Console.WriteLine("STARTUP_HANDOFF=main-window lifetime and opacity passed");return 0;}
+                if(args.Length>1&&args[1]=="--forms-only"){StartupForms();app.Shutdown();return 0;}
                 Preload();
                 if(args.Length>1&&args[1]=="--preload-only"){app.Shutdown();return 0;}
+                StartupForms();
                 int disabled=0;var preferences=new Preferences{StartupAnimationEnabled=false};
                 StartupSplash.Launch(preferences,()=>disabled++);Require(disabled==1,"Disabled splash did not hand off");
                 foreach(string style in new[]{"cinema","layers","matrix","prism"})RunFilm(style,false);
@@ -104,7 +107,7 @@ namespace CodexUserData
             refresh.Invoke(widget,null);
             Pump(()=>!(bool)Field(widget,"startupRefreshWaiting")&&!(bool)Field(widget,"busy")&&chart.IsCompleted,5);
             Require(chart.Status==TaskStatus.RanToCompletion&&chart.Result.TotalTokens==100,"Concurrent chart did not reuse preload");
-            Require(Object.ReferenceEquals(Field(widget,"local"),prepared),"Widget created a duplicate reader");
+            Require(Object.ReferenceEquals(Field(Field(widget,"usage"),"reader"),prepared),"Widget created a duplicate reader");
             Require(((UsageSnapshot)Field(widget,"snapshot")).TotalTokens==100,"First refresh expected 100, got "+((UsageSnapshot)Field(widget,"snapshot")).TotalTokens+"; ledger "+prepared.Snapshot("all",DateTime.Now).TotalTokens);
             refresh.Invoke(widget,null);Pump(()=>!(bool)Field(widget,"busy"),5);
             Require(((UsageSnapshot)Field(widget,"snapshot")).TotalTokens==200,"Next refresh missed appended usage");
@@ -119,19 +122,64 @@ namespace CodexUserData
             window.Title="CodexUserData startup fixture";window.WindowStartupLocation=WindowStartupLocation.Manual;
             window.Left=-20000;window.Top=-20000;window.Width=640;window.Height=360;window.ShowActivated=false;
         }
+        private static void StartupForms()
+        {
+            System.Threading.SynchronizationContext.SetSynchronizationContext(new DispatcherSynchronizationContext(Dispatcher.CurrentDispatcher));
+            string skin=Path.Combine(Program.DataFolder,"skins","startup-motion");Directory.CreateDirectory(skin);
+            File.WriteAllText(Path.Combine(skin,"shape.json"),"{\"apiVersion\":1,\"name\":\"Startup fixture\",\"entry\":\"index.html\",\"width\":240,\"height\":84}");
+            File.WriteAllText(Path.Combine(skin,"index.html"),"<!doctype html><html><body style='background:#182230;color:white'>Startup fixture</body></html>");
+            foreach(string mode in new[]{"main","orb","html","ipc","off"})
+            {
+                var p=new Preferences{Source="local",CodexHome=Path.Combine(Program.DataFolder,"codex"),LiveQuota=false,StartWithWindows=false,StartWithCodex=false,
+                    BallMode=mode!="main",BallStyle=mode=="html"?"html":"orb",CustomShape=Path.Combine("skins","startup-motion","shape.json"),
+                    Opacity=.73,BallOpacity=.65,OrbAnimation=mode=="off"?"off":"smooth"};
+                var widget=new WidgetWindow(p,true);HideFixture(widget);
+                widget.Loaded+=delegate{widget.Left=widget.Top=-20000;};
+                if(mode=="ipc")widget.Loaded+=delegate{PostMessage(new WindowInteropHelper(widget).Handle,Program.ShowMainMessage,IntPtr.Zero,IntPtr.Zero);};
+                FloatingBall ball=null;
+                if(p.BallMode)
+                {
+                    typeof(WidgetWindow).GetMethod("EnsureBall",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(widget,null);
+                    ball=(FloatingBall)Field(widget,"ball");HideFixture(ball);ball.Loaded+=delegate{ball.Left=ball.Top=-20000;};
+                }
+                var ready=widget.ShowStartupAsync();Pump(()=>ready.IsCompleted,5);ready.GetAwaiter().GetResult();Pump(()=>false,.3);
+                if(mode=="main"||mode=="ipc")
+                {Require(!p.BallMode&&widget.IsVisible&&widget.Opacity>.7&&((FrameworkElement)widget.Content).Opacity>.99,"Main remained invisible after "+mode);}
+                else
+                {Require(p.BallMode&&!widget.IsVisible&&ball.IsVisible&&ball.Opacity>.6&&((FrameworkElement)ball.Content).Opacity>.99,"Saved form did not enter: "+mode);}
+                Require(p.Opacity==.73&&p.BallOpacity==.65,"Startup changed saved opacity");widget.Close();
+                Console.WriteLine("STARTUP_FORM="+mode+" passed");
+            }
+            Theme.Apply(new Preferences());
+        }
         private static void RunFilm(string style,bool skip)
         {
             int finished=0;var splash=new StartupSplash(style,()=>finished++);HideFixture(splash);splash.Show();
             Require(splash.AllowsTransparency&&((SolidColorBrush)splash.Background).Color.A==0,"Opaque window corners");
             splash.UpdateLayout();var body=(Grid)splash.Content;var clip=body.Clip as RectangleGeometry;
             Require(clip!=null&&clip.RadiusX==24&&!clip.FillContains(new Point(1,1))&&clip.FillContains(new Point(320,180)),"Rounded browser clip missing");
+            var poster=body.Children.OfType<Image>().Single();
+            Require(splash.Opacity==1&&poster.Source!=null&&poster.Opacity==1,"Native poster missing before WebView initialization: "+style);
+            var skipButton=body.Children.OfType<Button>().Single();skipButton.ApplyTemplate();
+            var capsule=skipButton.Template.FindName("Chrome",skipButton) as Border;
+            Require(capsule!=null&&capsule.CornerRadius.TopLeft==16&&skipButton.ActualHeight==32,"Skip capsule template changed");
+            if(style=="cinema"&&!skip)
+            {
+                var visual=new DrawingVisual();using(var drawing=visual.RenderOpen())
+                {drawing.DrawRectangle(new LinearGradientBrush(Color.FromRgb(55,81,106),Color.FromRgb(19,23,34),0),null,new Rect(0,0,180,64));drawing.DrawRectangle(new VisualBrush(skipButton),null,new Rect(16,16,skipButton.ActualWidth,32));}
+                var preview=new RenderTargetBitmap(360,128,192,192,PixelFormats.Pbgra32);preview.Render(visual);
+                var png=new PngBitmapEncoder();png.Frames.Add(BitmapFrame.Create(preview));using(var file=File.Create(Path.Combine(Program.DataFolder,"skip-button.png")))png.Save(file);
+            }
             // An actual WPF render catches square black backing outside the clip.
             var pixels=new RenderTargetBitmap(640,360,96,96,PixelFormats.Pbgra32);pixels.Render(body);var corner=new byte[4];pixels.CopyPixels(new Int32Rect(0,0,1,1),corner,4,0);Require(corner[3]==0,"Splash corner pixels are opaque");
+            var rgb=new byte[640*360*4];pixels.CopyPixels(rgb,640*4,0);
+            int lit=0;for(int y=60;y<300;y++)for(int x=40;x<600;x++){int offset=(y*640+x)*4;if(Math.Max(rgb[offset],Math.Max(rgb[offset+1],rgb[offset+2]))>40)lit++;}
+            Require(lit>500,"First WPF render contains no visible film poster: "+style);
             if(skip)Require(PostMessage(new WindowInteropHelper(splash).Handle,Program.ShowMainMessage,IntPtr.Zero,IntPtr.Zero),"IPC send failed");
-            Pump(()=>finished>0,25);
+            Pump(()=>finished>0&&!splash.IsVisible,25);
             Require(finished==1,"Startup handoff count: "+style);
             Require(splash.CompletionReason==(skip?"second-launch":"ended"),style+" completion: "+splash.CompletionReason);
-            if(!skip)Require(splash.PlaybackStarted&&splash.BrandStarted,"Film or brand cue never played: "+style);
+            if(!skip)Require(splash.PlaybackStarted&&splash.FramePresented&&splash.BrandStarted,"Film, frame presentation or brand cue never played: "+style);
             else Require(!splash.BrandStarted,"Early skip fired brand cue");
             splash.Finish("late-callback");Require(finished==1,"Repeated completion: "+style);
             Console.WriteLine(style+": "+splash.CompletionReason);
@@ -146,18 +194,24 @@ namespace CodexUserData
         }
         private static void Handoff(Application app)
         {
-            Window main=null;StartupSplash splash=null;double handoffOpacity=0;
-            splash=new StartupSplash("cinema",delegate
+            Window main=null;StartupSplash splash=null;double handoffOpacity=0;int shown=0;
+            var prepared=new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            splash=new StartupSplash("cinema",async delegate
             {
                 handoffOpacity=splash.Opacity;
-                main=new Window{Width=160,Height=90};HideFixture(main);
+                main=new Window{Width=160,Height=90,Content=new Border{Background=Brushes.White}};HideFixture(main);
+                WindowInteraction.EnableMotion(main);WindowInteraction.HoldReveal(main);
                 app.MainWindow=main;app.ShutdownMode=ShutdownMode.OnMainWindowClose;main.Show();
-            });
+                await prepared.Task;WindowInteraction.ReleaseHeldReveal(main);
+            },false,()=>shown++);
             HideFixture(splash);splash.Show();Pump(()=>splash.PlaybackStarted,8);
             Require(splash.PlaybackStarted,"Handoff fixture did not start: "+splash.CompletionReason);Pump(()=>false,.25);
             splash.Finish("test-handoff");
             Pump(()=>main!=null,2);
             Require(handoffOpacity>.95,"Splash went transparent before handoff");
+            Require(splash.IsVisible&&splash.Opacity>.95&&(!Theme.MotionAllowed||((FrameworkElement)main.Content).Opacity==0),"Splash did not hold the prepared target");
+            prepared.SetResult(true);Pump(()=>shown>0,3);
+            Require(shown==1,"Final notification ran more than once");
             Require(main!=null&&main.IsVisible&&app.MainWindow==main&&app.Windows.Count==1,"Main-window lifetime not transferred");
             bool exited=false;var frame=new DispatcherFrame();
             app.Exit+=delegate{exited=true;frame.Continue=false;};

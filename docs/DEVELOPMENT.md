@@ -44,11 +44,32 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\verify-source.ps1
 
 Git 仓库备份代码、脚本、文档与示例，依赖可重新下载。仓库不备份个人账号、使用记录或软件设置。需要保留个人设置时，请另外私下备份 `%LOCALAPPDATA%\CodexUserData`，不要放入公开仓库。
 
-`.gitignore` 采用明确文件白名单。新增源码文件时，要同时检查内容、更新忽略白名单和 `src/build.ps1` 的源码列表，避免新代码遗漏。不要通过 `git add -f` 绕过个人数据排除规则。
+`.gitignore` 采用明确文件白名单。新增源码文件时，要同时检查内容、更新忽略白名单和 `build/Project.psd1` 的源码列表，避免新代码遗漏。不要通过 `git add -f` 绕过个人数据排除规则。
 
 提交前运行 `git status --short` 和 `git diff --cached`，确认只有预期代码与文档。不要提交 `.env`、用户设置、数据库、原始会话、浏览器缓存、真实截图、发布历史或混淆映射。手册截图使用演示数据；新增截图也需要脱敏。
 
 提交记录会包含作者名称和邮箱，请使用可公开署名以及 GitHub 提供的 noreply 邮箱。忽略规则不会清理已经提交的文件和历史，也不能阻止网站手动上传私人文件。
+
+## 代码边界与构建入口
+
+`build/Project.psd1` 按应用、用量与远程、额度、定价与模型、图表、窗口和主题分组列出生产代码；`build/Project.ps1` 统一解析源码、资源和运行依赖。编译及定向检查均复用它，不以目录通配符自动打包源码或 DLL。`pack.ps1` 仍单独维护产品文档和示例白名单。
+
+| 模块 | 职责与边界 |
+| --- | --- |
+| `Program` | 单实例、命令行、迁移入口；保留配置访问兼容入口 |
+| `Preferences` / `SettingsStore` | 设置模型和归一化 / 带备份的原子保存；构造与 Clone 不遍历 CLI 目录 |
+| `ApplicationStartup` | 后台加载缓存、发现 CLI、启动日志预读，再交接目标窗口；统一处理初始化失败和退出 |
+| `StartupSplash` / `StartupAssets` | 开屏呈现与交接 / 嵌入资源生命周期；不负责日志或设置写入 |
+| `LocalUsageSession` | 本地读取器、并发锁、预加载接管和数字记录导出；首页、图表及里程碑复用同一入口 |
+| `WidgetWindow` | 窗口和用户操作协调；本地查询交给 session，远程合并缓存仍与本地 reader 分开 |
+
+启动顺序为：取得单实例 → 必要的数据迁移与设置读取 → 原生首帧封面和后台准备并行 → 视频呈现通知后淡出封面 → 等准备完成后创建主窗口或上次的悬浮形态 → 交接后显示提示。封面只解码所选影片一张图，视频交接后释放；播放器与媒体流在开屏结束后释放，不引入常驻逐帧轮询。旧数据迁移仍先于设置读取，避免选择到未迁移的设置。
+
+`tools/verify-source.ps1 -ArchitectureOnly` 使用合成数据检查设置恢复、日志 session、来源隔离、远程降级、图表集成与周期缓存。`tools/verify-startup.ps1` 检查四套实际视频、首帧像素、圆角、跳过、IPC、窗口交接及预读取；它不扫描个人日志。新增源码后运行 `. ./build/Project.ps1; Get-CodexProject -Root (Get-Location).Path -ValidateSourceSet` 验证显式清单与源码集合一致。
+
+本地旧 `github-upload*` 导出目录和首次发布辅助文件已经归档到被忽略的 `private-backups/legacy-github-export-*`，仅供恢复；维护与提交使用根目录 Git 仓库。源文件暂保留现有路径，避免为移动文件引入额外构建和审查成本。
+
+保护后的程序另用 `tools/verify-startup.ps1 -ProtectedBinary <程序路径>` 检查嵌入资源、设置字段兼容和实际首帧交接，不依赖混淆后的内部类型名。
 
 ## 额度历史验证
 

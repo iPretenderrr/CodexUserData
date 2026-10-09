@@ -30,9 +30,9 @@
       let started = false;
       let brandSent = false;
       let terminal = false;
-      let preparingFrame = false;
+      let presented = false;
+      let presenting = false;
       let frameCallback;
-      let frameTimer;
       let presentationFrame;
       let brandTimer;
 
@@ -41,7 +41,6 @@
       }
 
       function clearFrameWait() {
-        window.clearTimeout(frameTimer);
         window.cancelAnimationFrame(presentationFrame);
         if (frameCallback !== undefined && video.cancelVideoFrameCallback) {
           video.cancelVideoFrameCallback(frameCallback);
@@ -61,7 +60,7 @@
       function playOnce() {
         if (!ready || !playRequested || playAttempted || terminal) return;
         playAttempted = true;
-        // The host reveals its window before sending play; preloading stays paused.
+        // The host already displays a native poster while this video initializes.
         try {
           const playback = video.play();
           if (playback && playback.catch) playback.catch(() => finish('error'));
@@ -96,35 +95,50 @@
       function markReady() {
         if (ready || terminal || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
         ready = true;
-        clearFrameWait();
         post('ready');
         playOnce();
       }
 
-      function prepareFirstFrame() {
-        if (preparingFrame || ready || terminal || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
-        preparingFrame = true;
-        // loadeddata guarantees a decoded current frame. A paused video may never
-        // invoke rVFC, so compositor ticks and a bounded fallback also release ready.
-        if (video.requestVideoFrameCallback) {
-          frameCallback = video.requestVideoFrameCallback(markReady);
-        }
+      function revealPresentedFrame(mediaTime) {
+        if (terminal || presented || presenting || video.paused) return;
+        // Cinema begins with intentional near-black frames. Match its native
+        // poster at the first lit frame; retain the later editorial dark cuts.
+        if (mediaTime < (style === 'cinema' ? 0.2 : 0)) return;
+        presenting = true;
         presentationFrame = window.requestAnimationFrame(() => {
-          presentationFrame = window.requestAnimationFrame(markReady);
+          presentationFrame = window.requestAnimationFrame(() => {
+            if (terminal) return;
+            presented = true;
+            post('presented');
+          });
         });
-        // WebView can throttle animation callbacks while its WPF control is hidden.
-        frameTimer = window.setTimeout(markReady, 120);
       }
 
-      video.addEventListener('loadeddata', prepareFirstFrame);
-      video.addEventListener('canplay', prepareFirstFrame);
+      function waitForPresentation() {
+        if (terminal || presented || presenting || frameCallback !== undefined) return;
+        if (!video.requestVideoFrameCallback) return;
+        frameCallback = video.requestVideoFrameCallback((_, metadata) => {
+          frameCallback = undefined;
+          revealPresentedFrame(metadata.mediaTime);
+          if (!presenting) waitForPresentation();
+        });
+      }
+
+      video.addEventListener('loadeddata', markReady);
+      video.addEventListener('canplay', markReady);
       video.addEventListener('playing', () => {
         if (terminal) return;
         if (!started) {
           started = true;
           post('started');
         }
+        waitForPresentation();
         armBrandCheck();
+      });
+      // Compatibility for an older runtime without rVFC: only a playing video's
+      // timeupdate plus compositor ticks may retire the poster, never a timer.
+      video.addEventListener('timeupdate', () => {
+        if (started && !video.requestVideoFrameCallback) revealPresentedFrame(video.currentTime);
       });
       // Event-driven checks follow stalls/seeks with no continuous frame loop.
       video.addEventListener('timeupdate', checkBrand);
@@ -142,6 +156,7 @@
       });
       if (bridge) {
         bridge.addEventListener('message', event => {
+          if (event.data && event.data.type === 'stop') { finish('skip'); return; }
           if (!event.data || event.data.type !== 'play' || terminal) return;
           playRequested = true;
           playOnce();
@@ -151,6 +166,7 @@
       // Only this whitelisted clip is requested. Native decoding avoids a canvas
       // redraw loop and keeps startup work bounded on slower devices.
       video.muted = true;
+      video.defaultPlaybackRate = video.playbackRate = 1.25;
       video.src = style + '.webm';
       video.load();
     })();

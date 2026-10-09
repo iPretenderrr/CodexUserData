@@ -295,6 +295,9 @@ namespace CodexUserData
             if(draft.Source=="local"&&!draft.Remote.Enabled&&!Directory.Exists(Path.Combine(draft.CodexHome,"sessions"))&&!Directory.Exists(Path.Combine(draft.CodexHome,"archived_sessions"))){SelectPage("data");error.Text="这个目录中未找到 sessions 或 archived_sessions。";return;}
             if(draft.Source=="ccswitch"&&!File.Exists(draft.Database)){SelectPage("data");error.Text="找不到 CC Switch 数据库文件。";return;}
             if(draft.BallStyle=="html")try{ShapeManifest.Read(ShapeManifest.Resolve(draft.CustomShape));}catch(Exception){SelectPage("floating");error.Text="请先导入有效的 HTML 形态，或选择内置形态。";return;}
+            // Explicit commit retains automatic CLI fallback, using startup's
+            // cached discovery; routine settings clones never enumerate folders.
+            draft.QuotaCli=ApplicationStartup.ResolveQuotaCli(draft.QuotaCli);
             draft.RefreshSeconds=seconds;draft.Metrics=selected;draft.Validate();
             // Commit external settings only when the accepted close actually completes.
             // Closing the owner during the animation must not apply a half-saved draft.

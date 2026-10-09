@@ -120,12 +120,15 @@ Console.WriteLine("PCM load and cancelled lifecycle passed; no playback requeste
     for (const [style, cue] of process.argv.includes('--events-only') ? [] : Object.entries(cues)) {
       const context = await open(style);
       await wait(context.page, 'ready');
+      assert.equal(await context.page.evaluate(() => document.querySelector('video').playbackRate), 1.25, 'Shipped playback speed');
       await context.page.evaluate(() => { window.__play(); window.__play(); });
       await wait(context.page, 'brand', 12000);
       await wait(context.page, 'ended', 10000);
       await context.page.evaluate(() => { window.__play(); document.querySelector('video').dispatchEvent(new Event('timeupdate')); });
       const messages = await close(context);
-      assert.deepEqual(messages.map(message => message.type), ['ready', 'started', 'brand', 'ended']);
+      assert.deepEqual(messages.map(message => message.type), ['ready', 'started', 'presented', 'brand', 'ended']);
+      const presented = messages.find(message => message.type === 'presented').mediaTime;
+      assert.ok(presented >= (style === 'cinema' ? 0.2 : 0), 'Poster retired before a visible frame');
       const fired = messages.find(message => message.type === 'brand').mediaTime;
       assert.ok(fired >= cue && fired < cue + 0.35, `${style} cue drift: ${fired - cue}`);
       reports.push({ style, cue, fired, delay: +(fired - cue).toFixed(4) });
@@ -167,7 +170,8 @@ Console.WriteLine("PCM load and cancelled lifecycle passed; no playback requeste
       }, { terminal, cue: cues.matrix });
       await new Promise(resolve => setTimeout(resolve, 300));
       const messages = await close(context);
-      assert.deepEqual(messages.map(message => message.type), ['ready', 'started', terminal]);
+      assert.deepEqual(messages.filter(message => message.type !== 'presented').map(message => message.type), ['ready', 'started', terminal]);
+      assert.equal(messages.at(-1).type, terminal, 'No presentation callback after termination');
       reports.push({ case: `early-${terminal}-suppresses-brand`, passed: true });
     }
     corrupt = true;
